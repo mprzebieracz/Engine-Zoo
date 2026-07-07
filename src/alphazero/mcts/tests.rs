@@ -1,5 +1,4 @@
 use super::*;
-use crate::alphazero::evaluator::UniformEvaluator;
 use crate::games::Connect4;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -148,6 +147,23 @@ impl Game for TerminalGame {
 
     fn format_action(&self, action: Action) -> String {
         action.to_string()
+    }
+}
+
+/// Uniform policy, zero value: MCTS degenerates to a plain PUCT tree search.
+struct UniformEvaluator;
+
+impl Evaluator for UniformEvaluator {
+    fn evaluate(&mut self, batch: &EvalBatch) -> Vec<Evaluation> {
+        (0..batch.len())
+            .map(|i| {
+                let n = (batch.offsets[i + 1] - batch.offsets[i]) as usize;
+                Evaluation {
+                    logits: vec![0.0; n],
+                    value: 0.0,
+                }
+            })
+            .collect()
     }
 }
 
