@@ -74,7 +74,7 @@ impl ReplayBuffer {
 
     /// Samples up to `batch_size` distinct transitions and densifies them into
     /// (states [b, state_size], policies [b, action_size], rewards [b]) CPU
-    /// tensors. Returns fewer than `batch_size` rows if the buffer is small.
+    /// tensors. Returns `None` if the buffer is empty; otherwise `b = min(batch_size, len)`.
     pub fn sample(&self, batch_size: usize) -> Option<(Tensor, Tensor, Tensor)> {
         let inner = self.inner.read().unwrap();
         let n = inner.len;
