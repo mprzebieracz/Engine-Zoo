@@ -83,7 +83,7 @@ impl RunDir {
             .max_by_key(|(idx, _)| *idx)
     }
 
-    /// Appends one JSON record (with a timestamp) to metrics.jsonl.
+    /// Appends one JSON record (with a timestamp) to `metrics.jsonl`.
     pub fn log_metrics(&self, mut record: serde_json::Value) -> Result<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?

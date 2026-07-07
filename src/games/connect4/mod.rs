@@ -63,6 +63,18 @@ pub struct Connect4 {
 }
 
 impl Connect4 {
+    pub fn from_moves(moves: &[Action]) -> anyhow::Result<Self> {
+        let mut game = Connect4::default();
+        for &action in moves {
+            anyhow::ensure!(
+                game.parse_move(&action.to_string()).is_some(),
+                "illegal connect4 move {action}"
+            );
+            game.step(action);
+        }
+        Ok(game)
+    }
+
     /// 1 if the first player (X) is to move, -1 otherwise.
     pub fn current_player(&self) -> i8 {
         if self.ply.is_multiple_of(2) {

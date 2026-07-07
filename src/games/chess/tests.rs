@@ -28,6 +28,13 @@ fn startpos_has_twenty_moves() {
 }
 
 #[test]
+fn public_fen_loader_restores_clocks() {
+    let g = ChessGame::from_fen("8/8/8/8/8/8/8/K6k b - - 17 23").unwrap();
+    assert_eq!(g.ply, 45);
+    assert_eq!(g.halfmove_clock, 17);
+}
+
+#[test]
 fn action_roundtrip_over_random_games() {
     use rand::prelude::*;
     let mut rng = StdRng::seed_from_u64(7);

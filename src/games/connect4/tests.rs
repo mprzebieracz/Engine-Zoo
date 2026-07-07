@@ -91,6 +91,13 @@ fn startpos_has_seven_moves() {
 }
 
 #[test]
+fn loads_position_from_move_list() {
+    let g = Connect4::from_moves(&[3, 3, 4]).unwrap();
+    assert_eq!(g.legal_actions().count(), COLS);
+    assert_eq!(g.current_player(), -1);
+}
+
+#[test]
 fn vertical_win_reward_convention() {
     let mut g = Connect4::default();
     for a in [0u32, 1, 0, 1, 0, 1, 0] {

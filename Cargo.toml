@@ -6,6 +6,7 @@ description = "AlphaZero-style engines for board games (Connect4, Chess) in Rust
 
 [dependencies]
 anyhow = "1"
+axum = "0.8.9"
 chess = "3.2"
 clap = { version = "4", features = ["derive"] }
 rand = "0.9"
@@ -13,6 +14,7 @@ rand_distr = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tch = "0.20"
+tokio = { version = "1.52.3", features = ["full"] }
 
 [profile.release]
 lto = "thin"

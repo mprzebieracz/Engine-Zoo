@@ -47,7 +47,11 @@ pub fn self_play<G: Game>(batcher: &Batcher, replay: &ReplayBuffer, cfg: &SelfPl
     });
 }
 
-fn play_game<G: Game>(mcts: &mut Mcts<BatcherClient>, replay: &ReplayBuffer, cfg: &SelfPlayConfig) {
+fn play_game<G: Game>(
+    mcts: &mut Mcts<BatcherClient>,
+    replay: &ReplayBuffer,
+    cfg: &SelfPlayConfig,
+) {
     let mut game = G::default();
     let mut trajectory: Vec<Transition> = Vec::new();
     let mut rng = rand::rng();

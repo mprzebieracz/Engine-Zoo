@@ -7,8 +7,9 @@ fn main() {
     });
     println!("cargo:rerun-if-env-changed=LIBTORCH");
 
-    // Make the produced binaries runnable without LD_LIBRARY_PATH.
-    println!("cargo:rustc-link-arg-bins=-Wl,-rpath,{libtorch}/lib");
+    let rpath = format!("-Wl,-rpath,{libtorch}/lib");
+    // Test harnesses and bins: runnable without LD_LIBRARY_PATH.
+    println!("cargo:rustc-link-arg={rpath}");
     // Force a DT_NEEDED entry for libtorch.so (whose own deps pull in
     // libtorch_cuda.so): with the default --as-needed it gets dropped because
     // no symbol is referenced directly, and Cuda::is_available() then reports

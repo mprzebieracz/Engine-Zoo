@@ -83,6 +83,48 @@ impl ChessGame {
         &self.board
     }
 
+    pub fn from_fen(fen: &str) -> anyhow::Result<Self> {
+        let board = Board::from_str(fen).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let parts: Vec<_> = fen.split_whitespace().collect();
+        let halfmove_clock = parts
+            .get(4)
+            .map_or(Ok(0), |s| s.parse::<u16>())
+            .unwrap_or(0);
+        let fullmove = parts
+            .get(5)
+            .map_or(Ok(1), |s| s.parse::<u16>())
+            .unwrap_or(1)
+            .max(1);
+        let ply = (fullmove - 1) * 2
+            + if board.side_to_move() == Color::Black {
+                1
+            }
+            else {
+                0
+            };
+        let status = match board.status() {
+            BoardStatus::Ongoing => {
+                if halfmove_clock >= 100 {
+                    Status::DrawFiftyMoveRule
+                }
+                else {
+                    Status::Ongoing
+                }
+            }
+            BoardStatus::Checkmate => Status::Checkmate,
+            BoardStatus::Stalemate => Status::Stalemate,
+        };
+        let mut game = ChessGame {
+            board,
+            ply,
+            status,
+            halfmove_clock,
+            position_counts: HashMap::with_capacity(16),
+        };
+        game.record_position();
+        Ok(game)
+    }
+
     fn record_position(&mut self) {
         let count = self
             .position_counts
