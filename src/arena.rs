@@ -31,10 +31,10 @@ pub fn evaluate<G: Game>(
     let mut score = 0.0;
     for i in 0..cfg.games {
         if i.is_multiple_of(2) {
-            score += play_single_game::<G>(candidate, baseline, cfg);
+            score += play_single_game::<G, _, _>(candidate, baseline, cfg);
         }
         else {
-            score += 1.0 - play_single_game::<G>(baseline, candidate, cfg);
+            score += 1.0 - play_single_game::<G, _, _>(baseline, candidate, cfg);
         }
         println!(
             "arena: {}/{} games, candidate score {score:.1}",
@@ -46,22 +46,16 @@ pub fn evaluate<G: Game>(
 }
 
 /// Plays one game; returns the first player's score (1 / 0.5 / 0).
-fn play_single_game<'a, G: Game>(
-    first: &'a mut dyn Agent<G>,
-    second: &'a mut dyn Agent<G>,
-    cfg: &ArenaConfig,
-) -> f32 {
+fn play_single_game<G, A, B>(first: &mut A, second: &mut B, cfg: &ArenaConfig) -> f32
+where
+    G: Game,
+    A: Agent<G>,
+    B: Agent<G>,
+{
     let mut game = G::default();
     let mut move_idx = 0usize;
 
     while !game.is_terminal() && move_idx < cfg.max_moves {
-        let agent = if move_idx.is_multiple_of(2) {
-            &mut *first
-        }
-        else {
-            &mut *second
-        };
-
         let mode = if move_idx < cfg.opening_moves {
             PolicyMode::Explore
         }
@@ -69,7 +63,12 @@ fn play_single_game<'a, G: Game>(
             PolicyMode::Deterministic
         };
 
-        let action = agent.act_with_mode(&game, mode);
+        let action = if move_idx.is_multiple_of(2) {
+            first.act_with_mode(&game, mode)
+        }
+        else {
+            second.act_with_mode(&game, mode)
+        };
 
         game.step(action);
         move_idx += 1;

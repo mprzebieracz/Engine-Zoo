@@ -1,5 +1,5 @@
 use crate::agent::{Agent, PolicyMode};
-use crate::alphazero::{Batcher, Mcts, MctsConfig, NetConfig};
+use crate::alphazero::{Batcher, Mcts, MctsConfig, MctsVariant, NetConfig};
 use crate::game::{Action, Game};
 use anyhow::{Context, Result};
 use std::io::Write;
@@ -91,8 +91,9 @@ impl AlphaZeroAgent {
 
 impl<G: Game> Agent<G> for AlphaZeroAgent {
     fn act_with_mode(&mut self, game: &G, mode: PolicyMode) -> Action {
-        let result = self.mcts.search(game);
-        if mode == PolicyMode::Explore {
+        let variant = self.mcts.config().variant;
+        let result = self.mcts.search_with_mode(game, mode);
+        if matches!(variant, MctsVariant::Puct) && mode == PolicyMode::Explore {
             result.sample_action(&mut rand::rng())
         }
         else {
@@ -103,7 +104,7 @@ impl<G: Game> Agent<G> for AlphaZeroAgent {
 
 pub enum PlayerAgent {
     Human(HumanAgent),
-    AlphaZero(AlphaZeroAgent),
+    AlphaZero(Box<AlphaZeroAgent>),
 }
 
 impl<G: Game> Agent<G> for PlayerAgent {

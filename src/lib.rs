@@ -9,4 +9,4 @@ pub mod games;
 pub mod players;
 pub mod position;
 pub mod proxy;
-pub mod session;
+pub mod visualization;

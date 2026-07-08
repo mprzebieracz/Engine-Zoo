@@ -93,6 +93,10 @@ impl ChessGame {
         self.pos
     }
 
+    pub fn san_for_action(&self, action: Action) -> String {
+        self.pos.san_for_action(action)
+    }
+
     pub fn repetitions_before_current(&self, hash: u64) -> u8 {
         let count = self.position_counts.get(&hash).copied().unwrap_or(0);
         if hash == self.pos.hash() {
@@ -194,6 +198,94 @@ impl ChessPosition {
         self.status = Status::DrawRepetition;
     }
 
+    pub fn san_for_action(&self, action: Action) -> String {
+        let mv = decode_move(action);
+        if !self.board.legal(mv) {
+            return mv.to_string();
+        }
+        let Some(piece) = self.board.piece_on(mv.get_source())
+        else {
+            return mv.to_string();
+        };
+
+        if piece == Piece::King {
+            let from_file = mv.get_source().get_file().to_index();
+            let to_file = mv.get_dest().get_file().to_index();
+            if from_file == 4 && to_file == 6 {
+                return self.san_suffix("O-O", mv);
+            }
+            if from_file == 4 && to_file == 2 {
+                return self.san_suffix("O-O-O", mv);
+            }
+        }
+
+        let capture = self.board.piece_on(mv.get_dest()).is_some()
+            || (piece == Piece::Pawn && self.board.en_passant() == Some(mv.get_dest()));
+        let mut san = String::new();
+        if piece == Piece::Pawn {
+            if capture {
+                san.push(file_char(mv.get_source()));
+            }
+        }
+        else {
+            san.push(piece_char(piece));
+            san.push_str(&self.disambiguation(piece, mv));
+        }
+        if capture {
+            san.push('x');
+        }
+        san.push_str(&square_name(mv.get_dest()));
+        if let Some(promo) = mv.get_promotion() {
+            san.push('=');
+            san.push(piece_char(promo));
+        }
+        self.san_suffix(&san, mv)
+    }
+
+    fn disambiguation(&self, piece: Piece, mv: ChessMove) -> String {
+        let same_target: Vec<_> = MoveGen::new_legal(&self.board)
+            .filter(|&other| {
+                other != mv
+                    && other.get_dest() == mv.get_dest()
+                    && self.board.piece_on(other.get_source()) == Some(piece)
+            })
+            .collect();
+        if same_target.is_empty() {
+            return String::new();
+        }
+        let source = mv.get_source();
+        let same_file = same_target
+            .iter()
+            .any(|other| other.get_source().get_file() == source.get_file());
+        let same_rank = same_target
+            .iter()
+            .any(|other| other.get_source().get_rank() == source.get_rank());
+        if !same_file {
+            file_char(source).to_string()
+        }
+        else if !same_rank {
+            rank_char(source).to_string()
+        }
+        else {
+            format!("{}{}", file_char(source), rank_char(source))
+        }
+    }
+
+    fn san_suffix(&self, base: &str, mv: ChessMove) -> String {
+        let mut san = base.to_owned();
+        match self.board.make_move_new(mv).status() {
+            BoardStatus::Checkmate => san.push('#'),
+            BoardStatus::Ongoing => {
+                let moved = self.board.make_move_new(mv);
+                if moved.checkers().popcnt() > 0 {
+                    san.push('+');
+                }
+            }
+            BoardStatus::Stalemate => {}
+        }
+        san
+    }
+
     fn step_without_repetition(&mut self, action: Action) -> bool {
         let mv = decode_move(action);
         debug_assert!(self.board.legal(mv), "illegal move {mv} in {}", self.board);
@@ -234,6 +326,29 @@ impl ChessPosition {
         }
         irreversible
     }
+}
+
+fn piece_char(piece: Piece) -> char {
+    match piece {
+        Piece::Knight => 'N',
+        Piece::Bishop => 'B',
+        Piece::Rook => 'R',
+        Piece::Queen => 'Q',
+        Piece::King => 'K',
+        Piece::Pawn => unreachable!("pawns have no SAN piece letter"),
+    }
+}
+
+fn file_char(square: Square) -> char {
+    (b'a' + square.get_file().to_index() as u8) as char
+}
+
+fn rank_char(square: Square) -> char {
+    (b'1' + square.get_rank().to_index() as u8) as char
+}
+
+fn square_name(square: Square) -> String {
+    format!("{}{}", file_char(square), rank_char(square))
 }
 
 impl Default for ChessPosition {

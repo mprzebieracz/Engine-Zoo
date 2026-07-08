@@ -3,7 +3,6 @@ use crate::game::Game;
 use crate::games::{ChessGame, Connect4};
 use crate::players::{AgentSpec, AlphaZeroAgent, HumanAgent, PlayerAgent};
 use crate::proxy::{open_existing_run, resolve_model, run_dir, serve, GameKind, ServeConfig};
-use crate::session::SessionConfig;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
@@ -59,6 +58,12 @@ struct ServeArgs {
     bind: SocketAddr,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PlayConfig {
+    max_moves: usize,
+    opening_moves: usize,
+}
+
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -101,7 +106,7 @@ fn run_game<G: Game>(args: PlayArgs) -> Result<()> {
         args.wait_for_count,
     )?;
     let mut game = G::default();
-    let cfg = SessionConfig {
+    let cfg = PlayConfig {
         max_moves: args.max_moves,
         opening_moves: args.opening_moves,
     };
@@ -147,14 +152,14 @@ fn build_agent<G: Game>(
         AgentSpec::AlphaZero { model } => {
             let (_, cfg) = open_existing_run::<G>(run_dir)?;
             let weights = resolve_model(run_dir, model);
-            Ok(PlayerAgent::AlphaZero(AlphaZeroAgent::new(
+            Ok(PlayerAgent::AlphaZero(Box::new(AlphaZeroAgent::new(
                 &cfg.net,
                 &weights,
                 device,
                 simulations,
                 wait_for_count,
                 Duration::from_millis(1),
-            )?))
+            )?)))
         }
     }
 }

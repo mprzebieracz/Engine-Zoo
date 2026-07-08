@@ -1,9 +1,31 @@
+use super::core::MctsKind;
 use super::*;
 use crate::games::Connect4;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+
+impl<E: Evaluator> Mcts<E> {
+    fn seed_rng(&mut self, seed: u64) {
+        match &mut self.inner {
+            MctsKind::Puct(core) => core.rng = SmallRng::seed_from_u64(seed),
+            MctsKind::Gumbel(core) => core.rng = SmallRng::seed_from_u64(seed),
+        }
+    }
+
+    fn gumbel_root_actions(&self) -> Vec<Action> {
+        match &self.inner {
+            MctsKind::Puct(_) => Vec::new(),
+            MctsKind::Gumbel(core) => core
+                .variant
+                .root_actions
+                .iter()
+                .map(|a| core.nodes[a.node as usize].action_from_parent)
+                .collect(),
+        }
+    }
+}
 
 #[derive(Clone, Default)]
 struct ImmediateOutcomeGame {
@@ -415,7 +437,7 @@ fn policy_is_a_distribution() {
 }
 
 #[test]
-fn gumbel_policy_stays_on_sampled_root_actions() {
+fn gumbel_selected_action_stays_on_sampled_root_actions() {
     let game = Connect4::default();
     let mut mcts = Mcts::new(
         UniformEvaluator,
@@ -426,19 +448,21 @@ fn gumbel_policy_stays_on_sampled_root_actions() {
             ..Default::default()
         },
     );
-    mcts.rng = SmallRng::seed_from_u64(11);
+    mcts.seed_rng(11);
 
     let result = mcts.search(&game);
     let sum: f32 = result.policy.iter().sum();
-    let nonzero = result.policy.iter().filter(|&&p| p > 0.0).count();
+    let sampled = mcts.gumbel_root_actions();
+    let selected_was_sampled = sampled.contains(&result.best_action());
 
     assert!((sum - 1.0).abs() < 1e-4);
-    assert!((1..=3).contains(&nonzero), "{:?}", result.policy);
+    assert_eq!(sampled.len(), 3);
+    assert!(selected_was_sampled, "{:?}", result.policy);
     assert!(result.policy.iter().all(|&p| p >= 0.0));
 }
 
 #[test]
-fn gumbel_zero_sampled_actions_still_searches_one_root_action() {
+fn gumbel_zero_sampled_actions_still_selects_one_root_action() {
     let game = Connect4::default();
     let mut mcts = Mcts::new(
         UniformEvaluator,
@@ -449,12 +473,15 @@ fn gumbel_zero_sampled_actions_still_searches_one_root_action() {
             ..Default::default()
         },
     );
-    mcts.rng = SmallRng::seed_from_u64(7);
+    mcts.seed_rng(7);
 
     let result = mcts.search(&game);
+    let sampled = mcts.gumbel_root_actions();
 
-    assert_eq!(result.policy.iter().filter(|&&p| p > 0.0).count(), 1);
+    assert_eq!(sampled.len(), 1);
+    assert_eq!(result.best_action(), sampled[0]);
     assert!((result.policy.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+    assert!(result.policy.iter().all(|&p| p >= 0.0));
 }
 
 #[test]
@@ -469,7 +496,7 @@ fn gumbel_with_all_root_actions_finds_forced_terminal_win() {
             ..Default::default()
         },
     );
-    mcts.rng = SmallRng::seed_from_u64(3);
+    mcts.seed_rng(3);
 
     let result = mcts.search(&ImmediateOutcomeGame::default());
 

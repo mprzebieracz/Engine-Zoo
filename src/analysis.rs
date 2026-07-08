@@ -1,3 +1,4 @@
+use crate::agent::PolicyMode;
 use crate::alphazero::{Batcher, EvalBatch, Evaluator, Mcts, MctsConfig, NetConfig};
 use crate::game::{Action, Game};
 use crate::position::PositionGame;
@@ -90,7 +91,7 @@ fn analyze_net<G: Game>(game: G, mut evaluator: impl Evaluator) -> Result<Analys
 }
 
 fn analyze_mcts<G: Game, E: Evaluator>(game: G, mcts: &mut Mcts<E>) -> Result<Analysis> {
-    let result = mcts.search(&game);
+    let result = mcts.search_with_mode(&game, PolicyMode::Deterministic);
     let legal: Vec<_> = game.legal_actions().collect();
     let policy = legal
         .into_iter()

@@ -1,5 +1,5 @@
 use super::batcher::{Batcher, BatcherClient};
-use super::mcts::{EvalTable, EvalTableStats, Mcts, MctsConfig};
+use super::mcts::{EvalTable, EvalTableStats, Mcts, MctsConfig, MctsVariant, SearchResult};
 use super::replay::{ReplayBuffer, Transition};
 use crate::game::{Action, Game};
 use crate::games::chess::ChessGame;
@@ -115,7 +115,7 @@ pub fn self_play<G: Game>(
             scope.spawn(move || {
                 let mut mcts = Mcts::new(batcher.client(), cfg.mcts);
                 while finished.load(Ordering::Relaxed) < cfg.num_games {
-                    let Some(completed) = play_game::<G>(&mut mcts, replay, cfg, || {
+                    let Some(completed) = play_game::<G>(&mut mcts, cfg, || {
                         finished.load(Ordering::Relaxed) >= cfg.num_games
                     })
                     else {
@@ -160,7 +160,7 @@ pub fn self_play_chess(
                     mcts = mcts.with_eval_cache(cache);
                 }
                 while finished.load(Ordering::Relaxed) < cfg.num_games {
-                    let Some(completed) = play_chess_game(&mut mcts, replay, cfg, || {
+                    let Some(completed) = play_chess_game(&mut mcts, cfg, || {
                         finished.load(Ordering::Relaxed) >= cfg.num_games
                     })
                     else {
@@ -213,7 +213,6 @@ fn maybe_print_progress(
 
 fn play_game<G: Game>(
     mcts: &mut Mcts<BatcherClient>,
-    _replay: &ReplayBuffer,
     cfg: &SelfPlayConfig,
     should_stop: impl Fn() -> bool,
 ) -> Option<CompletedGame> {
@@ -229,20 +228,14 @@ fn play_game<G: Game>(
         game.encode_state(&mut state);
 
         let result = mcts.search(&game);
-        let action = if trajectory.len() < cfg.temperature_moves {
-            result.sample_action(&mut rng)
-        }
-        else {
-            result.best_action()
-        };
-
-        let policy = result
-            .policy
-            .iter()
-            .enumerate()
-            .filter(|(_, &p)| p > 0.0)
-            .map(|(a, &p)| (a as Action, p))
-            .collect();
+        let action = select_self_play_action(
+            &result,
+            mcts.config().variant,
+            trajectory.len(),
+            cfg.temperature_moves,
+            &mut rng,
+        );
+        let policy = sparse_policy(&result.policy);
 
         trajectory.push(Transition {
             state,
@@ -263,7 +256,6 @@ fn play_game<G: Game>(
 
 fn play_chess_game(
     mcts: &mut Mcts<BatcherClient>,
-    _replay: &ReplayBuffer,
     cfg: &SelfPlayConfig,
     should_stop: impl Fn() -> bool,
 ) -> Option<CompletedGame> {
@@ -300,20 +292,14 @@ fn play_chess_game(
         let position = game.position();
         let result =
             mcts.search_with_repetitions(&position, |hash| game.repetitions_before_current(hash));
-        let action = if trajectory.len() < cfg.temperature_moves {
-            result.sample_action(&mut rng)
-        }
-        else {
-            result.best_action()
-        };
-
-        let policy = result
-            .policy
-            .iter()
-            .enumerate()
-            .filter(|(_, &p)| p > 0.0)
-            .map(|(a, &p)| (a as Action, p))
-            .collect();
+        let action = select_self_play_action(
+            &result,
+            mcts.config().variant,
+            trajectory.len(),
+            cfg.temperature_moves,
+            &mut rng,
+        );
+        let policy = sparse_policy(&result.policy);
 
         trajectory.push(Transition {
             state,
@@ -344,6 +330,30 @@ fn play_chess_game(
     assign_trajectory_rewards(&mut trajectory, terminal_reward);
     stats.moves = trajectory.len();
     Some(CompletedGame { stats, trajectory })
+}
+
+fn select_self_play_action<R: Rng + ?Sized>(
+    result: &SearchResult,
+    variant: MctsVariant,
+    ply: usize,
+    temperature_moves: usize,
+    rng: &mut R,
+) -> Action {
+    if matches!(variant, MctsVariant::Gumbel { .. }) || ply >= temperature_moves {
+        result.best_action()
+    }
+    else {
+        result.sample_action(rng)
+    }
+}
+
+fn sparse_policy(policy: &[f32]) -> Vec<(Action, f32)> {
+    policy
+        .iter()
+        .enumerate()
+        .filter(|(_, &p)| p > 0.0)
+        .map(|(a, &p)| (a as Action, p))
+        .collect()
 }
 
 /// Walks the trajectory backwards from the terminal reward, flipping sign
