@@ -58,8 +58,8 @@ struct AnalyzeArgs {
     moves: Vec<String>,
     #[arg(long, default_value_t = 800)]
     simulations: usize,
-    #[arg(long, default_value_t = 32)]
-    mcts_batch: usize,
+    #[arg(long, default_value_t = 1)]
+    wait_for_count: usize,
 }
 
 #[derive(Parser)]
@@ -79,8 +79,8 @@ struct BenchArgs {
     output: Option<PathBuf>,
     #[arg(long, default_value_t = 800)]
     simulations: usize,
-    #[arg(long, default_value_t = 32)]
-    mcts_batch: usize,
+    #[arg(long, default_value_t = 1)]
+    wait_for_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,7 +113,7 @@ fn analyze_cmd(args: AnalyzeArgs) -> Result<()> {
         model: args.model,
         mode: Some(args.mode.into()),
         simulations: args.simulations,
-        mcts_batch: args.mcts_batch,
+        wait_for_count: args.wait_for_count,
     };
     let out = analyze_request(
         args.game,
@@ -140,7 +140,7 @@ fn bench_cmd(args: BenchArgs) -> Result<()> {
             model: args.model.clone(),
             mode: Some(args.mode.into()),
             simulations: args.simulations,
-            mcts_batch: args.mcts_batch,
+            wait_for_count: args.wait_for_count,
         };
         let analysis = analyze_request(args.game, run_dir.clone(), req, device)?;
         let correct = analysis

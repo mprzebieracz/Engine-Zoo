@@ -24,6 +24,12 @@ pub struct Batcher {
     worker: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InferencePrecision {
+    Fp32,
+    Fp16,
+}
+
 /// Cheap-to-clone handle used by search threads to submit work.
 #[derive(Clone)]
 pub struct BatcherClient {
@@ -58,10 +64,35 @@ impl Batcher {
         wait_for_count: usize,
         timeout: Duration,
     ) -> Result<Batcher> {
+        Self::new_with_precision(
+            cfg,
+            weights,
+            device,
+            wait_for_count,
+            timeout,
+            InferencePrecision::Fp32,
+        )
+    }
+
+    pub fn new_with_precision(
+        cfg: &NetConfig,
+        weights: &Path,
+        device: Device,
+        wait_for_count: usize,
+        timeout: Duration,
+        precision: InferencePrecision,
+    ) -> Result<Batcher> {
+        anyhow::ensure!(
+            precision == InferencePrecision::Fp32 || device.is_cuda(),
+            "FP16 inference is only supported on CUDA"
+        );
         let mut vs = nn::VarStore::new(device);
         let net = AlphaZeroNet::new(&vs.root(), cfg);
         vs.load(weights)
             .with_context(|| format!("loading network weights from {}", weights.display()))?;
+        if precision == InferencePrecision::Fp16 {
+            vs.half();
+        }
 
         let shared = Arc::new(Shared {
             pending: Mutex::new(Pending {
@@ -80,7 +111,7 @@ impl Batcher {
             .name("batcher".into())
             .spawn(move || {
                 let _vs = vs; // keeps the weights alive for `net`
-                Worker::new(net, cfg, device, worker_shared).run();
+                Worker::new(net, cfg, device, worker_shared, precision).run();
             })
             .context("spawning batcher worker")?;
 
@@ -142,6 +173,7 @@ struct Worker {
     device: Device,
     state_size: usize,
     state_shape: [i64; 3],
+    input_kind: Kind,
     shared: Arc<Shared>,
     // Grow-only staging buffers (pinned when on CUDA). Rows beyond the
     // current batch are stale garbage — only the first `n` rows are ever
@@ -153,12 +185,22 @@ struct Worker {
 }
 
 impl Worker {
-    fn new(net: AlphaZeroNet, cfg: NetConfig, device: Device, shared: Arc<Shared>) -> Worker {
+    fn new(
+        net: AlphaZeroNet,
+        cfg: NetConfig,
+        device: Device,
+        shared: Arc<Shared>,
+        precision: InferencePrecision,
+    ) -> Worker {
         Worker {
             net,
             device,
             state_size: (cfg.input_channels * cfg.height * cfg.width) as usize,
             state_shape: [cfg.input_channels, cfg.height, cfg.width],
+            input_kind: match precision {
+                InferencePrecision::Fp32 => Kind::Float,
+                InferencePrecision::Fp16 => Kind::Half,
+            },
             shared,
             states_buf: None,
             index_buf: None,
@@ -270,12 +312,14 @@ impl Worker {
         let [c, h, w] = self.state_shape;
         let batched = states_host.narrow(0, 0, n).view([n, c, h, w]).to_device_(
             self.device,
-            Kind::Float,
+            self.input_kind,
             /*non_blocking=*/ true,
             /*copy=*/ false,
         );
 
         let (policy, value) = self.net.forward_t(&batched, false);
+        let policy = policy.to_kind(Kind::Float);
+        let value = value.to_kind(Kind::Float);
 
         let max_actions = tasks
             .iter()
@@ -288,7 +332,7 @@ impl Worker {
         // copy only those; on CPU just read from the full policy tensor.
         let mut out = Vec::with_capacity(total);
         if cuda {
-            let mut gathered_rows: Option<(Vec<f32>, usize)> = None; // (data, row stride)
+            let mut gathered_rows: Option<(*const f32, usize)> = None; // (data, row stride)
             if max_actions > 0 {
                 let index_host = Self::staging(
                     &mut self.index_buf,
@@ -345,13 +389,7 @@ impl Worker {
                     .narrow(1, 0, width)
                     .copy_(&gathered_gpu);
 
-                let data = unsafe {
-                    std::slice::from_raw_parts(
-                        gathered_host.data_ptr() as *const f32,
-                        (n * width) as usize,
-                    )
-                };
-                gathered_rows = Some((data.to_vec(), width as usize));
+                gathered_rows = Some((gathered_host.data_ptr() as *const f32, width as usize));
             }
 
             let value_host =
@@ -364,8 +402,10 @@ impl Worker {
             for task in tasks {
                 for s in 0..task.batch.len() {
                     let count = (task.batch.offsets[s + 1] - task.batch.offsets[s]) as usize;
-                    let logits = match &gathered_rows {
-                        Some((data, width)) => data[row * width..row * width + count].to_vec(),
+                    let logits = match gathered_rows {
+                        Some((data, width)) => unsafe {
+                            std::slice::from_raw_parts(data.add(row * width), count).to_vec()
+                        },
                         None => Vec::new(),
                     };
                     out.push(Evaluation {

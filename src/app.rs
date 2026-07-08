@@ -40,8 +40,8 @@ struct PlayArgs {
     second: AgentSpec,
     #[arg(long, default_value_t = 800)]
     simulations: usize,
-    #[arg(long, default_value_t = 8)]
-    mcts_batch: usize,
+    #[arg(long, default_value_t = 1)]
+    wait_for_count: usize,
     #[arg(long, default_value_t = 512)]
     max_moves: usize,
     /// Opening plies sampled from engine policies instead of argmax.
@@ -91,14 +91,14 @@ fn run_game<G: Game>(args: PlayArgs) -> Result<()> {
         &root,
         device,
         args.simulations,
-        args.mcts_batch,
+        args.wait_for_count,
     )?;
     let mut second = build_agent::<G>(
         &args.second,
         &root,
         device,
         args.simulations,
-        args.mcts_batch,
+        args.wait_for_count,
     )?;
     let mut game = G::default();
     let cfg = SessionConfig {
@@ -124,7 +124,11 @@ fn run_game<G: Game>(args: PlayArgs) -> Result<()> {
         else {
             second.act_with_mode(&game, mode)
         };
-        println!("{} plays {}", side_name::<G>(side), game.format_action(action));
+        println!(
+            "{} plays {}",
+            side_name::<G>(side),
+            game.format_action(action)
+        );
         game.step(action);
         println!("{game}");
     }
@@ -136,7 +140,7 @@ fn build_agent<G: Game>(
     run_dir: &std::path::Path,
     device: Device,
     simulations: usize,
-    mcts_batch: usize,
+    wait_for_count: usize,
 ) -> Result<PlayerAgent> {
     match spec {
         AgentSpec::User => Ok(PlayerAgent::Human(HumanAgent)),
@@ -148,7 +152,7 @@ fn build_agent<G: Game>(
                 &weights,
                 device,
                 simulations,
-                mcts_batch,
+                wait_for_count,
                 Duration::from_millis(1),
             )?))
         }
@@ -161,7 +165,12 @@ fn parse_agent(s: &str) -> Result<AgentSpec> {
 
 fn side_name<G: Game>(side: usize) -> &'static str {
     if G::NAME == ChessGame::NAME {
-        if side == 0 { "white" } else { "black" }
+        if side == 0 {
+            "white"
+        }
+        else {
+            "black"
+        }
     }
     else if side == 0 {
         "first"

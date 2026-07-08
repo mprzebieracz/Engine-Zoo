@@ -1,6 +1,7 @@
 /target
 /runs
 /benchmark
+/scratch
 *.safetensors
 .vscode
 .cargo

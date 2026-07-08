@@ -1,13 +1,16 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use engine_zoo::alphazero::{
-    self_play, AlphaZeroNet, Batcher, Mcts, MctsConfig, MctsVariant, NetConfig, ReplayBuffer,
-    RunConfig, RunDir, SelfPlayConfig, TrainConfig, train,
+    self_play, self_play_chess, train, AlphaZeroNet, Batcher, InferencePrecision, Mcts, MctsConfig,
+    MctsVariant, NetConfig, ReplayBuffer, RunConfig, RunDir, SelfPlayConfig, SelfPlayStats,
+    TrainConfig,
 };
 use engine_zoo::arena::{self, ArenaConfig};
 use engine_zoo::game::Game;
 use engine_zoo::games::{ChessGame, Connect4};
 use serde_json::json;
+use std::fs::{self, OpenOptions};
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tch::{nn, Device};
@@ -56,6 +59,14 @@ enum DeviceKind {
     Cpu,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum InferencePrecisionKind {
+    /// FP16 on CUDA, FP32 on CPU.
+    Auto,
+    Fp32,
+    Fp16,
+}
+
 #[derive(Parser)]
 #[command(about = "AlphaZero self-play + training loop")]
 struct Args {
@@ -64,33 +75,77 @@ struct Args {
     /// Run directory (checkpoints, metrics); defaults to runs/<game>.
     #[arg(long)]
     run_dir: Option<PathBuf>,
+    /// File for C++/libtorch stderr output. Defaults to <run-dir>/stderr.log.
+    #[arg(long)]
+    stderr_log: Option<PathBuf>,
+    /// Print self-play progress every N completed games. Set 0 to disable.
+    #[arg(long, default_value_t = 25)]
+    progress_every: usize,
 
     #[arg(long, default_value_t = 10)]
     iterations: usize,
+    /// Ignore --iterations and keep training until interrupted.
+    #[arg(long)]
+    forever: bool,
+    /// Save an extra timestamped checkpoint this often. Set 0 to disable.
+    #[arg(long, default_value_t = 60)]
+    archive_checkpoint_minutes: u64,
     #[arg(long, default_value_t = 100)]
     games: usize,
-    #[arg(long, default_value_t = default_threads())]
-    threads: usize,
+    #[arg(long)]
+    threads: Option<usize>,
     #[arg(long, default_value_t = 800)]
     simulations: usize,
-    #[arg(long, default_value_t = 32)]
-    mcts_batch: usize,
+    /// Batcher states to coalesce before running network inference.
+    #[arg(long)]
+    wait_for: Option<usize>,
+    /// Batcher timeout before running a partial inference batch.
+    #[arg(long, default_value_t = 5)]
+    batch_timeout_ms: u64,
+    /// Self-play inference precision. Training always stays FP32.
+    #[arg(long, value_enum, default_value_t = InferencePrecisionKind::Auto)]
+    inference_precision: InferencePrecisionKind,
+    /// Chess self-play transposition table entries. Set 0 to disable.
+    #[arg(long, default_value_t = 1_000_000)]
+    tt_entries: usize,
+    /// Fast-search simulations for playout cap randomization.
+    #[arg(long)]
+    fast_simulations: Option<usize>,
+    /// Probability of using the full simulation count for a move.
+    #[arg(long, default_value_t = 0.25)]
+    full_simulation_probability: f32,
+    #[arg(long)]
+    disable_resignation: bool,
+    #[arg(long, default_value_t = -0.95)]
+    resignation_threshold: f32,
+    #[arg(long, default_value_t = 60)]
+    resignation_min_ply: usize,
+    #[arg(long, default_value_t = 3)]
+    resignation_consecutive_moves: usize,
+    #[arg(long, default_value_t = 0.10)]
+    resignation_disable_probability: f32,
     #[arg(long, value_enum, default_value_t = SearchKind::Puct)]
     mcts_variant: SearchKind,
     /// Root actions considered by Gumbel MCTS before sequential halving.
     #[arg(long, default_value_t = 16)]
     gumbel_sampled_actions: usize,
+    /// First Play Urgency reduction for unvisited MCTS children.
+    #[arg(long, default_value_t = 0.1)]
+    fpu_reduction: f32,
     #[arg(long, default_value_t = 512)]
     max_moves: usize,
 
-    #[arg(long, default_value_t = 52_500)]
+    #[arg(long, default_value_t = 500_000)]
     buffer: usize,
     #[arg(long, default_value_t = 256)]
     batch_size: usize,
     #[arg(long, default_value_t = 4096)]
     minibatch_size: usize,
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 80)]
     train_steps: usize,
+    /// Print training progress every N optimizer steps. Set 0 to disable.
+    #[arg(long, default_value_t = 10)]
+    train_progress_every: usize,
     #[arg(long, default_value_t = 1e-3)]
     lr: f64,
     #[arg(long, default_value_t = 1e-4)]
@@ -116,7 +171,7 @@ struct Args {
     device: DeviceKind,
 }
 
-fn default_threads() -> usize {
+fn default_cpu_threads() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
@@ -125,13 +180,49 @@ const BATCH_TIMEOUT: Duration = Duration::from_millis(2);
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    redirect_stderr(&args)?;
     match args.game {
-        GameKind::Connect4 => run::<Connect4>(args, 5, 64),
-        GameKind::Chess => run::<ChessGame>(args, 10, 128),
+        GameKind::Connect4 => run::<Connect4>(args, 5, 64, self_play::<Connect4>),
+        GameKind::Chess => run::<ChessGame>(args, 10, 64, self_play_chess),
     }
 }
 
-fn run<G: Game>(args: Args, default_blocks: i64, default_filters: i64) -> Result<()> {
+fn default_run_root(args: &Args) -> PathBuf {
+    args.run_dir.clone().unwrap_or_else(|| {
+        let game = match args.game {
+            GameKind::Connect4 => "connect4",
+            GameKind::Chess => "chess",
+        };
+        PathBuf::from("runs").join(game)
+    })
+}
+
+fn redirect_stderr(args: &Args) -> Result<()> {
+    let path = args
+        .stderr_log
+        .clone()
+        .unwrap_or_else(|| default_run_root(args).join("stderr.log"));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new().create(true).append(true).open(&path)?;
+    unsafe {
+        anyhow::ensure!(
+            libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) >= 0,
+            "failed to redirect stderr to {}",
+            path.display()
+        );
+    }
+    println!("stderr log: {}", path.display());
+    Ok(())
+}
+
+fn run<G: Game>(
+    args: Args,
+    default_blocks: i64,
+    default_filters: i64,
+    self_play_fn: fn(&Batcher, &ReplayBuffer, &SelfPlayConfig) -> SelfPlayStats,
+) -> Result<()> {
     let device = match args.device {
         DeviceKind::Auto => Device::cuda_if_available(),
         DeviceKind::Cuda => {
@@ -144,6 +235,38 @@ fn run<G: Game>(args: Args, default_blocks: i64, default_filters: i64) -> Result
         DeviceKind::Cpu => Device::Cpu,
     };
     println!("device: {device:?}");
+    if device.is_cuda() {
+        tch::Cuda::cudnn_set_benchmark(true);
+    }
+
+    let threads = args.threads.unwrap_or_else(|| {
+        if device.is_cuda() {
+            128
+        }
+        else {
+            default_cpu_threads()
+        }
+    });
+    let wait_for = args.wait_for.unwrap_or_else(|| {
+        if device.is_cuda() {
+            threads.min(24)
+        }
+        else {
+            1
+        }
+    });
+    let self_play_precision = match args.inference_precision {
+        InferencePrecisionKind::Auto => {
+            if device.is_cuda() {
+                InferencePrecision::Fp16
+            }
+            else {
+                InferencePrecision::Fp32
+            }
+        }
+        InferencePrecisionKind::Fp32 => InferencePrecision::Fp32,
+        InferencePrecisionKind::Fp16 => InferencePrecision::Fp16,
+    };
 
     let root = args
         .run_dir
@@ -186,17 +309,29 @@ fn run<G: Game>(args: Args, default_blocks: i64, default_filters: i64) -> Result
         micro_batch_size: args.batch_size,
         batch_size: args.minibatch_size,
         train_steps: args.train_steps,
+        progress_every: args.train_progress_every,
         lr: args.lr,
         weight_decay: args.weight_decay,
     };
     let mut opt = engine_zoo::alphazero::build_optimizer(&vs, &train_cfg)?;
     let sp_cfg = SelfPlayConfig {
         num_games: args.games,
-        threads: args.threads,
+        threads,
         max_moves: args.max_moves,
+        progress_every: args.progress_every,
+        tt_entries: args.tt_entries,
+        fast_simulations: args
+            .fast_simulations
+            .unwrap_or_else(|| (args.simulations / 8).max(1)),
+        full_simulation_probability: args.full_simulation_probability,
+        resignation_enabled: !args.disable_resignation,
+        resignation_threshold: args.resignation_threshold,
+        resignation_consecutive_moves: args.resignation_consecutive_moves,
+        resignation_min_ply: args.resignation_min_ply,
+        resignation_disable_probability: args.resignation_disable_probability,
         mcts: MctsConfig {
             simulations: args.simulations,
-            batch_size: args.mcts_batch,
+            fpu_reduction: args.fpu_reduction,
             variant: match args.mcts_variant {
                 SearchKind::Puct => MctsVariant::Puct,
                 SearchKind::Gumbel => MctsVariant::Gumbel {
@@ -208,36 +343,48 @@ fn run<G: Game>(args: Args, default_blocks: i64, default_filters: i64) -> Result
         ..Default::default()
     };
 
-    for iteration in 0..args.iterations {
+    let archive_interval = (args.archive_checkpoint_minutes > 0)
+        .then(|| Duration::from_secs(args.archive_checkpoint_minutes * 60));
+    let mut last_archive = Instant::now();
+    let mut iteration = 0usize;
+    while args.forever || iteration < args.iterations {
         println!("=== iteration {iteration} ===");
         let self_play_started = Instant::now();
-        {
-            let wait_for = args.threads.min(4) * args.mcts_batch;
-            let batcher = Batcher::new(
+        let self_play_stats = {
+            let batcher = Batcher::new_with_precision(
                 &cfg.net,
                 &run.best_path(),
                 device,
                 wait_for,
-                BATCH_TIMEOUT,
+                Duration::from_millis(args.batch_timeout_ms),
+                self_play_precision,
             )?;
-            self_play::<G>(&batcher, &replay, &sp_cfg);
-        }
+            self_play_fn(&batcher, &replay, &sp_cfg)
+        };
         let self_play_secs = self_play_started.elapsed().as_secs_f64();
+        let tt_queries = self_play_stats.tt_hits + self_play_stats.tt_misses;
+        let tt_hit_rate = if tt_queries == 0 {
+            0.0
+        }
+        else {
+            self_play_stats.tt_hits as f64 / tt_queries as f64
+        };
         println!(
-            "self-play: {} games in {self_play_secs:.1}s ({:.1} games/s)",
+            "self-play: {} games in {self_play_secs:.1}s ({:.1} games/s, {:.1} moves/game)",
             args.games,
-            args.games as f64 / self_play_secs
+            args.games as f64 / self_play_secs,
+            self_play_stats.avg_moves_per_game()
+        );
+        println!(
+            "self-play stats: full={} fast={} resignations={} tt={:.1}%",
+            self_play_stats.full_searches,
+            self_play_stats.fast_searches,
+            self_play_stats.resignations,
+            100.0 * tt_hit_rate
         );
 
         let train_started = Instant::now();
-        let metrics = train(
-            &net,
-            &mut opt,
-            &replay,
-            device,
-            &cfg.net,
-            &train_cfg,
-        );
+        let metrics = train(&net, &mut opt, &replay, device, &cfg.net, &train_cfg);
         let train_secs = train_started.elapsed().as_secs_f64();
         println!("train: {train_secs:.1}s");
 
@@ -249,6 +396,29 @@ fn run<G: Game>(args: Args, default_blocks: i64, default_filters: i64) -> Result
             "self_play_secs": self_play_secs,
             "train_secs": train_secs,
             "games": args.games,
+            "self_play_games": self_play_stats.games,
+            "self_play_moves": self_play_stats.moves,
+            "avg_moves_per_game": self_play_stats.avg_moves_per_game(),
+            "full_searches": self_play_stats.full_searches,
+            "fast_searches": self_play_stats.fast_searches,
+            "resignations": self_play_stats.resignations,
+            "tt_hits": self_play_stats.tt_hits,
+            "tt_misses": self_play_stats.tt_misses,
+            "tt_inserts": self_play_stats.tt_inserts,
+            "tt_hit_rate": tt_hit_rate,
+            "fpu_reduction": args.fpu_reduction,
+            "threads": threads,
+            "wait_for": wait_for,
+            "batch_timeout_ms": args.batch_timeout_ms,
+            "tt_entries": args.tt_entries,
+            "fast_simulations": sp_cfg.fast_simulations,
+            "full_simulation_probability": sp_cfg.full_simulation_probability,
+            "resignation_enabled": sp_cfg.resignation_enabled,
+            "resignation_threshold": sp_cfg.resignation_threshold,
+            "resignation_min_ply": sp_cfg.resignation_min_ply,
+            "resignation_consecutive_moves": sp_cfg.resignation_consecutive_moves,
+            "resignation_disable_probability": sp_cfg.resignation_disable_probability,
+            "self_play_precision": match self_play_precision { InferencePrecision::Fp32 => "fp32", InferencePrecision::Fp16 => "fp16" },
         });
         if let Some(m) = &metrics {
             record["policy_loss"] = m.policy_loss.into();
@@ -273,12 +443,11 @@ fn run<G: Game>(args: Args, default_blocks: i64, default_filters: i64) -> Result
                 };
                 let mcts_cfg = MctsConfig {
                     simulations: args.gate_simulations,
-                    batch_size: 8,
                     eps: 0.0, // no exploration noise in evaluation play
                     variant: MctsVariant::Puct,
                     ..Default::default()
                 };
-                let wait_for = mcts_cfg.batch_size;
+                let wait_for = 1;
                 let candidate = Batcher::new(
                     &cfg.net,
                     &run.candidate_path(),
@@ -318,7 +487,23 @@ fn run<G: Game>(args: Args, default_blocks: i64, default_filters: i64) -> Result
             }
         }
 
+        if let Some(interval) = archive_interval {
+            if last_archive.elapsed() >= interval {
+                let archive_started = Instant::now();
+                let unix_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs();
+                let archive_path = run.archive_checkpoint_path(iteration, unix_secs)?;
+                vs.save(&archive_path)?;
+                println!("archived checkpoint: {}", archive_path.display());
+                record["archive_checkpoint"] = archive_path.display().to_string().into();
+                record["archive_checkpoint_secs"] = archive_started.elapsed().as_secs_f64().into();
+                last_archive = Instant::now();
+            }
+        }
+
         run.log_metrics(record)?;
+        iteration += 1;
     }
     Ok(())
 }

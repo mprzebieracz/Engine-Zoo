@@ -1,7 +1,7 @@
-pub mod analysis;
-pub mod app;
 pub mod agent;
 pub mod alphazero;
+pub mod analysis;
+pub mod app;
 pub mod arena;
 pub mod eval_app;
 pub mod game;

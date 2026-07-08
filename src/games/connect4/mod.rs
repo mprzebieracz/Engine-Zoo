@@ -112,9 +112,7 @@ impl Game for Connect4 {
 
     fn step(&mut self, action: Action) {
         let col = action as usize;
-        debug_assert!(
-            self.status == Status::Ongoing && col < COLS && self.column_playable(col)
-        );
+        debug_assert!(self.status == Status::Ongoing && col < COLS && self.column_playable(col));
 
         let move_bit = (self.mask + bottom_bit(col)) & column_mask(col);
         let placed = self.pos | move_bit;

@@ -69,16 +69,15 @@ impl AlphaZeroAgent {
         weights: &Path,
         device: Device,
         simulations: usize,
-        mcts_batch: usize,
+        wait_for_count: usize,
         timeout: Duration,
     ) -> Result<Self> {
-        let batcher = Batcher::new(cfg, weights, device, mcts_batch, timeout)
+        let batcher = Batcher::new(cfg, weights, device, wait_for_count.max(1), timeout)
             .with_context(|| format!("loading AlphaZero agent from {}", weights.display()))?;
         let mcts = Mcts::new(
             batcher.client(),
             MctsConfig {
                 simulations,
-                batch_size: mcts_batch,
                 eps: 0.0,
                 ..Default::default()
             },

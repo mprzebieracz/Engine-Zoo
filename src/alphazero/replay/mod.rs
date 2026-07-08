@@ -3,6 +3,7 @@ use std::sync::{Mutex, RwLock};
 use tch::Tensor;
 
 /// One training example.
+#[derive(Clone)]
 pub struct Transition {
     pub state: Vec<f32>,
     pub policy: Vec<(Action, f32)>,
@@ -69,6 +70,29 @@ impl ReplayBuffer {
             if inner.len < self.capacity {
                 inner.len += 1;
             }
+        }
+    }
+
+    /// Returns a snapshot of all transitions currently in the buffer (sparse policies).
+    pub fn export_filled(&self) -> Vec<Transition> {
+        let inner = self.inner.read().unwrap();
+        let n = inner.len;
+        if n == 0 {
+            return Vec::new();
+        }
+        if n < self.capacity {
+            inner.buf[..n]
+                .iter()
+                .filter_map(|slot| slot.clone())
+                .collect()
+        }
+        else {
+            let mut out = Vec::with_capacity(n);
+            for i in 0..n {
+                let idx = (inner.ptr + i) % self.capacity;
+                out.push(inner.buf[idx].clone().expect("full buffer slot"));
+            }
+            out
         }
     }
 

@@ -11,10 +11,12 @@ fn from_fen(fen: &str) -> ChessGame {
         BoardStatus::Stalemate => Status::Stalemate,
     };
     let mut game = ChessGame {
-        board,
-        ply: 0,
-        status,
-        halfmove_clock: 0,
+        pos: ChessPosition {
+            board,
+            ply: 0,
+            status,
+            halfmove_clock: 0,
+        },
         position_counts: HashMap::with_capacity(16),
     };
     game.record_position();
@@ -30,8 +32,8 @@ fn startpos_has_twenty_moves() {
 #[test]
 fn public_fen_loader_restores_clocks() {
     let g = ChessGame::from_fen("8/8/8/8/8/8/8/K6k b - - 17 23").unwrap();
-    assert_eq!(g.ply, 45);
-    assert_eq!(g.halfmove_clock, 17);
+    assert_eq!(g.pos.ply, 45);
+    assert_eq!(g.pos.halfmove_clock, 17);
 }
 
 #[test]
@@ -73,7 +75,7 @@ fn scholars_mate_reward_convention() {
 fn stalemate_is_a_draw() {
     let g = from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1");
     assert!(g.is_terminal());
-    assert_eq!(g.status, Status::Stalemate);
+    assert_eq!(g.pos.status, Status::Stalemate);
     assert_eq!(g.reward(), 0.0);
 }
 
@@ -128,44 +130,44 @@ fn threefold_repetition_is_a_draw() {
         g.step(g.parse_move(mv).unwrap());
     }
     assert!(g.is_terminal());
-    assert_eq!(g.status, Status::DrawRepetition);
+    assert_eq!(g.pos.status, Status::DrawRepetition);
     assert_eq!(g.reward(), 0.0);
 }
 
 #[test]
 fn fifty_move_rule_is_a_draw() {
     let mut g = from_fen("k7/8/8/8/8/8/8/K7 w - - 0 1");
-    g.halfmove_clock = 99;
+    g.pos.halfmove_clock = 99;
     g.step(g.parse_move("a1a2").unwrap());
     assert!(g.is_terminal());
-    assert_eq!(g.status, Status::DrawFiftyMoveRule);
+    assert_eq!(g.pos.status, Status::DrawFiftyMoveRule);
     assert_eq!(g.reward(), 0.0);
 }
 
 #[test]
 fn pawn_move_resets_halfmove_clock() {
     let mut g = from_fen("k7/8/8/8/8/8/P7/K7 w - - 0 1");
-    g.halfmove_clock = 99;
+    g.pos.halfmove_clock = 99;
     g.step(g.parse_move("a2a3").unwrap());
-    assert_eq!(g.halfmove_clock, 0);
+    assert_eq!(g.pos.halfmove_clock, 0);
     assert!(!g.is_terminal());
 }
 
 #[test]
 fn capture_resets_halfmove_clock() {
     let mut g = from_fen("4k3/8/8/8/8/8/4p3/4K3 w - - 0 1");
-    g.halfmove_clock = 99;
+    g.pos.halfmove_clock = 99;
     g.step(g.parse_move("e1e2").unwrap());
-    assert_eq!(g.halfmove_clock, 0);
+    assert_eq!(g.pos.halfmove_clock, 0);
     assert!(!g.is_terminal());
 }
 
 #[test]
 fn castling_rights_change_resets_halfmove_clock() {
     let mut g = from_fen("4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1");
-    g.halfmove_clock = 99;
+    g.pos.halfmove_clock = 99;
     g.step(g.parse_move("e1f1").unwrap());
-    assert_eq!(g.halfmove_clock, 0);
+    assert_eq!(g.pos.halfmove_clock, 0);
     assert!(!g.is_terminal());
 }
 

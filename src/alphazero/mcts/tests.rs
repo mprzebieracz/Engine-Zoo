@@ -55,7 +55,7 @@ impl Game for ImmediateOutcomeGame {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Copy, Default)]
 struct SinglePathGame {
     ply: u8,
 }
@@ -99,6 +99,18 @@ impl Game for SinglePathGame {
     fn format_action(&self, action: Action) -> String {
         action.to_string()
     }
+}
+
+impl RepetitionGame for SinglePathGame {
+    fn repetition_hash(&self) -> u64 {
+        u64::from(self.ply)
+    }
+
+    fn halfmove_clock(&self) -> usize {
+        100
+    }
+
+    fn set_repetition_draw(&mut self) {}
 }
 
 #[derive(Clone)]
@@ -193,8 +205,7 @@ impl Evaluator for RecordingEvaluator {
         self.calls.lock().unwrap().push(batch.len());
         (0..batch.len())
             .map(|i| {
-                let legal =
-                    &batch.legal[batch.offsets[i] as usize..batch.offsets[i + 1] as usize];
+                let legal = &batch.legal[batch.offsets[i] as usize..batch.offsets[i + 1] as usize];
                 let logits = legal
                     .iter()
                     .map(|&a| {
@@ -246,7 +257,6 @@ fn mcts(simulations: usize) -> Mcts<UniformEvaluator> {
         UniformEvaluator,
         MctsConfig {
             simulations,
-            batch_size: 8,
             eps: 0.0,
             ..Default::default()
         },
@@ -260,7 +270,6 @@ fn terminal_root_returns_reward_without_evaluator() {
         RecordingEvaluator::uniform(calls.clone()),
         MctsConfig {
             simulations: 4,
-            batch_size: 2,
             eps: 0.0,
             ..Default::default()
         },
@@ -280,7 +289,6 @@ fn puct_finds_forced_terminal_win() {
         RecordingEvaluator::uniform(calls),
         MctsConfig {
             simulations: 32,
-            batch_size: 8,
             eps: 0.0,
             ..Default::default()
         },
@@ -294,13 +302,12 @@ fn puct_finds_forced_terminal_win() {
 }
 
 #[test]
-fn batching_deduplicates_colliding_leaves() {
+fn single_leaf_search_evaluates_one_state_per_call() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut mcts = Mcts::new(
         RecordingEvaluator::uniform(calls.clone()),
         MctsConfig {
             simulations: 4,
-            batch_size: 4,
             eps: 0.0,
             ..Default::default()
         },
@@ -310,6 +317,58 @@ fn batching_deduplicates_colliding_leaves() {
 
     assert_eq!(result.policy, vec![1.0]);
     assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
+}
+
+#[test]
+fn repetition_eval_cache_reuses_network_outputs() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let cache = Arc::new(EvalTable::new(16));
+    let mut mcts = Mcts::new(
+        RecordingEvaluator::uniform(calls.clone()),
+        MctsConfig {
+            simulations: 1,
+            eps: 0.0,
+            ..Default::default()
+        },
+    )
+    .with_eval_cache(cache);
+
+    let first = mcts.search_with_repetitions(&SinglePathGame::default(), |_| 0);
+    let second = mcts.search_with_repetitions(&SinglePathGame::default(), |_| 0);
+
+    assert_eq!(first.policy, vec![1.0]);
+    assert_eq!(second.policy, vec![1.0]);
+    assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
+}
+
+#[test]
+fn lossy_eval_table_overwrites_collisions() {
+    let table = EvalTable::new(1);
+    table.insert(
+        1,
+        CachedEvaluation {
+            legal: vec![0],
+            eval: Evaluation {
+                logits: vec![1.0],
+                value: 0.25,
+            },
+        },
+    );
+    assert_eq!(table.get(1).unwrap().eval.value, 0.25);
+
+    table.insert(
+        2,
+        CachedEvaluation {
+            legal: vec![0],
+            eval: Evaluation {
+                logits: vec![2.0],
+                value: -0.5,
+            },
+        },
+    );
+
+    assert!(table.get(1).is_none());
+    assert_eq!(table.get(2).unwrap().eval.value, -0.5);
 }
 
 #[test]
@@ -345,7 +404,6 @@ fn policy_is_a_distribution() {
         UniformEvaluator,
         MctsConfig {
             simulations: 200,
-            batch_size: 16,
             eps: 0.0,
             ..Default::default()
         },
@@ -364,7 +422,6 @@ fn gumbel_policy_stays_on_sampled_root_actions() {
         MctsConfig {
             variant: MctsVariant::Gumbel { sampled_actions: 3 },
             simulations: 48,
-            batch_size: 8,
             eps: 0.0,
             ..Default::default()
         },
@@ -388,7 +445,6 @@ fn gumbel_zero_sampled_actions_still_searches_one_root_action() {
         MctsConfig {
             variant: MctsVariant::Gumbel { sampled_actions: 0 },
             simulations: 24,
-            batch_size: 8,
             eps: 0.0,
             ..Default::default()
         },
@@ -409,7 +465,6 @@ fn gumbel_with_all_root_actions_finds_forced_terminal_win() {
         MctsConfig {
             variant: MctsVariant::Gumbel { sampled_actions: 3 },
             simulations: 32,
-            batch_size: 8,
             eps: 0.0,
             ..Default::default()
         },
@@ -424,25 +479,12 @@ fn gumbel_with_all_root_actions_finds_forced_terminal_win() {
 }
 
 #[test]
-#[should_panic(expected = "MCTS batch_size must be positive")]
-fn rejects_zero_batch_size() {
-    let _ = Mcts::new(
-        UniformEvaluator,
-        MctsConfig {
-            batch_size: 0,
-            ..Default::default()
-        },
-    );
-}
-
-#[test]
 #[should_panic(expected = "evaluator must return one result per input state")]
 fn rejects_evaluator_result_count_mismatch() {
     let mut mcts = Mcts::new(
         EmptyResultEvaluator,
         MctsConfig {
             simulations: 1,
-            batch_size: 1,
             eps: 0.0,
             ..Default::default()
         },
@@ -458,7 +500,6 @@ fn rejects_evaluator_logit_count_mismatch() {
         BadLogitEvaluator,
         MctsConfig {
             simulations: 1,
-            batch_size: 1,
             eps: 0.0,
             ..Default::default()
         },

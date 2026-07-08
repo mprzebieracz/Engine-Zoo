@@ -110,7 +110,7 @@ fn worker_evaluate_returns_only_requested_legal_logits() {
     let request = batch(&[0.25, -0.5], &[&[4, 1], &[0, 3, 2]]);
     let expected = direct_eval(&net, &cfg, &request);
 
-    let mut worker = Worker::new(net, cfg, Device::Cpu, shared(4));
+    let mut worker = Worker::new(net, cfg, Device::Cpu, shared(4), InferencePrecision::Fp32);
     let task = Task {
         batch: request,
         tx: sync_channel(1).0,
@@ -136,7 +136,7 @@ fn process_splits_combined_results_back_to_each_task() {
 
     let (tx1, rx1) = sync_channel(1);
     let (tx2, rx2) = sync_channel(1);
-    let mut worker = Worker::new(net, cfg, Device::Cpu, shared(8));
+    let mut worker = Worker::new(net, cfg, Device::Cpu, shared(8), InferencePrecision::Fp32);
     worker.process(vec![
         Task {
             batch: first,
@@ -170,6 +170,29 @@ fn client_evaluate_round_trips_through_worker_thread() {
     let actual = client.evaluate(&request);
 
     assert_close(&actual, &expected);
+    fs::remove_file(weights).unwrap();
+}
+
+#[test]
+fn fp16_inference_is_rejected_on_cpu() {
+    let cfg = tiny_cfg();
+    let weights = save_weights(&cfg);
+    let result = Batcher::new_with_precision(
+        &cfg,
+        &weights,
+        Device::Cpu,
+        1,
+        Duration::from_millis(1),
+        InferencePrecision::Fp16,
+    );
+    let err = match result {
+        Ok(_) => panic!("FP16 inference on CPU should fail"),
+        Err(err) => err,
+    };
+
+    assert!(err
+        .to_string()
+        .contains("FP16 inference is only supported on CUDA"));
     fs::remove_file(weights).unwrap();
 }
 

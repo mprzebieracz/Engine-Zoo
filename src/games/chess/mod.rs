@@ -1,3 +1,4 @@
+use crate::alphazero::RepetitionGame;
 use crate::game::{Action, Game, TensorDim};
 use chess::{Board, BoardStatus, ChessMove, Color, File, MoveGen, Piece, Rank, Square};
 use std::collections::HashMap;
@@ -23,12 +24,17 @@ enum Status {
     DrawFiftyMoveRule,
 }
 
-#[derive(Clone)]
-pub struct ChessGame {
+#[derive(Clone, Copy)]
+pub struct ChessPosition {
     board: Board,
     ply: u16,
     status: Status,
     halfmove_clock: u16,
+}
+
+#[derive(Clone)]
+pub struct ChessGame {
+    pos: ChessPosition,
     /// Zobrist hash occurrence counts since the last irreversible move.
     position_counts: HashMap<u64, u8>,
 }
@@ -80,7 +86,21 @@ pub fn decode_move(action: Action) -> ChessMove {
 
 impl ChessGame {
     pub fn board(&self) -> &Board {
-        &self.board
+        &self.pos.board
+    }
+
+    pub fn position(&self) -> ChessPosition {
+        self.pos
+    }
+
+    pub fn repetitions_before_current(&self, hash: u64) -> u8 {
+        let count = self.position_counts.get(&hash).copied().unwrap_or(0);
+        if hash == self.pos.hash() {
+            count.saturating_sub(1)
+        }
+        else {
+            count
+        }
     }
 
     pub fn from_fen(fen: &str) -> anyhow::Result<Self> {
@@ -115,10 +135,12 @@ impl ChessGame {
             BoardStatus::Stalemate => Status::Stalemate,
         };
         let mut game = ChessGame {
-            board,
-            ply,
-            status,
-            halfmove_clock,
+            pos: ChessPosition {
+                board,
+                ply,
+                status,
+                halfmove_clock,
+            },
             position_counts: HashMap::with_capacity(16),
         };
         game.record_position();
@@ -126,27 +148,24 @@ impl ChessGame {
     }
 
     fn record_position(&mut self) {
-        let count = self
-            .position_counts
-            .entry(self.board.get_hash())
-            .or_insert(0);
+        let count = self.position_counts.entry(self.pos.hash()).or_insert(0);
         *count += 1;
         if *count >= 3 {
-            self.status = Status::DrawRepetition;
+            self.pos.status = Status::DrawRepetition;
         }
     }
 
     fn after_irreversible_move(&mut self) {
-        self.halfmove_clock = 0;
+        self.pos.halfmove_clock = 0;
         self.position_counts.clear();
         self.record_position();
     }
 
     fn after_reversible_move(&mut self) {
-        self.halfmove_clock += 1;
+        self.pos.halfmove_clock += 1;
         self.record_position();
-        if self.halfmove_clock >= 100 {
-            self.status = Status::DrawFiftyMoveRule;
+        if self.pos.halfmove_clock >= 100 {
+            self.pos.status = Status::DrawFiftyMoveRule;
         }
     }
 }
@@ -154,10 +173,7 @@ impl ChessGame {
 impl Default for ChessGame {
     fn default() -> Self {
         let mut game = ChessGame {
-            board: Board::default(),
-            ply: 0,
-            status: Status::Ongoing,
-            halfmove_clock: 0,
+            pos: ChessPosition::default(),
             position_counts: HashMap::with_capacity(16),
         };
         game.record_position();
@@ -165,16 +181,20 @@ impl Default for ChessGame {
     }
 }
 
-impl Game for ChessGame {
-    const ACTION_SIZE: usize = 64 * 64 * 5;
-    const STATE_SHAPE: [TensorDim; 3] = [19, 8, 8];
-    const NAME: &'static str = "chess";
-
-    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
-        MoveGen::new_legal(&self.board).map(encode_move)
+impl ChessPosition {
+    pub fn hash(&self) -> u64 {
+        self.board.get_hash()
     }
 
-    fn step(&mut self, action: Action) {
+    pub fn halfmove_clock(&self) -> usize {
+        self.halfmove_clock as usize
+    }
+
+    pub(crate) fn set_repetition_draw(&mut self) {
+        self.status = Status::DrawRepetition;
+    }
+
+    fn step_without_repetition(&mut self, action: Action) -> bool {
         let mv = decode_move(action);
         debug_assert!(self.board.legal(mv), "illegal move {mv} in {}", self.board);
 
@@ -189,11 +209,11 @@ impl Game for ChessGame {
         match self.board.status() {
             BoardStatus::Checkmate => {
                 self.status = Status::Checkmate;
-                return;
+                return true;
             }
             BoardStatus::Stalemate => {
                 self.status = Status::Stalemate;
-                return;
+                return true;
             }
             BoardStatus::Ongoing => {}
         }
@@ -204,11 +224,40 @@ impl Game for ChessGame {
             || self.board.castle_rights(Color::Black) != black_cr;
 
         if irreversible {
-            self.after_irreversible_move();
+            self.halfmove_clock = 0;
         }
         else {
-            self.after_reversible_move();
+            self.halfmove_clock += 1;
+            if self.halfmove_clock >= 100 {
+                self.status = Status::DrawFiftyMoveRule;
+            }
         }
+        irreversible
+    }
+}
+
+impl Default for ChessPosition {
+    fn default() -> Self {
+        ChessPosition {
+            board: Board::default(),
+            ply: 0,
+            status: Status::Ongoing,
+            halfmove_clock: 0,
+        }
+    }
+}
+
+impl Game for ChessPosition {
+    const ACTION_SIZE: usize = 64 * 64 * 5;
+    const STATE_SHAPE: [TensorDim; 3] = [19, 8, 8];
+    const NAME: &'static str = "chess";
+
+    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
+        MoveGen::new_legal(&self.board).map(encode_move)
+    }
+
+    fn step(&mut self, action: Action) {
+        self.step_without_repetition(action);
     }
 
     fn is_terminal(&self) -> bool {
@@ -277,7 +326,64 @@ impl Game for ChessGame {
     }
 }
 
-impl fmt::Display for ChessGame {
+impl RepetitionGame for ChessPosition {
+    fn repetition_hash(&self) -> u64 {
+        self.hash()
+    }
+
+    fn halfmove_clock(&self) -> usize {
+        ChessPosition::halfmove_clock(self)
+    }
+
+    fn set_repetition_draw(&mut self) {
+        ChessPosition::set_repetition_draw(self);
+    }
+}
+
+impl Game for ChessGame {
+    const ACTION_SIZE: usize = ChessPosition::ACTION_SIZE;
+    const STATE_SHAPE: [TensorDim; 3] = ChessPosition::STATE_SHAPE;
+    const NAME: &'static str = ChessPosition::NAME;
+
+    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
+        self.pos.legal_actions()
+    }
+
+    fn step(&mut self, action: Action) {
+        let irreversible = self.pos.step_without_repetition(action);
+        if self.pos.is_terminal() {
+            return;
+        }
+        if irreversible {
+            self.after_irreversible_move();
+        }
+        else {
+            self.after_reversible_move();
+        }
+    }
+
+    fn is_terminal(&self) -> bool {
+        self.pos.is_terminal()
+    }
+
+    fn reward(&self) -> f32 {
+        self.pos.reward()
+    }
+
+    fn encode_state(&self, out: &mut [f32]) {
+        self.pos.encode_state(out);
+    }
+
+    fn parse_move(&self, s: &str) -> Option<Action> {
+        self.pos.parse_move(s)
+    }
+
+    fn format_action(&self, action: Action) -> String {
+        self.pos.format_action(action)
+    }
+}
+
+impl fmt::Display for ChessPosition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for rank in (0..8).rev() {
             write!(f, "{} ", rank + 1)?;
@@ -303,6 +409,12 @@ impl fmt::Display for ChessGame {
                 "Black"
             }
         )
+    }
+}
+
+impl fmt::Display for ChessGame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.pos.fmt(f)
     }
 }
 

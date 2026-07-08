@@ -16,6 +16,7 @@ pub struct RunConfig {
 /// ```text
 /// <root>/config.json                     game + network architecture
 /// <root>/checkpoints/ckpt_0000.safetensors ...
+/// <root>/archive/ckpt_iter_000001_1234567890.safetensors
 /// <root>/best.safetensors                network used for self-play
 /// <root>/candidate.safetensors           gated mode's challenger
 /// <root>/metrics.jsonl                   one JSON record per iteration
@@ -53,9 +54,19 @@ impl RunDir {
         self.root.join("checkpoints")
     }
 
+    fn archive_dir(&self) -> PathBuf {
+        self.root.join("archive")
+    }
+
     pub fn checkpoint_path(&self, index: u32) -> PathBuf {
         self.checkpoints_dir()
             .join(format!("ckpt_{index:04}.safetensors"))
+    }
+
+    pub fn archive_checkpoint_path(&self, iteration: usize, unix_secs: u64) -> Result<PathBuf> {
+        let dir = self.archive_dir();
+        fs::create_dir_all(&dir)?;
+        Ok(dir.join(format!("ckpt_iter_{iteration:06}_{unix_secs}.safetensors")))
     }
 
     pub fn best_path(&self) -> PathBuf {

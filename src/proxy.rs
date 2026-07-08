@@ -1,5 +1,5 @@
-use crate::analysis::{analyze_position, Analysis, AnalyzeConfig, AnalyzeMode};
 use crate::alphazero::{Batcher, Mcts, MctsConfig, RunConfig, RunDir};
+use crate::analysis::{analyze_position, Analysis, AnalyzeConfig, AnalyzeMode};
 use crate::game::Game;
 use crate::games::{ChessGame, Connect4};
 use crate::position::{ChessPosition, Connect4Position, PositionGame, PositionSpec};
@@ -44,8 +44,8 @@ pub struct AnalyzeRequest {
     pub mode: Option<AnalyzeMode>,
     #[serde(default = "default_simulations")]
     pub simulations: usize,
-    #[serde(default = "default_mcts_batch")]
-    pub mcts_batch: usize,
+    #[serde(default = "default_wait_for_count")]
+    pub wait_for_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -58,8 +58,8 @@ struct CreateSessionRequest {
     engine_first: bool,
     #[serde(default = "default_simulations")]
     simulations: usize,
-    #[serde(default = "default_mcts_batch")]
-    mcts_batch: usize,
+    #[serde(default = "default_wait_for_count")]
+    wait_for_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -87,7 +87,7 @@ struct SessionState<G: Game> {
     model: String,
     human_turn: bool,
     simulations: usize,
-    mcts_batch: usize,
+    wait_for_count: usize,
 }
 
 pub async fn serve(cfg: ServeConfig) -> Result<()> {
@@ -124,11 +124,10 @@ pub fn analyze_request(
         mode,
         mcts: MctsConfig {
             simulations: req.simulations,
-            batch_size: req.mcts_batch,
             eps: 0.0,
             ..Default::default()
         },
-        wait_for_count: req.mcts_batch.max(1),
+        wait_for_count: req.wait_for_count.max(1),
         timeout: BATCH_TIMEOUT,
     };
     match (game, req.position) {
@@ -182,7 +181,10 @@ pub fn resolve_model(run_dir: &Path, model: &str) -> PathBuf {
 
 pub fn open_existing_run<G: Game>(root: &Path) -> Result<(RunDir, RunConfig)> {
     let (run, cfg) = RunDir::open_or_create(root, || {
-        panic!("no run found at {}; train first or pass --run-dir", root.display())
+        panic!(
+            "no run found at {}; train first or pass --run-dir",
+            root.display()
+        )
     })?;
     anyhow::ensure!(
         cfg.game == G::NAME,
@@ -209,8 +211,8 @@ fn default_simulations() -> usize {
     800
 }
 
-fn default_mcts_batch() -> usize {
-    32
+fn default_wait_for_count() -> usize {
+    1
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -248,9 +250,10 @@ async fn analyze_http(
     State(state): State<AppState>,
     Json(req): Json<AnalyzeRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let result =
-        tokio::task::spawn_blocking(move || analyze_request(state.game, state.run_dir, req, state.device))
-            .await;
+    let result = tokio::task::spawn_blocking(move || {
+        analyze_request(state.game, state.run_dir, req, state.device)
+    })
+    .await;
     match result {
         Ok(Ok(analysis)) => (StatusCode::OK, Json(json!(analysis))),
         Ok(Err(err)) => (
@@ -326,7 +329,7 @@ fn create_session_inner(state: &AppState, req: CreateSessionRequest) -> Result<s
                 model: req.model,
                 human_turn: !req.engine_first,
                 simulations: req.simulations,
-                mcts_batch: req.mcts_batch,
+                wait_for_count: req.wait_for_count,
             })
         }
         GameKind::Connect4 => {
@@ -341,7 +344,7 @@ fn create_session_inner(state: &AppState, req: CreateSessionRequest) -> Result<s
                 model: req.model,
                 human_turn: !req.engine_first,
                 simulations: req.simulations,
-                mcts_batch: req.mcts_batch,
+                wait_for_count: req.wait_for_count,
             })
         }
     };
@@ -399,14 +402,13 @@ fn play_engine_turn_for<G: Game>(
         &cfg.net,
         &resolve_model(run_dir, &session.model),
         device,
-        session.mcts_batch,
+        session.wait_for_count.max(1),
         Duration::from_millis(1),
     )?;
     let mut mcts = Mcts::new(
         batcher.client(),
         MctsConfig {
             simulations: session.simulations,
-            batch_size: session.mcts_batch,
             eps: 0.0,
             ..Default::default()
         },

@@ -46,6 +46,7 @@ impl Default for EvalBatch {
 
 /// Network output for one state: `logits[k]` corresponds to the k-th legal
 /// action the request supplied for that state.
+#[derive(Clone)]
 pub struct Evaluation {
     pub logits: Vec<f32>,
     pub value: f32,
