@@ -18,7 +18,7 @@ BLOCKS="${BLOCKS:-10}"
 FILTERS="${FILTERS:-64}"
 
 # Search and self-play throughput knobs.
-SIMULATIONS="${SIMULATIONS:-800}"
+SIMULATIONS="${SIMULATIONS:-400}"
 MCTS_LEAF_BATCH_SIZE="${MCTS_LEAF_BATCH_SIZE:-32}"
 FAST_SIMULATIONS="${FAST_SIMULATIONS:-100}"
 FULL_SIMULATION_PROBABILITY="${FULL_SIMULATION_PROBABILITY:-0.25}"
@@ -30,6 +30,7 @@ MAX_MOVES="${MAX_MOVES:-512}"
 PROGRESS_EVERY="${PROGRESS_EVERY:-25}"
 
 # Checkpoint/log cadence.
+NUMBERED_CHECKPOINT_EVERY="${NUMBERED_CHECKPOINT_EVERY:-50}"
 ARCHIVE_CHECKPOINT_MINUTES="${ARCHIVE_CHECKPOINT_MINUTES:-60}"
 STDOUT_LOG="${STDOUT_LOG:-$RUN_DIR/train.log}"
 STDERR_LOG="${STDERR_LOG:-$RUN_DIR/stderr.log}"
@@ -88,6 +89,7 @@ target/release/train \
   --mode continuous \
   --mcts-variant "$MCTS_VARIANT" \
   --gumbel-sampled-actions "$GUMBEL_SAMPLED_ACTIONS" \
+  --numbered-checkpoint-every "$NUMBERED_CHECKPOINT_EVERY" \
   --archive-checkpoint-minutes "$ARCHIVE_CHECKPOINT_MINUTES" \
   --device "$DEVICE" \
   --inference-precision "$INFERENCE_PRECISION" \

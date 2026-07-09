@@ -121,6 +121,46 @@ fn promotions_encode_distinctly() {
 }
 
 #[test]
+fn castling_actions_are_exposed_to_policy() {
+    let g = from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+    let kingside = g.parse_move("e1g1").expect("white O-O should be legal");
+    let queenside = g.parse_move("e1c1").expect("white O-O-O should be legal");
+    let legal: Vec<u32> = g.legal_actions().collect();
+
+    assert!(legal.contains(&kingside));
+    assert!(legal.contains(&queenside));
+    assert_eq!(g.format_action(kingside), "e1g1");
+    assert_eq!(g.format_action(queenside), "e1c1");
+    assert_eq!(g.san_for_action(kingside), "O-O");
+    assert_eq!(g.san_for_action(queenside), "O-O-O");
+    assert!((kingside as usize) < ChessGame::ACTION_SIZE);
+    assert!((queenside as usize) < ChessGame::ACTION_SIZE);
+}
+
+#[test]
+fn castling_step_moves_king_and_rook() {
+    let mut g = from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+    g.pos.halfmove_clock = 17;
+
+    g.step(g.parse_move("e1g1").unwrap());
+    assert_eq!(g.board().piece_on(Square::G1), Some(Piece::King));
+    assert_eq!(g.board().piece_on(Square::F1), Some(Piece::Rook));
+    assert_eq!(g.board().piece_on(Square::E1), None);
+    assert_eq!(g.board().piece_on(Square::H1), None);
+    assert!(!g.board().castle_rights(Color::White).has_kingside());
+    assert!(!g.board().castle_rights(Color::White).has_queenside());
+    assert_eq!(g.pos.halfmove_clock, 0);
+
+    g.step(g.parse_move("e8c8").unwrap());
+    assert_eq!(g.board().piece_on(Square::C8), Some(Piece::King));
+    assert_eq!(g.board().piece_on(Square::D8), Some(Piece::Rook));
+    assert_eq!(g.board().piece_on(Square::E8), None);
+    assert_eq!(g.board().piece_on(Square::A8), None);
+    assert!(!g.board().castle_rights(Color::Black).has_kingside());
+    assert!(!g.board().castle_rights(Color::Black).has_queenside());
+}
+
+#[test]
 fn threefold_repetition_is_a_draw() {
     let mut g = ChessGame::default();
     for mv in [
