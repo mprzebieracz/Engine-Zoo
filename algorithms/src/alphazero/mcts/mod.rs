@@ -36,6 +36,9 @@ pub struct MctsConfig {
     pub variant: MctsVariant,
     /// Simulations per search.
     pub simulations: usize,
+    /// Leaf evaluations collected inside one tree search before calling the evaluator.
+    /// `1` preserves the original single-leaf simulation behavior.
+    pub leaf_batch_size: usize,
     /// Dirichlet noise weight at the root (0 disables, e.g. for match play).
     pub eps: f32,
     pub alpha: f32,
@@ -51,6 +54,7 @@ impl Default for MctsConfig {
             c_base: 19652.0,
             variant: MctsVariant::Puct,
             simulations: 800,
+            leaf_batch_size: 1,
             eps: 0.25,
             alpha: 0.3,
             fpu_reduction: 0.1,
@@ -126,6 +130,7 @@ struct Node {
     first_child: u32,
     action_from_parent: Action,
     visits: u32,
+    virtual_loss_count: u32,
     value_sum: f32,
     prior: f32,
     logit: f32,
@@ -151,6 +156,7 @@ impl Node {
             first_child: 0,
             action_from_parent,
             visits: 0,
+            virtual_loss_count: 0,
             value_sum: 0.0,
             prior,
             logit,
@@ -167,6 +173,19 @@ impl Node {
             0.0
         } else {
             self.value_sum / self.visits as f32
+        }
+    }
+
+    fn effective_visits(&self) -> u32 {
+        self.visits + self.virtual_loss_count
+    }
+
+    fn effective_q(&self) -> f32 {
+        let visits = self.effective_visits();
+        if visits == 0 {
+            0.0
+        } else {
+            (self.value_sum + self.virtual_loss_count as f32) / visits as f32
         }
     }
 }

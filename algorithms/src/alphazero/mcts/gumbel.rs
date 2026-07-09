@@ -125,12 +125,19 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
         debug_assert!(!self.variant.root_actions.is_empty());
 
         let schedule = gumbel_visit_schedule(self.variant.root_actions.len(), self.cfg.simulations);
+        let mut leaves = Vec::with_capacity(self.leaf_batch_size());
         for considered_visit in schedule {
             let transform = self.root_q_transform(root_value);
             let child = self
                 .best_gumbel_action_with_visits(considered_visit, transform)
                 .expect("Gumbel visit schedule must always have a considered action");
-            driver.simulate_from_child(self, game, child);
+            leaves.push(self.collect_leaf(game, Some(child), driver));
+            if leaves.len() >= self.leaf_batch_size() {
+                self.finish_leaf_batch(&mut leaves, driver);
+            }
+        }
+        if !leaves.is_empty() {
+            self.finish_leaf_batch(&mut leaves, driver);
         }
 
         self.select_gumbel_winner(root_value)
@@ -167,7 +174,7 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
         let mut best = None;
         let mut best_score = f32::NEG_INFINITY;
         for &action in &self.variant.root_actions {
-            if self.nodes[action.node as usize].visits != considered_visit {
+            if self.nodes[action.node as usize].effective_visits() != considered_visit {
                 continue;
             }
             let score = self.root_action_score(action, transform);
@@ -198,10 +205,10 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
     }
 
     fn completed_root_child_q(&self, child: u32, transform: RootQTransform) -> f32 {
-        if self.nodes[child as usize].visits == 0 {
+        if self.nodes[child as usize].effective_visits() == 0 {
             transform.completed_value
         } else {
-            self.root_child_q(child)
+            -self.nodes[child as usize].effective_q()
         }
     }
 
@@ -214,12 +221,12 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
 
         for c in root.first_child..root.first_child + u32::from(root.num_children) {
             let child = &self.nodes[c as usize];
-            max_visits = max_visits.max(child.visits);
-            if child.visits > 0 {
+            max_visits = max_visits.max(child.effective_visits());
+            if child.effective_visits() > 0 {
                 let prior = child.prior.max(f32::MIN_POSITIVE);
-                total_visits += child.visits;
+                total_visits += child.effective_visits();
                 visited_prior_sum += prior;
-                prior_weighted_q += prior * self.root_child_q(c);
+                prior_weighted_q += prior * -child.effective_q();
             }
         }
 
@@ -235,10 +242,10 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
         let mut max_value = completed_value;
         for c in root.first_child..root.first_child + u32::from(root.num_children) {
             let child = &self.nodes[c as usize];
-            let q = if child.visits == 0 {
+            let q = if child.effective_visits() == 0 {
                 completed_value
             } else {
-                self.root_child_q(c)
+                -child.effective_q()
             };
             min_value = min_value.min(q);
             max_value = max_value.max(q);
@@ -255,10 +262,6 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
             },
             scale: (Gumbel::C_VISIT + max_visits as f32) * Gumbel::C_SCALE,
         }
-    }
-
-    fn root_child_q(&self, child: u32) -> f32 {
-        -self.nodes[child as usize].q()
     }
 }
 

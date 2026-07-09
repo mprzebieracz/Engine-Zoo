@@ -154,6 +154,18 @@ fn pawn_move_resets_halfmove_clock() {
 }
 
 #[test]
+fn en_passant_capture_resets_halfmove_clock() {
+    let mut g = ChessGame::default();
+    for mv in ["e2e4", "a7a6", "e4e5", "d7d5"] {
+        g.step(g.parse_move(mv).unwrap());
+    }
+    g.pos.halfmove_clock = 99;
+    g.step(g.parse_move("e5d6").unwrap());
+    assert_eq!(g.pos.halfmove_clock, 0);
+    assert!(!g.is_terminal());
+}
+
+#[test]
 fn capture_resets_halfmove_clock() {
     let mut g = from_fen("4k3/8/8/8/8/8/4p3/4K3 w - - 0 1");
     g.pos.halfmove_clock = 99;

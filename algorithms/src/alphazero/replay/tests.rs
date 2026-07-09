@@ -30,6 +30,13 @@ fn ring_overwrites_oldest_entry() {
     replay.add(vec![transition(1.0), transition(2.0), transition(3.0)]);
     replay.add(vec![transition(4.0)]);
 
+    let exported: Vec<_> = replay
+        .export_filled()
+        .into_iter()
+        .map(|t| t.reward)
+        .collect();
+    assert_eq!(exported, vec![2.0, 3.0, 4.0]);
+
     let (_, policies, rewards) = replay.sample(3).unwrap();
     let mut rewards = tensor_1d(&rewards);
     rewards.sort_by(|a, b| a.total_cmp(b));

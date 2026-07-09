@@ -26,6 +26,20 @@ impl<E: Evaluator> Mcts<E> {
                 .collect(),
         }
     }
+
+    fn virtual_loss_total(&self) -> u32 {
+        match &self.inner {
+            MctsKind::Puct(core) => core.nodes.iter().map(|n| n.virtual_loss_count).sum(),
+            MctsKind::Gumbel(core) => core.nodes.iter().map(|n| n.virtual_loss_count).sum(),
+        }
+    }
+
+    fn root_visits(&self) -> u32 {
+        match &self.inner {
+            MctsKind::Puct(core) => core.nodes[0].visits,
+            MctsKind::Gumbel(core) => core.nodes[0].visits,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -339,6 +353,73 @@ fn single_leaf_search_evaluates_one_state_per_call() {
 
     assert_eq!(result.policy, vec![1.0]);
     assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
+}
+
+#[test]
+fn batched_puct_evaluates_multiple_states_per_call() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut mcts = Mcts::new(
+        RecordingEvaluator::uniform(calls.clone()),
+        MctsConfig {
+            simulations: 8,
+            leaf_batch_size: 4,
+            eps: 0.0,
+            ..Default::default()
+        },
+    );
+
+    let result = mcts.search(&Connect4::default());
+
+    assert!((result.policy.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+    assert_eq!(mcts.virtual_loss_total(), 0);
+    assert!(
+        calls.lock().unwrap().iter().any(|&n| n > 1),
+        "expected at least one batched evaluator call, got {:?}",
+        calls.lock().unwrap()
+    );
+}
+
+#[test]
+fn duplicate_batched_leaves_are_evaluated_once_and_backed_up_each_time() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut mcts = Mcts::new(
+        RecordingEvaluator::uniform(calls.clone()),
+        MctsConfig {
+            simulations: 4,
+            leaf_batch_size: 4,
+            eps: 0.0,
+            ..Default::default()
+        },
+    );
+
+    let result = mcts.search(&SinglePathGame::default());
+
+    assert_eq!(result.policy, vec![1.0]);
+    assert_eq!(mcts.virtual_loss_total(), 0);
+    assert_eq!(mcts.root_visits(), 4);
+    assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
+}
+
+#[test]
+fn batched_gumbel_clears_virtual_loss_and_keeps_valid_policy() {
+    let game = Connect4::default();
+    let mut mcts = Mcts::new(
+        UniformEvaluator,
+        MctsConfig {
+            variant: MctsVariant::Gumbel { sampled_actions: 4 },
+            simulations: 32,
+            leaf_batch_size: 8,
+            eps: 0.0,
+            ..Default::default()
+        },
+    );
+    mcts.seed_rng(19);
+
+    let result = mcts.search(&game);
+
+    assert_eq!(mcts.virtual_loss_total(), 0);
+    assert!((result.policy.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+    assert!(mcts.gumbel_root_actions().contains(&result.best_action()));
 }
 
 #[test]

@@ -41,8 +41,16 @@ impl<E: Evaluator> MctsCore<E, Puct> {
         self.build_policy_from(&root_legal, &root_eval, mode == PolicyMode::Explore);
         self.expand(0);
 
-        for _ in 0..self.cfg.simulations {
-            driver.simulate(self, game);
+        let mut leaves = Vec::with_capacity(self.leaf_batch_size());
+        let mut simulations_done = 0usize;
+        while simulations_done < self.cfg.simulations {
+            simulations_done += self.collect_leaf_batch(
+                game,
+                self.cfg.simulations - simulations_done,
+                driver,
+                &mut leaves,
+            );
+            self.finish_leaf_batch(&mut leaves, driver);
         }
         let policy = self.root_visit_policy::<G>();
         let selected_action = argmax(&policy) as Action;

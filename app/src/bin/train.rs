@@ -92,10 +92,13 @@ struct Args {
     archive_checkpoint_minutes: u64,
     #[arg(long, default_value_t = 100)]
     games: usize,
-    #[arg(long)]
+    #[arg(long, default_value = "32")]
     threads: Option<usize>,
     #[arg(long, default_value_t = 800)]
     simulations: usize,
+    /// Leaf evaluations collected inside one tree search before evaluator calls.
+    #[arg(long, default_value_t = 32)]
+    mcts_leaf_batch_size: usize,
     /// Batcher states to coalesce before running network inference.
     #[arg(long)]
     wait_for: Option<usize>,
@@ -124,7 +127,7 @@ struct Args {
     resignation_consecutive_moves: usize,
     #[arg(long, default_value_t = 0.10)]
     resignation_disable_probability: f32,
-    #[arg(long, value_enum, default_value_t = SearchKind::Puct)]
+    #[arg(long, value_enum, default_value_t = SearchKind::Gumbel)]
     mcts_variant: SearchKind,
     /// Root actions considered by Gumbel MCTS before sequential halving.
     #[arg(long, default_value_t = 16)]
@@ -246,9 +249,9 @@ fn run<G: Game>(
             default_cpu_threads()
         }
     });
-    let wait_for =
-        args.wait_for
-            .unwrap_or_else(|| if device.is_cuda() { threads.min(24) } else { 1 });
+    let wait_for = args
+        .wait_for
+        .unwrap_or_else(|| if device.is_cuda() { threads.min(24) } else { 1 });
     let self_play_precision = match args.inference_precision {
         InferencePrecisionKind::Auto => {
             if device.is_cuda() {
@@ -324,6 +327,7 @@ fn run<G: Game>(
         resignation_disable_probability: args.resignation_disable_probability,
         mcts: MctsConfig {
             simulations: args.simulations,
+            leaf_batch_size: args.mcts_leaf_batch_size.max(1),
             fpu_reduction: args.fpu_reduction,
             variant: match args.mcts_variant {
                 SearchKind::Puct => MctsVariant::Puct,
@@ -339,21 +343,19 @@ fn run<G: Game>(
     let archive_interval = (args.archive_checkpoint_minutes > 0)
         .then(|| Duration::from_secs(args.archive_checkpoint_minutes * 60));
     let mut last_archive = Instant::now();
+    let self_play_batcher = Batcher::new_with_precision(
+        &cfg.net,
+        &run.best_path(),
+        device,
+        wait_for,
+        Duration::from_millis(args.batch_timeout_ms),
+        self_play_precision,
+    )?;
     let mut iteration = 0usize;
     while args.forever || iteration < args.iterations {
         println!("=== iteration {iteration} ===");
         let self_play_started = Instant::now();
-        let self_play_stats = {
-            let batcher = Batcher::new_with_precision(
-                &cfg.net,
-                &run.best_path(),
-                device,
-                wait_for,
-                Duration::from_millis(args.batch_timeout_ms),
-                self_play_precision,
-            )?;
-            self_play_fn(&batcher, &replay, &sp_cfg)
-        };
+        let self_play_stats = self_play_fn(&self_play_batcher, &replay, &sp_cfg);
         let self_play_secs = self_play_started.elapsed().as_secs_f64();
         let tt_queries = self_play_stats.tt_hits + self_play_stats.tt_misses;
         let tt_hit_rate = if tt_queries == 0 {
@@ -399,6 +401,7 @@ fn run<G: Game>(
             "tt_inserts": self_play_stats.tt_inserts,
             "tt_hit_rate": tt_hit_rate,
             "fpu_reduction": args.fpu_reduction,
+            "mcts_leaf_batch_size": args.mcts_leaf_batch_size.max(1),
             "threads": threads,
             "wait_for": wait_for,
             "batch_timeout_ms": args.batch_timeout_ms,
@@ -423,6 +426,7 @@ fn run<G: Game>(
                 let checkpoint_started = Instant::now();
                 vs.save(run.checkpoint_path(next_ckpt))?;
                 vs.save(run.best_path())?;
+                self_play_batcher.reload_weights(&run.best_path())?;
                 next_ckpt += 1;
                 record["checkpoint_secs"] = checkpoint_started.elapsed().as_secs_f64().into();
             }
@@ -435,6 +439,7 @@ fn run<G: Game>(
                 };
                 let mcts_cfg = MctsConfig {
                     simulations: args.gate_simulations,
+                    leaf_batch_size: args.mcts_leaf_batch_size.max(1),
                     eps: 0.0, // no exploration noise in evaluation play
                     variant: MctsVariant::Puct,
                     ..Default::default()
@@ -467,6 +472,7 @@ fn run<G: Game>(
                     );
                     vs.save(run.checkpoint_path(next_ckpt))?;
                     vs.save(run.best_path())?;
+                    self_play_batcher.reload_weights(&run.best_path())?;
                     next_ckpt += 1;
                 } else {
                     println!(
