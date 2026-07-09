@@ -15,7 +15,7 @@ impl Gumbel {
     /// Parameters of the completed-Q transformation. The transformed value is
     /// `(C_VISIT + max_child_visits) * C_SCALE * normalized_q`.
     const C_VISIT: f32 = 50.0;
-    const C_SCALE: f32 = 0.1;
+    const C_SCALE: f32 = 1.0;
     const Q_EPSILON: f32 = 1e-8;
     const EXPLORATION_SCALE: f32 = 1.0;
 }

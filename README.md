@@ -43,3 +43,17 @@ cd web
 npm install
 npm run dev
 ```
+
+Serving an agent for the web UI:
+
+```bash
+scripts/serve_agent.sh \
+  --game chess \
+  --run-dir runs/chess-puct-real \
+  --model best \
+  --port 8080
+```
+
+The script starts the Rust API and registers the agent in `web/static/config/agents.json`.
+The web app loads that file at runtime, so each agent entry can point at its own
+`server` URL and `model` name/path.

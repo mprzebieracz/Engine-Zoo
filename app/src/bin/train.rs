@@ -90,6 +90,10 @@ struct Args {
     /// Save an extra timestamped checkpoint this often. Set 0 to disable.
     #[arg(long, default_value_t = 60)]
     archive_checkpoint_minutes: u64,
+    /// Save checkpoints/ckpt_NNNN every N promoted/continuous updates. best.safetensors is still saved every update.
+    /// Set 1 to save every update. Set 0 to disable numbered checkpoints after ckpt_0000.
+    #[arg(long, default_value_t = 1)]
+    numbered_checkpoint_every: u32,
     #[arg(long, default_value_t = 100)]
     games: usize,
     #[arg(long, default_value = "32")]
@@ -424,10 +428,15 @@ fn run<G: Game>(
         match args.mode {
             Mode::Continuous => {
                 let checkpoint_started = Instant::now();
-                vs.save(run.checkpoint_path(next_ckpt))?;
+                let numbered_checkpoint =
+                    save_numbered_checkpoint(&run, &vs, next_ckpt, args.numbered_checkpoint_every)?;
                 vs.save(run.best_path())?;
                 self_play_batcher.reload_weights(&run.best_path())?;
                 next_ckpt += 1;
+                record["checkpoint"] = numbered_checkpoint
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .into();
                 record["checkpoint_secs"] = checkpoint_started.elapsed().as_secs_f64().into();
             }
             Mode::Gated => {
@@ -470,10 +479,19 @@ fn run<G: Game>(
                         100.0 * winrate,
                         100.0 * args.gate_threshold
                     );
-                    vs.save(run.checkpoint_path(next_ckpt))?;
+                    let numbered_checkpoint = save_numbered_checkpoint(
+                        &run,
+                        &vs,
+                        next_ckpt,
+                        args.numbered_checkpoint_every,
+                    )?;
                     vs.save(run.best_path())?;
                     self_play_batcher.reload_weights(&run.best_path())?;
                     next_ckpt += 1;
+                    record["checkpoint"] = numbered_checkpoint
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .into();
                 } else {
                     println!(
                         "candidate rejected: {:.1}% < {:.1}%; self-play keeps the old best",
@@ -503,4 +521,18 @@ fn run<G: Game>(
         iteration += 1;
     }
     Ok(())
+}
+
+fn save_numbered_checkpoint(
+    run: &RunDir,
+    vs: &nn::VarStore,
+    next_ckpt: u32,
+    every: u32,
+) -> Result<Option<PathBuf>> {
+    if every == 0 || next_ckpt % every != 0 {
+        return Ok(None);
+    }
+    let path = run.checkpoint_path(next_ckpt);
+    vs.save(&path)?;
+    Ok(Some(path))
 }

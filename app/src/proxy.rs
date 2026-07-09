@@ -7,6 +7,7 @@ use axum::response::Html;
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use clap::ValueEnum;
+use engine_core::agent::PolicyMode;
 use engine_core::game::Game;
 use games::position::{ChessPosition, Connect4Position, PositionGame, PositionSpec};
 use games::{ChessGame, Connect4};
@@ -19,6 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tch::Device;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::visualization::render_chess_play_page;
 
@@ -114,12 +116,20 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         .route("/api/sessions", post(create_session))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/move", post(session_move))
+        .route("/api/sessions/{id}/engine", post(session_engine_move))
         .route("/runs/status", get(run_status))
         .route("/runs/checkpoints", get(checkpoints))
         .route("/analyze", any(analyze_http))
         .route("/sessions", post(create_session))
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/move", post(session_move))
+        .route("/sessions/{id}/engine", post(session_engine_move))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .with_state(state);
     println!("engine-zoo serving {} on {}", game_name(cfg.game), cfg.bind);
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
@@ -345,7 +355,20 @@ async fn session_move(
     axum::extract::Path(id): axum::extract::Path<u64>,
     Json(req): Json<MoveRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let result = tokio::task::spawn_blocking(move || session_move_inner(state, id, req)).await;
+    match session_move_inner(&state, id, req) {
+        Ok(value) => (StatusCode::OK, Json(value)),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn session_engine_move(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<u64>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let result = tokio::task::spawn_blocking(move || session_engine_move_inner(state, id)).await;
     match result {
         Ok(Ok(value)) => (StatusCode::OK, Json(value)),
         Ok(Err(err)) => (
@@ -361,7 +384,7 @@ async fn session_move(
 
 fn create_session_inner(state: &AppState, req: CreateSessionRequest) -> Result<serde_json::Value> {
     let id = state.next_session.fetch_add(1, Ordering::Relaxed);
-    let mut session = match state.game {
+    let session = match state.game {
         GameKind::Chess => {
             let position = match req.position {
                 Some(PositionSpec::Chess(position)) => position,
@@ -399,15 +422,12 @@ fn create_session_inner(state: &AppState, req: CreateSessionRequest) -> Result<s
             })
         }
     };
-    if !session_human_turn(&session) {
-        play_engine_turn(&state.run_dir, state.device, &mut session)?;
-    }
     let value = session_view(&session);
     state.sessions.lock().unwrap().push(session);
     Ok(value)
 }
 
-fn session_move_inner(state: AppState, id: u64, req: MoveRequest) -> Result<serde_json::Value> {
+fn session_move_inner(state: &AppState, id: u64, req: MoveRequest) -> Result<serde_json::Value> {
     let mut sessions = state.sessions.lock().unwrap();
     let session = sessions
         .iter_mut()
@@ -417,6 +437,16 @@ fn session_move_inner(state: AppState, id: u64, req: MoveRequest) -> Result<serd
         LiveSession::Chess(s) => play_chess_human_turn(s, &req.mv)?,
         LiveSession::Connect4(s) => play_human_turn(s, &req.mv)?,
     }
+    Ok(session_view(session))
+}
+
+fn session_engine_move_inner(state: AppState, id: u64) -> Result<serde_json::Value> {
+    let mut sessions = state.sessions.lock().unwrap();
+    let session = sessions
+        .iter_mut()
+        .find(|s| session_id(s) == id)
+        .ok_or_else(|| anyhow::anyhow!("unknown session"))?;
+    anyhow::ensure!(!session_human_turn(session), "not the engine's turn");
     if !session_terminal(session) && !session_human_turn(session) {
         play_engine_turn(&state.run_dir, state.device, session)?;
     }
@@ -481,7 +511,9 @@ fn play_chess_engine_turn(
             ..Default::default()
         },
     );
-    let action = mcts.search(&session.game).best_action();
+    let action = mcts
+        .search_with_mode(&session.game, PolicyMode::Deterministic)
+        .best_action();
     let mv = session.game.format_action(action);
     let san = session.game.san_for_action(action);
     session.game.step(action);
@@ -515,7 +547,9 @@ fn play_engine_turn_for<G: Game>(
             ..Default::default()
         },
     );
-    let action = mcts.search(&session.game).best_action();
+    let action = mcts
+        .search_with_mode(&session.game, PolicyMode::Deterministic)
+        .best_action();
     let mv = session.game.format_action(action);
     session.game.step(action);
     session.moves.push(mv);
