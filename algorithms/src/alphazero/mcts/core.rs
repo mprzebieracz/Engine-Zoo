@@ -16,6 +16,7 @@ pub(super) struct CoreConfig {
     pub(super) c_init: f32,
     pub(super) c_base: f32,
     pub(super) simulations: usize,
+    pub(super) leaf_batch_size: usize,
     pub(super) eps: f32,
     pub(super) alpha: f32,
     pub(super) fpu_reduction: f32,
@@ -27,6 +28,7 @@ impl CoreConfig {
             c_init: cfg.c_init,
             c_base: cfg.c_base,
             simulations: cfg.simulations,
+            leaf_batch_size: cfg.leaf_batch_size.max(1),
             eps: cfg.eps,
             alpha: cfg.alpha,
             fpu_reduction: cfg.fpu_reduction,
@@ -39,6 +41,7 @@ impl CoreConfig {
             c_base: self.c_base,
             variant,
             simulations: self.simulations,
+            leaf_batch_size: self.leaf_batch_size,
             eps: self.eps,
             alpha: self.alpha,
             fpu_reduction: self.fpu_reduction,
@@ -57,10 +60,12 @@ pub(super) enum MctsKind<E: Evaluator> {
     Gumbel(MctsCore<E, Gumbel>),
 }
 
-/// Shared tree/evaluator state for one concrete root search algorithm. Each
-/// simulation descends to one leaf and submits at most one network request.
-/// GPU batching happens across blocked search threads in the shared `Batcher`,
-/// not inside one MCTS tree.
+/// Shared tree/evaluator state for one concrete root search algorithm.
+///
+/// Search collects a small batch of leaves inside one tree, applies virtual
+/// loss while the batch is open, and sends the unique non-terminal leaves to
+/// the evaluator together. The shared `Batcher` can still coalesce requests
+/// from many self-play threads into larger GPU batches.
 pub(super) struct MctsCore<E: Evaluator, V> {
     evaluator: E,
     pub(super) cfg: CoreConfig,
@@ -70,6 +75,21 @@ pub(super) struct MctsCore<E: Evaluator, V> {
     eval_cache: Option<Arc<EvalTable>>,
     pub(super) rng: SmallRng,
     pub(super) variant: V,
+}
+
+pub(super) struct PendingLeaf<G> {
+    node: u32,
+    game: G,
+}
+
+struct PendingBackup {
+    node: u32,
+    result: PendingResult,
+}
+
+enum PendingResult {
+    Terminal,
+    Evaluation(usize),
 }
 
 #[derive(Clone, Copy)]
@@ -87,8 +107,17 @@ pub(super) trait SearchDriver<G: Game>: Copy {
         mcts: &mut MctsCore<E, V>,
         game: &G,
     ) -> (Vec<Action>, Evaluation);
-    fn simulate<E: Evaluator, V>(self, mcts: &mut MctsCore<E, V>, game: &G);
-    fn simulate_from_child<E: Evaluator, V>(self, mcts: &mut MctsCore<E, V>, game: &G, child: u32);
+    fn descend<E: Evaluator, V>(
+        self,
+        mcts: &mut MctsCore<E, V>,
+        game: &G,
+        child: Option<u32>,
+    ) -> (u32, G);
+    fn evaluate_many<E: Evaluator, V>(
+        self,
+        mcts: &mut MctsCore<E, V>,
+        games: &[G],
+    ) -> Vec<(Vec<Action>, Evaluation)>;
 }
 
 impl<G: Game> SearchDriver<G> for StandardSearch {
@@ -104,14 +133,21 @@ impl<G: Game> SearchDriver<G> for StandardSearch {
         mcts.evaluate_position(game)
     }
 
-    fn simulate<E: Evaluator, V>(self, mcts: &mut MctsCore<E, V>, game: &G) {
-        let (node, current) = mcts.descend(game, 0);
-        mcts.finish_simulation(node, &current);
+    fn descend<E: Evaluator, V>(
+        self,
+        mcts: &mut MctsCore<E, V>,
+        game: &G,
+        child: Option<u32>,
+    ) -> (u32, G) {
+        mcts.descend(game, child.unwrap_or(0))
     }
 
-    fn simulate_from_child<E: Evaluator, V>(self, mcts: &mut MctsCore<E, V>, game: &G, child: u32) {
-        let (node, current) = mcts.descend(game, child);
-        mcts.finish_simulation(node, &current);
+    fn evaluate_many<E: Evaluator, V>(
+        self,
+        mcts: &mut MctsCore<E, V>,
+        games: &[G],
+    ) -> Vec<(Vec<Action>, Evaluation)> {
+        mcts.evaluate_positions(games)
     }
 }
 
@@ -132,14 +168,21 @@ where
         mcts.evaluate_repetition_position(game)
     }
 
-    fn simulate<E: Evaluator, V>(self, mcts: &mut MctsCore<E, V>, game: &G) {
-        let (node, current) = mcts.descend_repetition(game, 0, self.root_repetitions);
-        mcts.finish_repetition_simulation(node, &current);
+    fn descend<E: Evaluator, V>(
+        self,
+        mcts: &mut MctsCore<E, V>,
+        game: &G,
+        child: Option<u32>,
+    ) -> (u32, G) {
+        mcts.descend_repetition(game, child.unwrap_or(0), self.root_repetitions)
     }
 
-    fn simulate_from_child<E: Evaluator, V>(self, mcts: &mut MctsCore<E, V>, game: &G, child: u32) {
-        let (node, current) = mcts.descend_repetition(game, child, self.root_repetitions);
-        mcts.finish_repetition_simulation(node, &current);
+    fn evaluate_many<E: Evaluator, V>(
+        self,
+        mcts: &mut MctsCore<E, V>,
+        games: &[G],
+    ) -> Vec<(Vec<Action>, Evaluation)> {
+        mcts.evaluate_repetition_positions(games)
     }
 }
 
@@ -230,6 +273,10 @@ impl<E: Evaluator> Mcts<E> {
 impl<E: Evaluator, V> MctsCore<E, V> {
     fn new(evaluator: E, cfg: CoreConfig, variant: V) -> Self {
         debug_assert!(cfg.simulations > 0, "MCTS simulations must be positive");
+        debug_assert!(
+            cfg.leaf_batch_size > 0,
+            "MCTS leaf batch size must be positive"
+        );
         debug_assert!(cfg.c_base > 0.0, "MCTS c_base must be positive");
         debug_assert!((0.0..=1.0).contains(&cfg.eps), "MCTS eps must be in [0, 1]");
         debug_assert!(
@@ -262,11 +309,21 @@ impl<E: Evaluator, V> MctsCore<E, V> {
         self.cfg.simulations = simulations.max(1);
     }
 
+    pub(super) fn leaf_batch_size(&self) -> usize {
+        self.cfg.leaf_batch_size.max(1)
+    }
+
     pub(super) fn clear_tree_common(&mut self) {
         self.nodes.clear();
         self.policy_buf.clear();
         self.batch.clear();
     }
+}
+
+fn find_leaf_result(result_by_node: &[(u32, usize)], node: u32) -> Option<usize> {
+    result_by_node
+        .iter()
+        .find_map(|&(candidate, idx)| (candidate == node).then_some(idx))
 }
 
 impl<E: Evaluator, V> MctsCore<E, V> {
@@ -285,7 +342,7 @@ impl<E: Evaluator, V> MctsCore<E, V> {
             }
             let c_init = self.cfg.c_init;
             let c_base = self.cfg.c_base;
-            let c_puct = ((1.0 + n.visits as f32 + c_base) / c_base).ln() + c_init;
+            let c_puct = ((1.0 + n.effective_visits() as f32 + c_base) / c_base).ln() + c_init;
             let Some(best) = self.select_child(node, c_puct) else {
                 break;
             };
@@ -323,7 +380,7 @@ impl<E: Evaluator, V> MctsCore<E, V> {
             }
             let c_init = self.cfg.c_init;
             let c_base = self.cfg.c_base;
-            let c_puct = ((1.0 + n.visits as f32 + c_base) / c_base).ln() + c_init;
+            let c_puct = ((1.0 + n.effective_visits() as f32 + c_base) / c_base).ln() + c_init;
             let Some(best) = self.select_child(node, c_puct) else {
                 break;
             };
@@ -393,48 +450,129 @@ impl<E: Evaluator, V> MctsCore<E, V> {
         }
     }
 
-    pub(super) fn finish_simulation<G: Game>(&mut self, node: u32, game: &G) {
-        if self.nodes[node as usize].terminal {
-            self.backpropagate(node, self.nodes[node as usize].reward);
-            return;
+    pub(super) fn collect_leaf_batch<G, D>(
+        &mut self,
+        game: &G,
+        budget: usize,
+        driver: D,
+        leaves: &mut Vec<PendingLeaf<G>>,
+    ) -> usize
+    where
+        G: Game,
+        D: SearchDriver<G>,
+    {
+        let target = budget.min(self.leaf_batch_size());
+        leaves.clear();
+        for _ in 0..target {
+            leaves.push(self.collect_leaf(game, None, driver));
         }
-
-        let (legal, res) = self.evaluate_position(game);
-        if !self.nodes[node as usize].expanded {
-            self.build_policy_from(&legal, &res, false);
-            self.expand(node);
-        }
-        self.backpropagate(node, res.value);
+        target
     }
 
-    pub(super) fn finish_repetition_simulation<G: RepetitionGame>(&mut self, node: u32, game: &G) {
-        if self.nodes[node as usize].terminal {
-            self.backpropagate(node, self.nodes[node as usize].reward);
+    pub(super) fn collect_leaf<G, D>(
+        &mut self,
+        game: &G,
+        child: Option<u32>,
+        driver: D,
+    ) -> PendingLeaf<G>
+    where
+        G: Game,
+        D: SearchDriver<G>,
+    {
+        let (node, current) = driver.descend(self, game, child);
+        self.add_virtual_loss(node);
+        PendingLeaf {
+            node,
+            game: current,
+        }
+    }
+
+    pub(super) fn finish_leaf_batch<G, D>(&mut self, leaves: &mut Vec<PendingLeaf<G>>, driver: D)
+    where
+        G: Game,
+        D: SearchDriver<G>,
+    {
+        if leaves.is_empty() {
             return;
         }
 
-        let (legal, res) = self.evaluate_repetition_position(game);
-        if !self.nodes[node as usize].expanded {
-            self.build_policy_from(&legal, &res, false);
-            self.expand(node);
+        let mut pending = Vec::<PendingBackup>::with_capacity(leaves.len());
+        let mut unique_games = Vec::<G>::with_capacity(leaves.len());
+        let mut result_by_node = Vec::<(u32, usize)>::with_capacity(leaves.len());
+
+        for leaf in leaves.drain(..) {
+            if self.nodes[leaf.node as usize].terminal {
+                pending.push(PendingBackup {
+                    node: leaf.node,
+                    result: PendingResult::Terminal,
+                });
+                continue;
+            }
+            let idx = match find_leaf_result(&result_by_node, leaf.node) {
+                Some(idx) => idx,
+                None => {
+                    let idx = unique_games.len();
+                    result_by_node.push((leaf.node, idx));
+                    unique_games.push(leaf.game);
+                    idx
+                }
+            };
+            pending.push(PendingBackup {
+                node: leaf.node,
+                result: PendingResult::Evaluation(idx),
+            });
         }
-        self.backpropagate(node, res.value);
+
+        let evaluations = driver.evaluate_many(self, &unique_games);
+        debug_assert_eq!(
+            evaluations.len(),
+            unique_games.len(),
+            "driver must return one result per unique non-terminal leaf"
+        );
+
+        for backup in pending {
+            match backup.result {
+                PendingResult::Terminal => {
+                    let reward = self.nodes[backup.node as usize].reward;
+                    self.backpropagate_after_virtual_loss(backup.node, reward);
+                }
+                PendingResult::Evaluation(idx) => {
+                    let (legal, res) = &evaluations[idx];
+                    if !self.nodes[backup.node as usize].expanded {
+                        self.build_policy_from(legal, res, false);
+                        self.expand(backup.node);
+                    }
+                    self.backpropagate_after_virtual_loss(backup.node, res.value);
+                }
+            }
+        }
+    }
+
+    fn add_virtual_loss(&mut self, mut node: u32) {
+        loop {
+            self.nodes[node as usize].virtual_loss_count += 1;
+            let Some(parent) = self.nodes[node as usize].parent else {
+                break;
+            };
+            node = parent;
+        }
     }
 
     fn select_child(&self, node: u32, c_puct: f32) -> Option<u32> {
         let n = &self.nodes[node as usize];
-        let sqrt_parent = ((n.visits + 1) as f32).sqrt();
+        let sqrt_parent = ((n.effective_visits() + 1) as f32).sqrt();
 
         let mut best = None;
         let mut best_ucb = f32::NEG_INFINITY;
         for c in n.first_child..n.first_child + u32::from(n.num_children) {
             let child = &self.nodes[c as usize];
-            let q = if child.visits == 0 {
-                n.q() - self.cfg.fpu_reduction
+            let q = if child.effective_visits() == 0 {
+                n.effective_q() - self.cfg.fpu_reduction
             } else {
-                -child.q()
+                -child.effective_q()
             };
-            let ucb = q + c_puct * child.prior * sqrt_parent / (1 + child.visits) as f32;
+            let ucb =
+                q + c_puct * child.prior * sqrt_parent / (1 + child.effective_visits()) as f32;
             if ucb > best_ucb {
                 best_ucb = ucb;
                 best = Some(c);
@@ -443,9 +581,11 @@ impl<E: Evaluator, V> MctsCore<E, V> {
         best
     }
 
-    fn backpropagate(&mut self, mut node: u32, mut value: f32) {
+    fn backpropagate_after_virtual_loss(&mut self, mut node: u32, mut value: f32) {
         loop {
             let n = &mut self.nodes[node as usize];
+            debug_assert!(n.virtual_loss_count > 0, "virtual loss underflow");
+            n.virtual_loss_count = n.virtual_loss_count.saturating_sub(1);
             n.visits += 1;
             n.value_sum += value;
             value = -value;
@@ -467,16 +607,32 @@ impl<E: Evaluator, V> MctsCore<E, V> {
     }
 
     pub(super) fn evaluate_position<G: Game>(&mut self, game: &G) -> (Vec<Action>, Evaluation) {
+        self.evaluate_positions(std::slice::from_ref(game))
+            .pop()
+            .expect("single game evaluation")
+    }
+
+    pub(super) fn evaluate_positions<G: Game>(
+        &mut self,
+        games: &[G],
+    ) -> Vec<(Vec<Action>, Evaluation)> {
+        if games.is_empty() {
+            return Vec::new();
+        }
         self.batch.clear();
-        self.enqueue_state(game);
-        let legal = self.batch.legal.clone();
-        let mut results = self.evaluator.evaluate(&self.batch);
+        let mut legal_per_state = Vec::with_capacity(games.len());
+        for game in games {
+            let begin = self.batch.legal.len();
+            self.enqueue_state(game);
+            legal_per_state.push(self.batch.legal[begin..].to_vec());
+        }
+        let results = self.evaluator.evaluate(&self.batch);
         debug_assert_eq!(
             results.len(),
             self.batch.len(),
             "evaluator must return one result per input state"
         );
-        (legal, results.remove(0))
+        legal_per_state.into_iter().zip(results).collect()
     }
 
     pub(super) fn evaluate_repetition_position<G: RepetitionGame>(
@@ -501,6 +657,51 @@ impl<E: Evaluator, V> MctsCore<E, V> {
             );
         }
         (legal, eval)
+    }
+
+    pub(super) fn evaluate_repetition_positions<G: RepetitionGame>(
+        &mut self,
+        games: &[G],
+    ) -> Vec<(Vec<Action>, Evaluation)> {
+        if games.is_empty() {
+            return Vec::new();
+        }
+
+        let cache = self.eval_cache.clone();
+        let mut out = vec![None; games.len()];
+        let mut miss_indexes = Vec::new();
+        let mut miss_games = Vec::new();
+
+        for (i, game) in games.iter().enumerate() {
+            let hash = game.repetition_hash();
+            if let Some(cache) = &cache {
+                if let Some(cached) = cache.get(hash) {
+                    out[i] = Some((cached.legal, cached.eval));
+                    continue;
+                }
+            }
+            miss_indexes.push(i);
+            miss_games.push(*game);
+        }
+
+        let miss_results = self.evaluate_positions(&miss_games);
+        for ((i, game), (legal, eval)) in miss_indexes.into_iter().zip(miss_games).zip(miss_results)
+        {
+            if let Some(cache) = &cache {
+                cache.insert(
+                    game.repetition_hash(),
+                    CachedEvaluation {
+                        legal: legal.clone(),
+                        eval: eval.clone(),
+                    },
+                );
+            }
+            out[i] = Some((legal, eval));
+        }
+
+        out.into_iter()
+            .map(|value| value.expect("all repetition eval slots filled"))
+            .collect()
     }
 
     /// Softmax over legal-action logits (optionally mixed with root Dirichlet

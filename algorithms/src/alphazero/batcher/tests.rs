@@ -33,11 +33,7 @@ fn batch(states: &[f32], legal_per_state: &[&[u32]]) -> EvalBatch {
 
 fn shared(wait_for_count: usize) -> Arc<Shared> {
     Arc::new(Shared {
-        pending: Mutex::new(Pending {
-            tasks: Vec::new(),
-            count: 0,
-            stop: false,
-        }),
+        pending: Mutex::new(Pending::new()),
         cv: Condvar::new(),
         wait_for_count,
         timeout: Duration::from_millis(10),
@@ -101,6 +97,20 @@ fn save_weights(cfg: &NetConfig) -> std::path::PathBuf {
     path
 }
 
+fn save_seeded_weights(cfg: &NetConfig, seed: i64) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "engine-zoo-batcher-test-{}-{}-{}.safetensors",
+        std::process::id(),
+        seed,
+        rand::random::<u64>()
+    ));
+    tch::manual_seed(seed);
+    let vs = nn::VarStore::new(Device::Cpu);
+    let _net = AlphaZeroNet::new(&vs.root(), cfg);
+    vs.save(&path).unwrap();
+    path
+}
+
 #[test]
 fn worker_evaluate_returns_only_requested_legal_logits() {
     tch::manual_seed(7);
@@ -110,7 +120,14 @@ fn worker_evaluate_returns_only_requested_legal_logits() {
     let request = batch(&[0.25, -0.5], &[&[4, 1], &[0, 3, 2]]);
     let expected = direct_eval(&net, &cfg, &request);
 
-    let mut worker = Worker::new(net, cfg, Device::Cpu, shared(4), InferencePrecision::Fp32);
+    let mut worker = Worker::new(
+        vs,
+        net,
+        cfg,
+        Device::Cpu,
+        shared(4),
+        InferencePrecision::Fp32,
+    );
     let task = Task {
         batch: request,
         tx: sync_channel(1).0,
@@ -136,7 +153,14 @@ fn process_splits_combined_results_back_to_each_task() {
 
     let (tx1, rx1) = sync_channel(1);
     let (tx2, rx2) = sync_channel(1);
-    let mut worker = Worker::new(net, cfg, Device::Cpu, shared(8), InferencePrecision::Fp32);
+    let mut worker = Worker::new(
+        vs,
+        net,
+        cfg,
+        Device::Cpu,
+        shared(8),
+        InferencePrecision::Fp32,
+    );
     worker.process(vec![
         Task {
             batch: first,
@@ -171,6 +195,42 @@ fn client_evaluate_round_trips_through_worker_thread() {
 
     assert_close(&actual, &expected);
     fs::remove_file(weights).unwrap();
+}
+
+#[test]
+fn batcher_reloads_weights_without_restarting_client() {
+    let cfg = tiny_cfg();
+    let first_weights = save_seeded_weights(&cfg, 101);
+    let second_weights = save_seeded_weights(&cfg, 202);
+
+    let request = batch(&[0.75, -1.25], &[&[0, 2, 4], &[1, 3]]);
+
+    let mut first_vs = nn::VarStore::new(Device::Cpu);
+    let first_net = AlphaZeroNet::new(&first_vs.root(), &cfg);
+    first_vs.load(&first_weights).unwrap();
+    let expected_first = direct_eval(&first_net, &cfg, &request);
+
+    let mut second_vs = nn::VarStore::new(Device::Cpu);
+    let second_net = AlphaZeroNet::new(&second_vs.root(), &cfg);
+    second_vs.load(&second_weights).unwrap();
+    let expected_second = direct_eval(&second_net, &cfg, &request);
+
+    let batcher = Batcher::new(
+        &cfg,
+        &first_weights,
+        Device::Cpu,
+        2,
+        Duration::from_millis(50),
+    )
+    .unwrap();
+    let mut client = batcher.client();
+    assert_close(&client.evaluate(&request), &expected_first);
+
+    batcher.reload_weights(&second_weights).unwrap();
+    assert_close(&client.evaluate(&request), &expected_second);
+
+    fs::remove_file(first_weights).unwrap();
+    fs::remove_file(second_weights).unwrap();
 }
 
 #[test]

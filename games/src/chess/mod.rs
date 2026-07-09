@@ -39,11 +39,20 @@ pub struct ChessGame {
     position_counts: HashMap<u64, u8>,
 }
 
-fn square_to_rc(sq: Square) -> (u32, u32) {
-    (
-        7 - sq.get_rank().to_index() as u32,
-        sq.get_file().to_index() as u32,
-    )
+const PIECES: [Piece; 6] = [
+    Piece::Pawn,
+    Piece::Knight,
+    Piece::Bishop,
+    Piece::Rook,
+    Piece::Queen,
+    Piece::King,
+];
+
+fn square_to_action_cell(sq: Square) -> u32 {
+    let idx = sq.to_index() as u32;
+    let file = idx & 7;
+    let rank = idx >> 3;
+    (7 - rank) * 8 + file
 }
 
 fn rc_to_square(r: u32, c: u32) -> Square {
@@ -54,8 +63,8 @@ fn rc_to_square(r: u32, c: u32) -> Square {
 }
 
 pub fn encode_move(mv: ChessMove) -> Action {
-    let (r1, c1) = square_to_rc(mv.get_source());
-    let (r2, c2) = square_to_rc(mv.get_dest());
+    let from = square_to_action_cell(mv.get_source());
+    let to = square_to_action_cell(mv.get_dest());
     let promo = match mv.get_promotion() {
         None => 0,
         Some(Piece::Queen) => 1,
@@ -64,7 +73,7 @@ pub fn encode_move(mv: ChessMove) -> Action {
         Some(Piece::Bishop) => 4,
         Some(other) => unreachable!("illegal promotion piece {other:?}"),
     };
-    ((r1 * 8 + c1) * 64 + (r2 * 8 + c2)) * 5 + promo
+    (from * 64 + to) * 5 + promo
 }
 
 pub fn decode_move(action: Action) -> ChessMove {
@@ -283,10 +292,19 @@ impl ChessPosition {
         let mv = decode_move(action);
         debug_assert!(self.board.legal(mv), "illegal move {mv} in {}", self.board);
 
-        let white_cr = self.board.castle_rights(Color::White);
-        let black_cr = self.board.castle_rights(Color::Black);
-        let is_pawn = self.board.piece_on(mv.get_source()) == Some(Piece::Pawn);
-        let is_capture = self.board.piece_on(mv.get_dest()).is_some();
+        let source = mv.get_source();
+        let dest = mv.get_dest();
+        let moved_piece = self.board.piece_on(source);
+        let is_pawn = moved_piece == Some(Piece::Pawn);
+        let is_capture = self.board.piece_on(dest).is_some();
+        let is_en_passant_capture = is_pawn && !is_capture && self.board.en_passant() == Some(dest);
+        let castle_rights_before =
+            matches!(moved_piece, Some(Piece::King | Piece::Rook)).then(|| {
+                (
+                    self.board.castle_rights(Color::White),
+                    self.board.castle_rights(Color::Black),
+                )
+            });
 
         self.board = self.board.make_move_new(mv);
         self.ply += 1;
@@ -303,10 +321,11 @@ impl ChessPosition {
             BoardStatus::Ongoing => {}
         }
 
-        let irreversible = is_pawn
-            || is_capture
-            || self.board.castle_rights(Color::White) != white_cr
-            || self.board.castle_rights(Color::Black) != black_cr;
+        let castle_rights_changed = castle_rights_before.is_some_and(|(white_cr, black_cr)| {
+            self.board.castle_rights(Color::White) != white_cr
+                || self.board.castle_rights(Color::Black) != black_cr
+        });
+        let irreversible = is_pawn || is_capture || is_en_passant_capture || castle_rights_changed;
 
         if irreversible {
             self.halfmove_clock = 0;
@@ -398,25 +417,28 @@ impl Game for ChessPosition {
         let (opp_k, opp_q) = rights(!me);
         let ep_file = self.board.en_passant().map(|sq| sq.get_file().to_index());
 
-        for i in 0..8usize {
-            for j in 0..8usize {
-                // Output row i -> board rank: no flip for white, vertical flip for black.
-                let rank = if white_to_move { 7 - i } else { i };
-                let sq = Square::make_square(Rank::from_index(rank), File::from_index(j));
-                if let Some(piece) = self.board.piece_on(sq) {
-                    let own = self.board.color_on(sq) == Some(me);
-                    let plane = if own { 0 } else { 6 } + piece.to_index();
-                    out[plane * 64 + i * 8 + j] = 1.0;
-                }
-                let cell = i * 8 + j;
-                out[12 * 64 + cell] = if white_to_move { 1.0 } else { 0.0 };
-                out[13 * 64 + cell] = f32::from(self.ply);
-                out[14 * 64 + cell] = f32::from(own_k);
-                out[15 * 64 + cell] = f32::from(own_q);
-                out[16 * 64 + cell] = f32::from(opp_k);
-                out[17 * 64 + cell] = f32::from(opp_q);
-                if ep_file == Some(j) {
-                    out[18 * 64 + cell] = 1.0;
+        out[12 * 64..13 * 64].fill(if white_to_move { 1.0 } else { 0.0 });
+        out[13 * 64..14 * 64].fill(f32::from(self.ply));
+        out[14 * 64..15 * 64].fill(f32::from(own_k));
+        out[15 * 64..16 * 64].fill(f32::from(own_q));
+        out[16 * 64..17 * 64].fill(f32::from(opp_k));
+        out[17 * 64..18 * 64].fill(f32::from(opp_q));
+
+        if let Some(file) = ep_file {
+            for row in 0..8 {
+                out[18 * 64 + row * 8 + file] = 1.0;
+            }
+        }
+
+        for (color, base_plane) in [(me, 0), (!me, 6)] {
+            let color_squares = *self.board.color_combined(color);
+            for piece in PIECES {
+                for sq in *self.board.pieces(piece) & color_squares {
+                    let idx = sq.to_index();
+                    let file = idx & 7;
+                    let rank = idx >> 3;
+                    let row = if white_to_move { 7 - rank } else { rank };
+                    out[(base_plane + piece.to_index()) * 64 + row * 8 + file] = 1.0;
                 }
             }
         }

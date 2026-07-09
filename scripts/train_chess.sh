@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Main run controls.
-RUN_DIR="${RUN_DIR:-runs/chess-puct-real}"
+RUN_DIR="${RUN_DIR:-runs/chess}"
 MCTS_VARIANT="${MCTS_VARIANT:-gumbel}" # puct or gumbel
 GUMBEL_SAMPLED_ACTIONS="${GUMBEL_SAMPLED_ACTIONS:-16}"
 
@@ -19,10 +19,11 @@ FILTERS="${FILTERS:-64}"
 
 # Search and self-play throughput knobs.
 SIMULATIONS="${SIMULATIONS:-800}"
+MCTS_LEAF_BATCH_SIZE="${MCTS_LEAF_BATCH_SIZE:-32}"
 FAST_SIMULATIONS="${FAST_SIMULATIONS:-100}"
 FULL_SIMULATION_PROBABILITY="${FULL_SIMULATION_PROBABILITY:-0.25}"
-THREADS="${THREADS:-128}"
-WAIT_FOR="${WAIT_FOR:-24}"
+THREADS="${THREADS:-32}"
+WAIT_FOR="${WAIT_FOR:-128}"
 BATCH_TIMEOUT_MS="${BATCH_TIMEOUT_MS:-5}"
 TT_ENTRIES="${TT_ENTRIES:-1000000}"
 MAX_MOVES="${MAX_MOVES:-512}"
@@ -73,6 +74,7 @@ target/release/train \
   --wait-for "$WAIT_FOR" \
   --batch-timeout-ms "$BATCH_TIMEOUT_MS" \
   --simulations "$SIMULATIONS" \
+  --mcts-leaf-batch-size "$MCTS_LEAF_BATCH_SIZE" \
   --fast-simulations "$FAST_SIMULATIONS" \
   --full-simulation-probability "$FULL_SIMULATION_PROBABILITY" \
   --max-moves "$MAX_MOVES" \

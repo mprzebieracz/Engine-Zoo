@@ -1,7 +1,8 @@
 use super::evaluator::{EvalBatch, Evaluation, Evaluator};
 use super::network::{AlphaZeroNet, NetConfig};
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -41,11 +42,28 @@ struct Task {
     tx: SyncSender<Vec<Evaluation>>,
 }
 
+struct Reload {
+    weights: PathBuf,
+    tx: SyncSender<Result<()>>,
+}
+
 struct Pending {
     tasks: Vec<Task>,
+    reloads: VecDeque<Reload>,
     /// Total states across `tasks`.
     count: usize,
     stop: bool,
+}
+
+impl Pending {
+    fn new() -> Self {
+        Pending {
+            tasks: Vec::new(),
+            reloads: VecDeque::new(),
+            count: 0,
+            stop: false,
+        }
+    }
 }
 
 struct Shared {
@@ -53,6 +71,11 @@ struct Shared {
     cv: Condvar,
     wait_for_count: usize,
     timeout: Duration,
+}
+
+enum Work {
+    Tasks(Vec<Task>),
+    Reload(Reload),
 }
 
 impl Batcher {
@@ -95,11 +118,7 @@ impl Batcher {
         }
 
         let shared = Arc::new(Shared {
-            pending: Mutex::new(Pending {
-                tasks: Vec::new(),
-                count: 0,
-                stop: false,
-            }),
+            pending: Mutex::new(Pending::new()),
             cv: Condvar::new(),
             wait_for_count: wait_for_count.max(1),
             timeout,
@@ -110,8 +129,7 @@ impl Batcher {
         let worker = std::thread::Builder::new()
             .name("batcher".into())
             .spawn(move || {
-                let _vs = vs; // keeps the weights alive for `net`
-                Worker::new(net, cfg, device, worker_shared, precision).run();
+                Worker::new(vs, net, cfg, device, worker_shared, precision).run();
             })
             .context("spawning batcher worker")?;
 
@@ -125,6 +143,23 @@ impl Batcher {
         BatcherClient {
             shared: Arc::clone(&self.shared),
         }
+    }
+
+    /// Reloads network weights inside the existing worker, preserving the
+    /// worker thread and grow-only staging buffers between self-play rounds.
+    pub fn reload_weights(&self, weights: &Path) -> Result<()> {
+        let (tx, rx) = sync_channel(1);
+        {
+            let mut pending = self.shared.pending.lock().unwrap();
+            anyhow::ensure!(!pending.stop, "batcher already shut down");
+            pending.reloads.push_back(Reload {
+                weights: weights.to_path_buf(),
+                tx,
+            });
+        }
+        self.shared.cv.notify_all();
+        rx.recv()
+            .context("batcher worker stopped before reloading weights")?
     }
 }
 
@@ -169,6 +204,7 @@ impl Evaluator for BatcherClient {
 }
 
 struct Worker {
+    vs: nn::VarStore,
     net: AlphaZeroNet,
     device: Device,
     state_size: usize,
@@ -182,10 +218,12 @@ struct Worker {
     index_buf: Option<Tensor>,
     gathered_buf: Option<Tensor>,
     value_buf: Option<Tensor>,
+    precision: InferencePrecision,
 }
 
 impl Worker {
     fn new(
+        vs: nn::VarStore,
         net: AlphaZeroNet,
         cfg: NetConfig,
         device: Device,
@@ -193,6 +231,7 @@ impl Worker {
         precision: InferencePrecision,
     ) -> Worker {
         Worker {
+            vs,
             net,
             device,
             state_size: (cfg.input_channels * cfg.height * cfg.width) as usize,
@@ -206,41 +245,70 @@ impl Worker {
             index_buf: None,
             gathered_buf: None,
             value_buf: None,
+            precision,
         }
     }
 
     fn run(&mut self) {
         loop {
-            let tasks = {
+            let work = {
                 let mut pending = self.shared.pending.lock().unwrap();
                 pending = self
                     .shared
                     .cv
-                    .wait_while(pending, |p| !p.stop && p.count == 0)
+                    .wait_while(pending, |p| !p.stop && p.count == 0 && p.reloads.is_empty())
                     .unwrap();
 
-                if pending.stop && pending.tasks.is_empty() {
+                if pending.stop && pending.tasks.is_empty() && pending.reloads.is_empty() {
                     return;
                 }
-                if pending.count < self.shared.wait_for_count && !pending.stop {
-                    let (guard, _) = self
-                        .shared
-                        .cv
-                        .wait_timeout_while(pending, self.shared.timeout, |p| {
-                            !p.stop && p.count < self.shared.wait_for_count
-                        })
-                        .unwrap();
-                    pending = guard;
-                }
 
-                pending.count = 0;
-                std::mem::take(&mut pending.tasks)
+                if pending.tasks.is_empty() {
+                    Work::Reload(
+                        pending
+                            .reloads
+                            .pop_front()
+                            .expect("worker woke without eval tasks only when reload is queued"),
+                    )
+                } else {
+                    if pending.count < self.shared.wait_for_count && !pending.stop {
+                        let (guard, _) = self
+                            .shared
+                            .cv
+                            .wait_timeout_while(pending, self.shared.timeout, |p| {
+                                !p.stop
+                                    && p.count < self.shared.wait_for_count
+                                    && p.reloads.is_empty()
+                            })
+                            .unwrap();
+                        pending = guard;
+                    }
+
+                    pending.count = 0;
+                    Work::Tasks(std::mem::take(&mut pending.tasks))
+                }
             };
 
-            if !tasks.is_empty() {
-                self.process(tasks);
+            match work {
+                Work::Tasks(tasks) if !tasks.is_empty() => self.process(tasks),
+                Work::Tasks(_) => {}
+                Work::Reload(reload) => {
+                    let result = self.reload_weights(&reload.weights);
+                    let _ = reload.tx.send(result);
+                }
             }
         }
+    }
+
+    fn reload_weights(&mut self, weights: &Path) -> Result<()> {
+        self.vs.float();
+        self.vs
+            .load(weights)
+            .with_context(|| format!("loading network weights from {}", weights.display()))?;
+        if self.precision == InferencePrecision::Fp16 {
+            self.vs.half();
+        }
+        Ok(())
     }
 
     /// Allocates (or grows) a staging buffer, pinned when running on CUDA.
