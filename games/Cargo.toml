@@ -1,0 +1,14 @@
+[package]
+name = "games"
+version.workspace = true
+edition.workspace = true
+description = "Concrete board games for engine-zoo"
+
+[dependencies]
+anyhow.workspace = true
+chess.workspace = true
+engine_core = { path = "../core" }
+serde.workspace = true
+
+[dev-dependencies]
+rand.workspace = true

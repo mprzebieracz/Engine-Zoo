@@ -1,0 +1,16 @@
+[package]
+name = "algorithms"
+version.workspace = true
+edition.workspace = true
+description = "Search, training, and analysis algorithms for engine-zoo"
+build = "build.rs"
+
+[dependencies]
+anyhow.workspace = true
+engine_core = { path = "../core" }
+games = { path = "../games" }
+rand.workspace = true
+rand_distr.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tch.workspace = true

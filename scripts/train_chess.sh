@@ -46,11 +46,14 @@ echo "stdout log: $STDOUT_LOG"
 echo "stderr log: $STDERR_LOG"
 
 if [[ "$RESUME_LATEST_CHECKPOINT" == "1" ]]; then
-  latest_checkpoint="$(
-    find "$RUN_DIR/checkpoints" -maxdepth 1 -type f -name 'ckpt_*.safetensors' 2>/dev/null \
-      | sort -V \
-      | tail -n 1
-  )"
+  latest_checkpoint=""
+  if [[ -d "$RUN_DIR/checkpoints" ]]; then
+    latest_checkpoint="$(
+      find "$RUN_DIR/checkpoints" -maxdepth 1 -type f -name 'ckpt_*.safetensors' \
+        | sort -V \
+        | tail -n 1
+    )"
+  fi
   if [[ -n "$latest_checkpoint" ]]; then
     cp "$latest_checkpoint" "$RUN_DIR/best.safetensors"
     echo "resuming self-play from latest checkpoint: $latest_checkpoint"

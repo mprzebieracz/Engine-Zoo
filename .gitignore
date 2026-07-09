@@ -5,3 +5,8 @@
 *.safetensors
 .vscode
 .cargo
+.agents
+.codex
+web/node_modules
+web/.svelte-kit
+web/build
