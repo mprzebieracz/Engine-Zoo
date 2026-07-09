@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Main run controls.
 RUN_DIR="${RUN_DIR:-runs/chess-puct-real}"
-MCTS_VARIANT="${MCTS_VARIANT:-puct}" # puct or gumbel
+MCTS_VARIANT="${MCTS_VARIANT:-gumbel}" # puct or gumbel
 GUMBEL_SAMPLED_ACTIONS="${GUMBEL_SAMPLED_ACTIONS:-16}"
 
 # Self-play and training scale.
