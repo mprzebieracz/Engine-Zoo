@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUT="${OUT:-suites/chess_lichess_easy.jsonl}"
+OUT="${OUT:-data/suites/chess_lichess_easy.jsonl}"
 CACHE="${CACHE:-scratch/lichess_db_puzzle.csv.zst}"
 LIMIT="${LIMIT:-30}"
 MIN_RATING="${MIN_RATING:-600}"

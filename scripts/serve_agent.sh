@@ -2,7 +2,7 @@
 set -euo pipefail
 
 GAME="${GAME:-chess}"
-RUN_DIR="${RUN_DIR:-runs/chess}"
+RUN_DIR="${RUN_DIR:-data/runs/chess}"
 MODEL="${MODEL:-best.safetensors}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8080}"
@@ -14,7 +14,7 @@ WRITE_CONFIG="${WRITE_CONFIG:-1}"
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/serve_agent.sh --game chess --run-dir runs/chess-puct-real --model best --port 8080
+  scripts/serve_agent.sh --game chess --run-dir data/runs/chess-puct-real --model best --port 8080
 
 Options:
   --game          chess or connect4
