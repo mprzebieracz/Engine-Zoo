@@ -25,9 +25,13 @@ pub struct MoveScore {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Analysis {
     pub value: f32,
+    pub network_value: f32,
+    pub mcts_value: Option<f32>,
     pub best_action: Option<Action>,
     pub best_move: Option<String>,
     pub policy: Vec<MoveScore>,
+    pub network_policy: Vec<MoveScore>,
+    pub mcts_policy: Vec<MoveScore>,
 }
 
 pub struct AnalyzeConfig {
@@ -48,9 +52,13 @@ pub fn analyze_position<G: PositionGame>(
     if game.is_terminal() {
         return Ok(Analysis {
             value: game.reward(),
+            network_value: game.reward(),
+            mcts_value: None,
             best_action: None,
             best_move: None,
             policy: Vec::new(),
+            network_policy: Vec::new(),
+            mcts_policy: Vec::new(),
         });
     }
 
@@ -60,8 +68,9 @@ pub fn analyze_position<G: PositionGame>(
         AnalyzeMode::Mcts => {
             let mut mcts_cfg = cfg.mcts;
             mcts_cfg.eps = 0.0;
+            let network = analyze_net::<G>(game.clone(), batcher.client())?;
             let mut mcts = Mcts::new(batcher.client(), mcts_cfg);
-            analyze_mcts(game, &mut mcts)
+            analyze_mcts(game, &mut mcts, network)
         }
     }
 }
@@ -78,7 +87,7 @@ fn analyze_net<G: Game>(game: G, mut evaluator: impl Evaluator) -> Result<Analys
     let eval = evaluator.evaluate(&batch);
     anyhow::ensure!(eval.len() == 1, "evaluator returned {} results", eval.len());
     let probs = softmax(&eval[0].logits);
-    let policy = legal
+    let policy: Vec<MoveScore> = legal
         .iter()
         .zip(probs)
         .map(|(&action, p)| MoveScore {
@@ -87,13 +96,19 @@ fn analyze_net<G: Game>(game: G, mut evaluator: impl Evaluator) -> Result<Analys
             p,
         })
         .collect();
-    Ok(with_best(eval[0].value, policy))
+    let mut analysis = with_best(eval[0].value, policy.clone());
+    analysis.network_policy = policy;
+    Ok(analysis)
 }
 
-fn analyze_mcts<G: Game, E: Evaluator>(game: G, mcts: &mut Mcts<E>) -> Result<Analysis> {
+fn analyze_mcts<G: Game, E: Evaluator>(
+    game: G,
+    mcts: &mut Mcts<E>,
+    network: Analysis,
+) -> Result<Analysis> {
     let result = mcts.search_with_mode(&game, PolicyMode::Deterministic);
     let legal: Vec<_> = game.legal_actions().collect();
-    let policy = legal
+    let policy: Vec<MoveScore> = legal
         .into_iter()
         .map(|action| MoveScore {
             action,
@@ -101,7 +116,12 @@ fn analyze_mcts<G: Game, E: Evaluator>(game: G, mcts: &mut Mcts<E>) -> Result<An
             p: result.policy[action as usize],
         })
         .collect();
-    Ok(with_best(result.value, policy))
+    let mut analysis = with_best(result.value, policy.clone());
+    analysis.network_value = network.value;
+    analysis.network_policy = network.policy;
+    analysis.mcts_value = Some(result.value);
+    analysis.mcts_policy = policy;
+    Ok(analysis)
 }
 
 fn with_best(value: f32, policy: Vec<MoveScore>) -> Analysis {
@@ -111,9 +131,13 @@ fn with_best(value: f32, policy: Vec<MoveScore>) -> Analysis {
         .map(|m| (m.action, m.mv.clone()));
     Analysis {
         value,
+        network_value: value,
+        mcts_value: None,
         best_action: best.as_ref().map(|(action, _)| *action),
         best_move: best.map(|(_, mv)| mv),
         policy,
+        network_policy: Vec::new(),
+        mcts_policy: Vec::new(),
     }
 }
 

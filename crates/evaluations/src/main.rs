@@ -139,8 +139,7 @@ impl Stockfish {
         self.ready()?;
         let position = if moves.is_empty() {
             "position startpos".to_owned()
-        }
-        else {
+        } else {
             format!("position startpos moves {}", moves.join(" "))
         };
         self.send(&position)?;
@@ -187,8 +186,7 @@ fn san(board: &Board, action: u32) -> String {
         let castle = if mv.get_dest().get_file().to_index() > mv.get_source().get_file().to_index()
         {
             "O-O"
-        }
-        else {
+        } else {
             "O-O-O"
         };
         return format!("{castle}{}", suffix(&next));
@@ -218,19 +216,16 @@ fn san(board: &Board, action: u32) -> String {
                 .all(|other| other.get_source().get_file() != file)
             {
                 out.push(char::from(b'a' + file.to_index() as u8));
-            }
-            else if same_target
+            } else if same_target
                 .iter()
                 .all(|other| other.get_source().get_rank() != rank)
             {
                 out.push(char::from(b'1' + rank.to_index() as u8));
-            }
-            else {
+            } else {
                 out.push_str(&mv.get_source().to_string());
             }
         }
-    }
-    else if capture {
+    } else if capture {
         out.push(char::from(
             b'a' + mv.get_source().get_file().to_index() as u8,
         ));
@@ -256,11 +251,9 @@ fn san(board: &Board, action: u32) -> String {
 fn suffix(board: &Board) -> &'static str {
     if board.status() == BoardStatus::Checkmate {
         "#"
-    }
-    else if board.checkers().popcnt() > 0 {
+    } else if board.checkers().popcnt() > 0 {
         "+"
-    }
-    else {
+    } else {
         ""
     }
 }
@@ -357,8 +350,7 @@ fn main() -> Result<()> {
                 model
                     .search_with_mode(&game, engine_core::agent::PolicyMode::Deterministic)
                     .best_action()
-            }
-            else {
+            } else {
                 let mv = stockfish.best_move(&uci_moves, args.stockfish_movetime_ms)?;
                 game.parse_move(&mv)
                     .with_context(|| format!("Stockfish returned illegal move {mv}"))?
@@ -370,22 +362,18 @@ fn main() -> Result<()> {
         let result = if !game.is_terminal() || game.reward() == 0.0 {
             draws += 1;
             "1/2-1/2"
-        }
-        else if (ply - 1).is_multiple_of(2) == model_white {
+        } else if (ply - 1).is_multiple_of(2) == model_white {
             wins += 1;
             if model_white {
                 "1-0"
-            }
-            else {
+            } else {
                 "0-1"
             }
-        }
-        else {
+        } else {
             losses += 1;
             if model_white {
                 "0-1"
-            }
-            else {
+            } else {
                 "1-0"
             }
         };
@@ -445,8 +433,7 @@ fn main() -> Result<()> {
                     model
                         .search_with_mode(&game, engine_core::agent::PolicyMode::Deterministic)
                         .best_action()
-                }
-                else {
+                } else {
                     baseline
                         .search_with_mode(&game, engine_core::agent::PolicyMode::Deterministic)
                         .best_action()
@@ -456,11 +443,9 @@ fn main() -> Result<()> {
             }
             if !game.is_terminal() || game.reward() == 0.0 {
                 baseline_draws += 1;
-            }
-            else if (ply - 1).is_multiple_of(2) == model_white {
+            } else if (ply - 1).is_multiple_of(2) == model_white {
                 baseline_wins += 1;
-            }
-            else {
+            } else {
                 baseline_losses += 1;
             }
         }
@@ -474,8 +459,7 @@ fn main() -> Result<()> {
             baseline_score * 100.0 / args.baseline_games as f64,
             400.0 * (baseline_smoothed / (1.0 - baseline_smoothed)).log10(),
         ))
-    }
-    else {
+    } else {
         None
     };
     let record = ResultRecord {

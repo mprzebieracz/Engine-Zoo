@@ -5,6 +5,7 @@
   import type { Config } from '@lichess-org/chessground/config';
   import type { Key } from '@lichess-org/chessground/types';
   import { Chess } from 'chess.js';
+  import { SvelteMap } from 'svelte/reactivity';
   import type { LegalMove } from '$lib/types';
   import '@lichess-org/chessground/assets/chessground.base.css';
   import '@lichess-org/chessground/assets/chessground.brown.css';
@@ -31,7 +32,7 @@
   }
 
   function destinations(): Map<Key, Key[]> {
-    const result = new Map<Key, Key[]>();
+    const result = new SvelteMap<Key, Key[]>();
     for (const entry of legalMoves) {
       const from = entry.move.slice(0, 2) as Key;
       const to = entry.move.slice(2, 4) as Key;
@@ -44,8 +45,10 @@
 
   function config(): Config {
     const chess = state();
+    const last = moves.at(-1);
     return {
       fen: chess.fen(),
+      lastMove: last ? [last.slice(0, 2) as Key, last.slice(2, 4) as Key] : undefined,
       orientation,
       turnColor: chess.turn() === 'w' ? 'white' : 'black',
       coordinates: true,
@@ -84,8 +87,8 @@
 </div>
 
 <style>
-  .board-shell { width: min(74vh, 100%); aspect-ratio: 1; border-radius: 22px; overflow: hidden; box-shadow: 0 32px 90px rgba(0,0,0,.38); border: 1px solid rgba(255,255,255,.09); }
+  .board-shell { width: 100%; aspect-ratio: 1; border-radius: 18px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); border: 1px solid rgba(255,255,255,.09); }
   .cg-wrap { width: 100%; height: 100%; }
   .disabled { opacity: .88; }
-  :global(.cg-wrap cg-board) { border-radius: 20px; overflow: hidden; }
+  :global(.cg-wrap cg-board) { border-radius: 16px; overflow: hidden; }
 </style>

@@ -22,12 +22,24 @@ export interface AgentDescriptor {
   defaults?: { simulations?: number; waitForCount?: number };
 }
 
+export type MovePolicy = 'strict' | 'temperature';
+
+export interface AgentBehavior {
+  simulations: number;
+  waitForCount: number;
+  movePolicy: MovePolicy;
+  temperature: number;
+}
+
+export interface PlayerSelection {
+  agentId: string;
+  behavior: AgentBehavior;
+}
+
 export interface AppSelection {
   gameId: string;
-  firstAgentId: string;
-  secondAgentId: string;
-  simulations: number;
-  showAnalysis: boolean;
+  first: PlayerSelection;
+  second: PlayerSelection;
 }
 
 export interface LegalMove { action: number; move: string }
@@ -62,12 +74,21 @@ export interface Analysis {
   best_move?: string | null;
   best_move_san?: string | null;
   value?: number | null;
+  network_value?: number | null;
+  mcts_value?: number | null;
   policy?: PolicyEntry[] | Record<string, number>;
   network_policy?: PolicyEntry[] | Record<string, number>;
   mcts_policy?: PolicyEntry[] | Record<string, number>;
   root_policy?: PolicyEntry[] | Record<string, number>;
   moves?: PolicyEntry[];
   [key: string]: unknown;
+}
+
+export interface MatchSnapshot {
+  ply: number;
+  side: 0 | 1;
+  agentId: string;
+  analysis: Analysis;
 }
 
 export interface PuzzleCase { id: string; name: string; category: string; position: unknown; expected: string[] }

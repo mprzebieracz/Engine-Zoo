@@ -3,6 +3,7 @@ name = "checkpoint-eval"
 version.workspace = true
 edition.workspace = true
 description = "Background Stockfish evaluation for engine-zoo checkpoints"
+build = "build.rs"
 
 [dependencies]
 algorithms = { path = "../algorithms" }
