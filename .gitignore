@@ -1,5 +1,5 @@
 /target
-/runs
+/data/runs
 /benchmark
 /scratch
 *.safetensors
@@ -7,6 +7,8 @@
 .cargo
 .agents
 .codex
+crates/evaluations/bin/
 web/node_modules
 web/.svelte-kit
 web/build
+data

@@ -1,9 +1,10 @@
 [workspace]
 members = [
-    "core",
-    "games",
-    "algorithms",
-    "app",
+    "crates/core",
+    "crates/games",
+    "crates/algorithms",
+    "crates/app",
+    "crates/evaluations",
 ]
 resolver = "2"
 

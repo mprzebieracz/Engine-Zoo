@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RUN_DIR="${RUN_DIR:-runs/chess-puct-real}"
+RUN_DIR="${RUN_DIR:-data/runs/chess-puct-real}"
 SERVER="${SERVER:-}"
 MODEL="${MODEL:-best}"
 MODE="${MODE:-mcts}" # net or mcts
 SIMULATIONS="${SIMULATIONS:-100}"
 WAIT_FOR="${WAIT_FOR:-1}"
-SUITE="${SUITE:-suites/chess_lichess_easy.jsonl}"
+SUITE="${SUITE:-data/suites/chess_lichess_easy.jsonl}"
 OUT_DIR="${OUT_DIR:-$RUN_DIR/eval/puzzles}"
 STAMP="${STAMP:-$(date +%Y%m%d_%H%M%S)}"
 JSONL_OUT="${JSONL_OUT:-$OUT_DIR/${MODEL}_${MODE}_${SIMULATIONS}_${STAMP}.jsonl}"

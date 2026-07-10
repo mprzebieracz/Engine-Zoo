@@ -72,7 +72,7 @@ enum InferencePrecisionKind {
 struct Args {
     #[arg(long, value_enum)]
     game: GameKind,
-    /// Run directory (checkpoints, metrics); defaults to runs/<game>.
+    /// Run directory (checkpoints, metrics); defaults to data/runs/<game>.
     #[arg(long)]
     run_dir: Option<PathBuf>,
     /// File for C++/libtorch stderr output. Defaults to <run-dir>/stderr.log.

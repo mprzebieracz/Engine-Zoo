@@ -284,6 +284,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "checkpoint-eval"
+version = "0.1.0"
+dependencies = [
+ "algorithms",
+ "anyhow",
+ "chess",
+ "clap",
+ "engine_core",
+ "games",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "tch",
+]
+
+[[package]]
 name = "chess"
 version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

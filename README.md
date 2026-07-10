@@ -10,13 +10,13 @@ Current algorithms:
 - AlphaZero
 
 Layout:
-- `core/` - shared game and agent traits.
-- `games/` - concrete game implementations and position specs.
-- `algorithms/` - AlphaZero, search, training, and analysis code.
-- `app/` - CLI binaries and Axum API server.
+- `crates/core/` - shared game and agent traits.
+- `crates/games/` - concrete game implementations and position specs.
+- `crates/algorithms/` - AlphaZero, search, training, and analysis code.
+- `crates/app/` - CLI binaries and Axum API server.
 - `web/` - SvelteKit TypeScript frontend.
 - `scripts/` - training/evaluation helpers.
-- `suites/` - puzzle and evaluation suites.
+- `data/suites/` - puzzle and evaluation suites.
 
 Common commands:
 
@@ -49,7 +49,7 @@ Serving an agent for the web UI:
 ```bash
 scripts/serve_agent.sh \
   --game chess \
-  --run-dir runs/chess-puct-real \
+  --run-dir data/runs/chess-puct-real \
   --model best \
   --port 8080
 ```

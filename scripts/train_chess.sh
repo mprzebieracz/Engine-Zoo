@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
+
 # Main run controls.
-RUN_DIR="${RUN_DIR:-runs/chess}"
+RUN_DIR="${RUN_DIR:-data/runs/chess}"
 MCTS_VARIANT="${MCTS_VARIANT:-gumbel}" # puct or gumbel
 GUMBEL_SAMPLED_ACTIONS="${GUMBEL_SAMPLED_ACTIONS:-16}"
 
@@ -40,6 +44,18 @@ RESUME_LATEST_CHECKPOINT="${RESUME_LATEST_CHECKPOINT:-1}"
 DEVICE="${DEVICE:-cuda}"
 INFERENCE_PRECISION="${INFERENCE_PRECISION:-auto}"
 
+# Background checkpoint evaluation. Set EVALUATE_CHECKPOINTS=0 to disable.
+EVALUATE_CHECKPOINTS="${EVALUATE_CHECKPOINTS:-1}"
+EVAL_EVERY="${EVAL_EVERY:-50}"
+EVAL_GAMES="${EVAL_GAMES:-4}"
+BASELINE_GAMES="${BASELINE_GAMES:-4}"
+EVAL_SIMULATIONS="${EVAL_SIMULATIONS:-800}"
+STOCKFISH_BIN="${STOCKFISH_BIN:-crates/evaluations/bin/stockfish-18/stockfish-ubuntu-x86-64}"
+STOCKFISH_ELO="${STOCKFISH_ELO:-1600}"
+STOCKFISH_MOVETIME_MS="${STOCKFISH_MOVETIME_MS:-200}"
+EVAL_DEVICE="${EVAL_DEVICE:-cuda}"
+EVAL_BACKFILL="${EVAL_BACKFILL:-0}"
+
 mkdir -p "$RUN_DIR"
 
 echo "run dir: $RUN_DIR"
@@ -63,6 +79,25 @@ if [[ "$RESUME_LATEST_CHECKPOINT" == "1" ]]; then
 fi
 
 cargo build --release --bin train
+cargo build --release -p checkpoint-eval
+
+if [[ "$EVALUATE_CHECKPOINTS" == "1" ]]; then
+  if ! command -v "$STOCKFISH_BIN" >/dev/null 2>&1 && [[ ! -x "$STOCKFISH_BIN" ]]; then
+    echo "Stockfish not found: run crates/evaluations/install_stockfish.sh or set STOCKFISH_BIN" >&2
+    exit 1
+  fi
+  mkdir -p "$RUN_DIR/evaluations"
+  echo "starting checkpoint evaluator watcher" >> "$RUN_DIR/evaluations/watcher.log"
+  echo "root=$ROOT_DIR run_dir=$RUN_DIR eval_every=$EVAL_EVERY" >> "$RUN_DIR/evaluations/watcher.log"
+  EVAL_BIN="target/release/checkpoint-eval" \
+  EVAL_EVERY="$EVAL_EVERY" EVAL_GAMES="$EVAL_GAMES" BASELINE_GAMES="$BASELINE_GAMES" EVAL_SIMULATIONS="$EVAL_SIMULATIONS" \
+  STOCKFISH_BIN="$STOCKFISH_BIN" STOCKFISH_ELO="$STOCKFISH_ELO" \
+  STOCKFISH_MOVETIME_MS="$STOCKFISH_MOVETIME_MS" EVAL_DEVICE="$EVAL_DEVICE" EVAL_BACKFILL="$EVAL_BACKFILL" \
+  crates/evaluations/watch_checkpoints.sh "$RUN_DIR" >> "$RUN_DIR/evaluations/watcher.log" 2>&1 &
+  EVAL_WATCHER_PID=$!
+  trap 'kill "$EVAL_WATCHER_PID" 2>/dev/null || true' EXIT
+  echo "checkpoint evaluator: every $EVAL_EVERY checkpoints, 4 games vs Stockfish and 4 vs the prior checkpoint"
+fi
 
 target/release/train \
   --game chess \
