@@ -32,8 +32,7 @@ pub fn evaluate<G: Game>(
     for i in 0..cfg.games {
         if i.is_multiple_of(2) {
             score += play_single_game::<G, _, _>(candidate, baseline, cfg);
-        }
-        else {
+        } else {
             score += 1.0 - play_single_game::<G, _, _>(baseline, candidate, cfg);
         }
         println!(
@@ -58,15 +57,13 @@ where
     while !game.is_terminal() && move_idx < cfg.max_moves {
         let mode = if move_idx < cfg.opening_moves {
             PolicyMode::Explore
-        }
-        else {
+        } else {
             PolicyMode::Deterministic
         };
 
         let action = if move_idx.is_multiple_of(2) {
             first.act_with_mode(&game, mode)
-        }
-        else {
+        } else {
             second.act_with_mode(&game, mode)
         };
 
@@ -80,8 +77,7 @@ where
     // Decisive terminal rewards are +1 for the side that made the last move.
     if (move_idx - 1).is_multiple_of(2) {
         1.0
-    }
-    else {
+    } else {
         0.0
     }
 }

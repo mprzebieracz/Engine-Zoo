@@ -26,54 +26,6 @@
         "simulations": 800,
         "waitForCount": 1
       }
-    },
-    {
-      "id": "chess-ckpt_0235",
-      "name": "AlphaZero · ckpt_0235",
-      "kind": "alphazero",
-      "games": [
-        "chess"
-      ],
-      "model": "ckpt_0235",
-      "server": "http://127.0.0.1:8080",
-      "description": "chess model ckpt_0235",
-      "badge": "Local",
-      "defaults": {
-        "simulations": 800,
-        "waitForCount": 1
-      }
-    },
-    {
-      "id": "chess-ckpt_0235-safetensors",
-      "name": "AlphaZero · ckpt_0235.safetensors",
-      "kind": "alphazero",
-      "games": [
-        "chess"
-      ],
-      "model": "ckpt_0235.safetensors",
-      "server": "http://127.0.0.1:8080",
-      "description": "chess model ckpt_0235.safetensors",
-      "badge": "Local",
-      "defaults": {
-        "simulations": 800,
-        "waitForCount": 1
-      }
-    },
-    {
-      "id": "chess-best-safetensors",
-      "name": "AlphaZero · best.safetensors",
-      "kind": "alphazero",
-      "games": [
-        "chess"
-      ],
-      "model": "best.safetensors",
-      "server": "http://127.0.0.1:8080",
-      "description": "chess model best.safetensors",
-      "badge": "Local",
-      "defaults": {
-        "simulations": 800,
-        "waitForCount": 1
-      }
     }
   ]
 }

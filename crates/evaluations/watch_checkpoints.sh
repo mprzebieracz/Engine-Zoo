@@ -27,11 +27,22 @@ latest_index() {
 
 if [[ -f "$STATE_FILE" ]]; then
   last_seen="$(<"$STATE_FILE")"
+  state_result="$(printf '%s/ckpt_%04d.json' "$STATE_DIR" "$last_seen")"
+  if (( last_seen > 0 )) && [[ ! -f "$state_result" ]]; then
+    # Older watcher versions initialized state to the newest checkpoint before
+    # evaluating it. Retry that checkpoint once after upgrading.
+    last_seen=$((last_seen - EVAL_EVERY))
+  fi
 elif [[ "$EVAL_BACKFILL" == "1" ]]; then
   last_seen=0
 else
   last_seen="$(latest_index)"
   last_seen="${last_seen:-0}"
+  if (( last_seen >= EVAL_EVERY )); then
+    # Evaluate the latest eligible checkpoint immediately without backfilling
+    # the complete history.
+    last_seen=$((last_seen - EVAL_EVERY))
+  fi
   printf '%s\n' "$last_seen" > "$STATE_FILE"
 fi
 

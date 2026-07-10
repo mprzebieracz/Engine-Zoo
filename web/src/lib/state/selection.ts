@@ -1,16 +1,18 @@
-import { writable } from 'svelte/store';
 import type { AppSelection } from '$lib/types';
 
-const initial: AppSelection = { gameId: 'chess', firstAgentId: 'human', secondAgentId: 'chess-best', simulations: 800, showAnalysis: true };
-export const selection = writable<AppSelection>(initial);
+const behavior = () => ({ simulations: 800, waitForCount: 1, movePolicy: 'strict' as const, temperature: 1 });
+const initial = (): AppSelection => ({
+  gameId: 'chess',
+  first: { agentId: '', behavior: behavior() },
+  second: { agentId: '', behavior: behavior() }
+});
+
+let current = initial();
 
 export function persistSelection(value: AppSelection) {
-  selection.set(value);
-  if (typeof sessionStorage !== 'undefined') sessionStorage.setItem('engine-zoo-selection', JSON.stringify(value));
+  current = structuredClone(value);
 }
 
 export function restoreSelection(): AppSelection {
-  if (typeof sessionStorage === 'undefined') return initial;
-  try { return { ...initial, ...JSON.parse(sessionStorage.getItem('engine-zoo-selection') ?? '{}') }; }
-  catch { return initial; }
+  return structuredClone(current);
 }

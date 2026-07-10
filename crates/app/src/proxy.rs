@@ -181,7 +181,7 @@ pub fn analyze_request(
 }
 
 pub fn run_dir(game: GameKind, run_dir: Option<PathBuf>) -> PathBuf {
-    run_dir.unwrap_or_else(|| PathBuf::from("runs").join(game_name(game)))
+    run_dir.unwrap_or_else(|| PathBuf::from("data/runs").join(game_name(game)))
 }
 
 pub fn resolve_model(run_dir: &Path, model: &str) -> PathBuf {

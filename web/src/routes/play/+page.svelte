@@ -1,163 +1,192 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { onMount } from 'svelte';
-  import { Chess } from 'chess.js';
+  import { resolve } from '$app/paths';
+  import { onDestroy, onMount } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
+  import AnalysisPanel from '$lib/components/AnalysisPanel.svelte';
+  import ChessgroundBoard from '$lib/components/ChessgroundBoard.svelte';
+  import Connect4Board from '$lib/components/Connect4Board.svelte';
+  import MatchControls from '$lib/components/MatchControls.svelte';
+  import PlayerStrip from '$lib/components/PlayerStrip.svelte';
   import { api } from '$lib/api/client';
   import { loadAgents } from '$lib/config/agents';
   import { games } from '$lib/config/games';
+  import { analysisKey, chooseMove, decorateAnalysis } from '$lib/match/analysis';
+  import { inspectPosition, positionPayload } from '$lib/match/game';
   import { restoreSelection } from '$lib/state/selection';
-  import ChessgroundBoard from '$lib/components/ChessgroundBoard.svelte';
-  import Connect4Board from '$lib/components/Connect4Board.svelte';
-  import AnalysisPanel from '$lib/components/AnalysisPanel.svelte';
-  import PlayerStrip from '$lib/components/PlayerStrip.svelte';
-  import type { AgentDescriptor, Analysis, AppSelection, PolicyEntry, SessionView } from '$lib/types';
+  import type { AgentDescriptor, Analysis, AppSelection, MatchSnapshot } from '$lib/types';
 
   let config = $state<AppSelection>(restoreSelection());
   let agents = $state<AgentDescriptor[]>([]);
-  let session = $state<SessionView | null>(null);
-  let analysis = $state<Analysis | undefined>();
+  let moves = $state<string[]>([]);
+  let viewPly = $state(0);
+  let snapshots = $state<MatchSnapshot[]>([]);
+  let thinkingSide = $state<0 | 1 | null>(null);
+  let playing = $state(false);
+  let pace = $state(700);
   let loading = $state(true);
-  let engineThinking = $state(false);
   let error = $state('');
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cache = new SvelteMap<string, Analysis>();
 
   const game = $derived(games.find((entry) => entry.id === config.gameId));
-  const first = $derived(agents.find((agent) => agent.id === config.firstAgentId));
-  const second = $derived(agents.find((agent) => agent.id === config.secondAgentId));
-  const engine = $derived(first?.kind === 'human' ? second : first);
-  const humanFirst = $derived(first?.kind === 'human');
-  const engineSimulations = $derived(engine?.defaults?.simulations ?? config.simulations);
-  const engineWaitForCount = $derived(engine?.defaults?.waitForCount ?? 1);
-  const firstActive = $derived(turnActive(first));
-  const secondActive = $derived(turnActive(second));
+  const first = $derived(agents.find((agent) => agent.id === config.first.agentId));
+  const second = $derived(agents.find((agent) => agent.id === config.second.agentId));
+  const livePosition = $derived(inspectPosition(config.gameId, moves));
+  const visibleMoves = $derived(moves.slice(0, viewPly));
+  const visiblePosition = $derived(inspectPosition(config.gameId, visibleMoves));
+  const automated = $derived(first?.kind !== 'human' && second?.kind !== 'human');
+  const boardDisabled = $derived(viewPly !== moves.length || visiblePosition.terminal || loading || thinkingSide !== null || agentAt(livePosition.turn)?.kind !== 'human');
+  const orientation = $derived(first?.kind === 'human' ? 'white' : second?.kind === 'human' ? 'black' : 'white');
 
-  onMount(async () => {
-    config = restoreSelection();
-    agents = await loadAgents();
-    if (!agents.find((agent) => agent.id === config.firstAgentId) || !agents.find((agent) => agent.id === config.secondAgentId)) {
-      goto('/setup'); return;
-    }
-    await startGame();
+  onMount(() => {
+    document.body.classList.add('match-view');
+    void initialize();
+    return () => document.body.classList.remove('match-view');
   });
+  onDestroy(() => clearTimeout(timer));
 
-  async function startGame() {
-    loading = true; error = ''; analysis = undefined;
-    try {
-      session = await api.createSession({ model: engine?.model ?? 'best', engine_first: !humanFirst, simulations: engineSimulations, wait_for_count: engineWaitForCount }, engine?.server);
-      if (session.terminal) return;
-      if (session.human_turn) {
-        if (config.showAnalysis) await analyzeCurrent();
-      } else {
-        await runEngineTurn();
-      }
-    } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
-    finally { loading = false; }
-  }
-
-  function turnActive(agent?: AgentDescriptor): boolean {
-    if (!session || !agent) return false;
-    return agent.kind === 'human' ? session.human_turn : !session.human_turn;
-  }
-
-  function position() {
-    return positionFromMoves(session?.moves ?? []);
-  }
-
-  function positionFromMoves(moves: string[]) {
-    return config.gameId === 'chess'
-      ? { game: 'chess', position: { fen: null, moves } }
-      : { game: 'connect4', position: { moves: moves.map(Number) } };
-  }
-
-  function sanFor(moves: string[], uci?: string | null): string | null {
-    if (config.gameId !== 'chess' || !uci) return uci ?? null;
-    try {
-      const chess = new Chess();
-      for (const move of moves) chess.move({ from: move.slice(0, 2), to: move.slice(2, 4), promotion: move[4] || 'q' });
-      return chess.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] || 'q' })?.san ?? uci;
-    } catch {
-      return uci;
-    }
-  }
-
-  function decorateAnalysis(result: Analysis, moves: string[]): Analysis {
-    if (config.gameId !== 'chess') return result;
-    const decorateRow = (row: PolicyEntry): PolicyEntry => {
-      const entry = row as { move?: string; mv?: string };
-      const uci = entry.move ?? entry.mv;
-      return { ...entry, display_move: sanFor(moves, uci) ?? uci };
-    };
-    return {
-      ...result,
-      best_move_san: sanFor(moves, result.best_move),
-      policy: Array.isArray(result.policy) ? result.policy.map(decorateRow) : result.policy,
-      network_policy: Array.isArray(result.network_policy) ? result.network_policy.map(decorateRow) : result.network_policy,
-      mcts_policy: Array.isArray(result.mcts_policy) ? result.mcts_policy.map(decorateRow) : result.mcts_policy,
-      root_policy: Array.isArray(result.root_policy) ? result.root_policy.map(decorateRow) : result.root_policy,
-      moves: Array.isArray(result.moves) ? result.moves.map(decorateRow) : result.moves
-    };
-  }
-
-  async function analyzeCurrent() {
-    if (!session || !engine) return;
+  async function initialize() {
     loading = true;
     try {
-      const moves = [...session.moves];
-      const result = await api.analyze({ position: positionFromMoves(moves), model: engine.model ?? 'best', mode: 'mcts', simulations: engineSimulations, wait_for_count: engineWaitForCount }, engine.server);
-      analysis = decorateAnalysis(result, moves);
-    } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
-    finally { loading = false; }
-  }
-
-  async function makeMove(move:string) {
-    if (!session || !session.human_turn || session.terminal || !engine) return;
-    loading = true; error = '';
-    try {
-      session = await api.move(session.id, move, engine.server);
+      agents = await loadAgents();
+      if (!agentAt(0) || !agentAt(1)) {
+        await goto(resolve('/setup'));
+        return;
+      }
+      resetMatch();
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    } finally {
       loading = false;
-      if (session.terminal) return;
-
-      await runEngineTurn();
-    } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
-    finally { loading = false; engineThinking = false; }
+      void advanceIfNeeded();
+    }
   }
 
-  async function runEngineTurn() {
-    if (!session || session.human_turn || session.terminal || !engine) return;
-    if (config.showAnalysis) await analyzeCurrent();
-    engineThinking = true;
-    session = await api.engineMove(session.id, engine.server);
-    engineThinking = false;
+  function playerAt(side: 0 | 1) { return side === 0 ? config.first : config.second; }
+  function agentAt(side: 0 | 1) { return side === 0 ? first : second; }
+
+  function resetMatch() {
+    clearTimeout(timer);
+    moves = [];
+    viewPly = 0;
+    snapshots = [];
+    error = '';
+    playing = automated;
+  }
+
+  function cachedOutput(side: 0 | 1): Analysis | undefined {
+    return [...snapshots].reverse().find((snapshot) => snapshot.side === side && snapshot.ply <= viewPly)?.analysis;
+  }
+
+  async function analyzeAgent(side: 0 | 1, positionMoves: string[]): Promise<Analysis> {
+    const player = playerAt(side);
+    const agent = agentAt(side);
+    if (!agent || agent.kind === 'human') throw new Error('A human agent cannot be analyzed.');
+    const key = analysisKey(side, player, positionMoves);
+    const existing = cache.get(key);
+    if (existing) return existing;
+    const result = await api.analyze({
+      position: positionPayload(config.gameId, positionMoves),
+      model: agent.model ?? 'best',
+      mode: 'mcts',
+      simulations: player.behavior.simulations,
+      wait_for_count: player.behavior.waitForCount
+    }, agent.server);
+    const decorated = decorateAnalysis(result, positionMoves, config.gameId === 'chess');
+    cache.set(key, decorated);
+    return decorated;
+  }
+
+  async function advanceIfNeeded() {
+    clearTimeout(timer);
+    if (thinkingSide !== null || livePosition.terminal) return;
+    const side = livePosition.turn;
+    const agent = agentAt(side);
+    if (!agent || agent.kind === 'human' || (automated && !playing)) return;
+    const positionMoves = [...moves];
+    const followedLive = viewPly === moves.length;
+    thinkingSide = side;
+    error = '';
+    try {
+      const analysis = await analyzeAgent(side, positionMoves);
+      snapshots = [...snapshots.filter((snapshot) => !(snapshot.ply === positionMoves.length && snapshot.side === side)), { ply: positionMoves.length, side, agentId: agent.id, analysis }];
+      const move = chooseMove(analysis, playerAt(side));
+      if (!move || !livePosition.legalMoves.some((entry) => entry.move === move)) throw new Error(`${agent.name} returned no legal move.`);
+      moves = [...moves, move];
+      if (followedLive) viewPly = moves.length;
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+      playing = false;
+    } finally {
+      thinkingSide = null;
+    }
+    if (!error && !inspectPosition(config.gameId, moves).terminal) {
+      if (automated && playing) timer = setTimeout(() => void advanceIfNeeded(), pace);
+      else if (agentAt(inspectPosition(config.gameId, moves).turn)?.kind !== 'human') void advanceIfNeeded();
+    }
+  }
+
+  function makeMove(move: string) {
+    if (boardDisabled || !livePosition.legalMoves.some((entry) => entry.move === move)) return;
+    moves = [...moves, move];
+    viewPly = moves.length;
+    void advanceIfNeeded();
+  }
+
+  function togglePlayback() {
+    playing = !playing;
+    if (playing) void advanceIfNeeded();
+    else clearTimeout(timer);
+  }
+
+  function updatePace(value: number) {
+    pace = value;
+    if (automated && playing && thinkingSide === null) {
+      clearTimeout(timer);
+      timer = setTimeout(() => void advanceIfNeeded(), pace);
+    }
   }
 </script>
+
 <svelte:head><title>{game?.name ?? 'Match'} · Engine Zoo</title></svelte:head>
-<main class="page screen-enter play-page">
+
+<main class="play-page">
   <header class="match-head">
-    <div><button onclick={()=>goto('/setup')}>← Match setup</button><span class="eyebrow">Step 3 of 3</span><h1>{game?.name}</h1></div>
-    <div class="head-actions"><span class:thinking={loading||engineThinking} class="thinking-pill">{engineThinking?'Engine thinking':loading?'Loading':'Live'}</span><button class="secondary" onclick={startGame}>New game</button></div>
+    <div class="match-title"><button onclick={() => goto(resolve('/setup'))}>← Setup</button><h1>{game?.name}</h1>{#if livePosition.result}<span>{livePosition.result}</span>{/if}</div>
+    <div class="head-actions"><span class:thinking={thinkingSide !== null} class="status">{thinkingSide !== null ? `${agentAt(thinkingSide)?.name} thinking` : playing ? 'Playing' : 'Paused'}</span><button class="secondary" disabled={thinkingSide !== null} onclick={() => { resetMatch(); void advanceIfNeeded(); }}>New match</button></div>
   </header>
+
   {#if error}<div class="error">{error}</div>{/if}
-  {#if !session}
-    <div class="loading-board"><span></span><p>Creating match…</p></div>
+  {#if loading}
+    <div class="loading-board"><span></span><p>Loading agents…</p></div>
   {:else}
     <section class="arena">
       <div class="board-column">
-        <PlayerStrip agent={second} side={config.gameId==='chess'?'Black':'Second'} active={secondActive} />
-        {#if config.gameId==='chess'}
-          <ChessgroundBoard moves={session.moves} legalMoves={session.legal_moves} disabled={!session.human_turn||session.terminal||loading||engineThinking} orientation={humanFirst?'white':'black'} onmove={makeMove}/>
-        {:else}
-          <Connect4Board moves={session.moves} disabled={!session.human_turn||session.terminal||loading||engineThinking} onmove={makeMove}/>
-        {/if}
-        <PlayerStrip agent={first} side={config.gameId==='chess'?'White':'First'} active={firstActive} />
+        <PlayerStrip agent={second} side={config.gameId === 'chess' ? 'Black' : 'Second'} active={visiblePosition.turn === 1 && !visiblePosition.terminal} />
+        <div class="board-frame">
+          {#if config.gameId === 'chess'}
+            <ChessgroundBoard moves={visibleMoves} legalMoves={visiblePosition.legalMoves} disabled={boardDisabled} {orientation} onmove={makeMove} />
+          {:else}
+            <Connect4Board moves={visibleMoves} disabled={boardDisabled} onmove={makeMove} />
+          {/if}
+        </div>
+        <PlayerStrip agent={first} side={config.gameId === 'chess' ? 'White' : 'First'} active={visiblePosition.turn === 0 && !visiblePosition.terminal} />
+        <MatchControls ply={viewPly} total={moves.length} autoplay={playing} {pace} {automated} terminal={livePosition.terminal} onprevious={() => viewPly = Math.max(0, viewPly - 1)} onnext={() => viewPly = Math.min(moves.length, viewPly + 1)} onlive={() => viewPly = moves.length} ontoggle={togglePlayback} onpace={updatePace} />
       </div>
-      <aside>
-        <section class="moves"><header><h2>Move history</h2><span>{session.moves.length} plies</span></header><div class="move-list">{#each (session.san_moves.length?session.san_moves:session.moves) as move,i}<span><small>{i+1}</small>{move}</span>{/each}</div></section>
-        {#if config.showAnalysis}<AnalysisPanel {analysis} {loading}/>{/if}
-        <button class="secondary analyze" onclick={analyzeCurrent} disabled={loading||engineThinking}>Analyze current position</button>
+
+      <aside class="outputs">
+        {#if first?.kind !== 'human'}<AnalysisPanel title={first?.name} subtitle={config.gameId === 'chess' ? 'White' : 'First'} analysis={cachedOutput(0)} loading={thinkingSide === 0} />{/if}
+        {#if second?.kind !== 'human'}<AnalysisPanel title={second?.name} subtitle={config.gameId === 'chess' ? 'Black' : 'Second'} analysis={cachedOutput(1)} loading={thinkingSide === 1} />{/if}
+        {#if first?.kind === 'human' && second?.kind === 'human'}<div class="human-match"><strong>Human match</strong><p>Use the board controls to play both sides. Position navigation remains available throughout the game.</p></div>{/if}
       </aside>
     </section>
   {/if}
 </main>
 
 <style>
-  .play-page{padding-top:34px}.match-head{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:24px}.match-head button:first-child{display:block;border:0;background:transparent;color:var(--muted);padding:0;margin-bottom:17px;cursor:pointer}.match-head h1{font-size:34px;margin:5px 0 0}.head-actions{display:flex;align-items:center;gap:10px}.thinking-pill{padding:7px 10px;border-radius:99px;background:color-mix(in srgb,var(--accent) 10%,transparent);color:var(--accent);font-size:10px;text-transform:uppercase;letter-spacing:.08em}.thinking{animation:pulse 1s infinite alternate}.arena{display:grid;grid-template-columns:minmax(0,820px) minmax(330px,1fr);gap:30px;align-items:start}.board-column{display:flex;flex-direction:column;align-items:center;gap:10px}.player-strip{width:min(74vh,100%);display:grid;grid-template-columns:38px 1fr 8px auto;gap:10px;align-items:center;padding:8px 10px;border-radius:12px;color:var(--muted);transition:.2s}.player-strip.active{background:var(--panel)}.avatar{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:var(--panel-2);color:var(--accent);font-weight:800}.player-strip strong,.player-strip small{display:block}.player-strip strong{color:var(--text);font-size:12px}.player-strip small,.player-strip span{font-size:9px;text-transform:uppercase;letter-spacing:.08em}.player-strip i{width:7px;height:7px;border-radius:50%;background:#414752}.player-strip.active i{background:var(--accent);box-shadow:0 0 10px var(--accent)}aside{display:grid;gap:15px;position:sticky;top:98px}.moves{background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:18px}.moves header{display:flex;justify-content:space-between;align-items:center}.moves h2{font-size:16px;margin:0}.moves header span{font-size:10px;color:var(--muted)}.move-list{max-height:160px;overflow:auto;display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:13px}.move-list>span{background:var(--panel-2);padding:7px 8px;border-radius:7px;font:11px ui-monospace,monospace}.move-list small{color:var(--muted);margin-right:8px}.analyze{width:100%}.loading-board{height:520px;display:grid;place-items:center;align-content:center;color:var(--muted)}.loading-board span{width:35px;height:35px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}.error{margin-bottom:18px}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{to{opacity:.42}}@media(max-width:980px){.arena{grid-template-columns:1fr}aside{position:static}.match-head{align-items:flex-start}.head-actions{margin-top:10px}}@media(max-width:600px){.match-head{display:block}.head-actions{justify-content:space-between}.player-strip{width:100%}}
+  :global(body.match-view){overflow:hidden}.play-page{height:calc(100dvh - 64px);max-width:1440px;margin:auto;padding:14px 24px 16px;overflow:hidden;display:flex;flex-direction:column}.match-head{height:46px;display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:10px}.match-title,.head-actions{display:flex;align-items:center;gap:12px}.match-title button{border:0;background:transparent;color:var(--muted);padding:0;cursor:pointer}.match-title h1{font-size:22px;margin:0}.match-title>span{color:var(--accent);font-size:11px}.status{padding:6px 9px;border-radius:99px;background:var(--panel);color:var(--muted);font-size:10px}.status.thinking{color:var(--accent)}.head-actions .secondary{min-height:36px;padding:7px 12px}
+  .arena{min-height:0;flex:1;display:grid;grid-template-columns:minmax(420px,760px) minmax(330px,1fr);gap:20px;justify-content:center;align-items:start}.board-column{height:100%;min-height:0;display:flex;flex-direction:column;align-items:center;gap:6px}.board-frame{height:min(calc(100dvh - 230px),calc(100vw - 470px));max-height:760px;aspect-ratio:1}.outputs{height:min(calc(100dvh - 134px),760px);display:grid;grid-auto-rows:minmax(0,1fr);gap:10px;overflow:hidden}.human-match{padding:20px;border-radius:18px;border:1px solid var(--line);background:var(--panel)}.human-match p{color:var(--muted);font-size:12px;line-height:1.6}.loading-board{flex:1;display:grid;place-items:center;align-content:center;color:var(--muted)}.loading-board span{width:32px;aspect-ratio:1;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%}.error{margin-bottom:10px;padding:9px 12px;font-size:12px}
+  @media(max-width:980px){:global(body.match-view){overflow:auto}.play-page{height:auto;min-height:calc(100dvh - 64px);overflow:visible}.arena{grid-template-columns:1fr}.board-frame{width:min(100%,calc(100dvh - 230px));height:auto}.outputs{height:auto;grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible}}
+  @media(max-width:680px){.play-page{padding:12px}.match-head{height:auto;align-items:flex-start}.match-title{align-items:flex-start;flex-direction:column;gap:4px}.head-actions{align-items:flex-end;flex-direction:column;gap:5px}.arena{display:block}.board-column{gap:5px}.board-frame{width:100%}.outputs{grid-template-columns:1fr;margin-top:12px}}
 </style>
