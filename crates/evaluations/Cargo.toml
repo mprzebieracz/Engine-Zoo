@@ -8,7 +8,6 @@ build = "build.rs"
 [dependencies]
 algorithms = { path = "../algorithms" }
 anyhow.workspace = true
-chess.workspace = true
 clap.workspace = true
 engine_core = { path = "../core" }
 games = { path = "../games" }

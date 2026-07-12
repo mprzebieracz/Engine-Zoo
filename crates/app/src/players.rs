@@ -95,7 +95,8 @@ impl<G: Game> Agent<G> for AlphaZeroAgent {
         let result = self.mcts.search_with_mode(game, mode);
         if matches!(variant, MctsVariant::Puct) && mode == PolicyMode::Explore {
             result.sample_action(&mut rand::rng())
-        } else {
+        }
+        else {
             result.best_action()
         }
     }

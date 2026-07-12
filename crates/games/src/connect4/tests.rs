@@ -33,7 +33,8 @@ impl Naive {
         self.current = -self.current;
         if won {
             self.status = Status::Loss;
-        } else if full {
+        }
+        else if full {
             self.status = Status::Draw;
         }
     }
@@ -54,7 +55,8 @@ impl Naive {
                     if count == 4 {
                         return true;
                     }
-                } else {
+                }
+                else {
                     count = 0;
                 }
             }
@@ -75,7 +77,8 @@ impl Naive {
     fn reward(&self) -> f32 {
         if self.status == Status::Loss {
             -1.0
-        } else {
+        }
+        else {
             0.0
         }
     }
@@ -120,6 +123,32 @@ fn horizontal_win_is_a_loss() {
 }
 
 #[test]
+fn detects_both_diagonal_win_directions() {
+    for moves in [
+        vec![0, 1, 1, 2, 4, 2, 2, 3, 5, 3, 5, 3, 3],
+        vec![6, 5, 5, 4, 2, 4, 4, 3, 1, 3, 1, 3, 3],
+    ] {
+        let game = Connect4::from_moves(&moves).unwrap();
+        assert_eq!(game.status, Status::Loss);
+        assert_eq!(game.reward(), -1.0);
+        assert!(game.is_terminal());
+    }
+}
+
+#[test]
+fn completely_filled_board_is_a_draw() {
+    let moves = [
+        1, 4, 6, 6, 6, 0, 2, 0, 3, 6, 3, 3, 5, 3, 6, 1, 0, 3, 0, 4, 3, 5, 0, 6, 5, 2, 2, 5, 1, 2,
+        2, 0, 2, 5, 4, 5, 4, 4, 4, 1, 1, 1,
+    ];
+    let game = Connect4::from_moves(&moves).unwrap();
+    assert_eq!(game.mask, FULL_MASK);
+    assert_eq!(game.status, Status::Draw);
+    assert_eq!(game.reward(), 0.0);
+    assert!(game.legal_actions().next().is_none());
+}
+
+#[test]
 fn encoding_is_canonical() {
     let mut g = Connect4::default();
     g.step(3);
@@ -137,6 +166,80 @@ fn full_column_is_not_legal() {
         g.step(0);
     }
     assert!(!g.legal_actions().any(|a| a == 0));
+}
+
+#[test]
+fn legal_actions_parse_and_format_roundtrip() {
+    let mut game = Connect4::default();
+    for played in [3, 3, 0, 6] {
+        for action in game.legal_actions() {
+            let text = game.format_action(action);
+            assert_eq!(game.parse_move(&text), Some(action));
+            assert_eq!(game.parse_move(&format!("  {text}  ")), Some(action));
+        }
+        game.step(played);
+    }
+    for invalid in ["", "-1", "7", "3.0", "garbage"] {
+        assert_eq!(game.parse_move(invalid), None);
+    }
+}
+
+#[test]
+fn terminal_position_has_no_legal_actions() {
+    let mut g = Connect4::default();
+    for action in [0, 1, 0, 1, 0, 1, 0] {
+        g.step(action);
+    }
+
+    assert!(g.is_terminal());
+    assert_eq!(g.legal_actions().count(), 0);
+}
+
+#[test]
+fn illegal_steps_panic_without_mutating_the_position() {
+    let mut full_column = Connect4::default();
+    for _ in 0..ROWS {
+        full_column.step(0);
+    }
+    let before = (
+        full_column.pos,
+        full_column.mask,
+        full_column.ply,
+        full_column.status,
+    );
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        full_column.step(0);
+    }))
+    .is_err());
+    assert_eq!(
+        before,
+        (
+            full_column.pos,
+            full_column.mask,
+            full_column.ply,
+            full_column.status
+        )
+    );
+
+    let mut terminal = Connect4::default();
+    for action in [0, 1, 0, 1, 0, 1, 0] {
+        terminal.step(action);
+    }
+    let before = (terminal.pos, terminal.mask, terminal.ply, terminal.status);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        terminal.step(2);
+    }))
+    .is_err());
+    assert_eq!(
+        before,
+        (terminal.pos, terminal.mask, terminal.ply, terminal.status)
+    );
+}
+
+#[test]
+#[should_panic(expected = "invalid state buffer length")]
+fn encoding_rejects_wrong_buffer_length() {
+    Connect4::default().encode_state(&mut []);
 }
 
 #[test]

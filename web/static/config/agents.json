@@ -12,6 +12,22 @@
       "badge": "Local"
     },
     {
+      "id": "chess-best-safetensors",
+      "name": "AlphaZero · best.safetensors",
+      "kind": "alphazero",
+      "games": [
+        "chess"
+      ],
+      "model": "best.safetensors",
+      "server": "http://127.0.0.1:8080",
+      "description": "chess model best.safetensors",
+      "badge": "Local",
+      "defaults": {
+        "simulations": 800,
+        "waitForCount": 1
+      }
+    },
+    {
       "id": "chess-best",
       "name": "AlphaZero · best",
       "kind": "alphazero",
@@ -20,11 +36,11 @@
       ],
       "model": "best",
       "server": "http://127.0.0.1:8080",
-      "description": "Current promoted chess checkpoint.",
-      "badge": "Recommended",
+      "description": "chess model best (architecture=chess-az-v2, history=4)",
+      "badge": "Local",
       "defaults": {
-        "simulations": 800,
-        "waitForCount": 1
+        "simulations": 128,
+        "waitForCount": 16
       }
     }
   ]

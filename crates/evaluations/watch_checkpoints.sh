@@ -2,7 +2,9 @@
 set -euo pipefail
 
 RUN_DIR="${1:?usage: watch_checkpoints.sh RUN_DIR}"
+EVAL_PROFILE="${EVAL_PROFILE:-quick}"
 EVAL_BIN="${EVAL_BIN:-target/release/checkpoint-eval}"
+QUICK_RUNNER="${QUICK_RUNNER:-crates/evaluations/run_quick.sh}"
 STOCKFISH_BIN="${STOCKFISH_BIN:-crates/evaluations/bin/stockfish-18/stockfish-ubuntu-x86-64}"
 EVAL_EVERY="${EVAL_EVERY:-50}"
 EVAL_GAMES="${EVAL_GAMES:-4}"
@@ -18,7 +20,7 @@ STATE_DIR="$RUN_DIR/evaluations"
 STATE_FILE="$STATE_DIR/watcher.state"
 
 mkdir -p "$STATE_DIR"
-echo "watcher started: run_dir=$RUN_DIR every=$EVAL_EVERY games=$EVAL_GAMES baseline_games=$BASELINE_GAMES" 
+echo "watcher started: run_dir=$RUN_DIR profile=$EVAL_PROFILE every=$EVAL_EVERY games=$EVAL_GAMES baseline_games=$BASELINE_GAMES"
 
 latest_index() {
   find "$CHECKPOINT_DIR" -maxdepth 1 -type f -name 'ckpt_*.safetensors' -printf '%f\n' 2>/dev/null \
@@ -28,7 +30,7 @@ latest_index() {
 if [[ -f "$STATE_FILE" ]]; then
   last_seen="$(<"$STATE_FILE")"
   state_result="$(printf '%s/ckpt_%04d.json' "$STATE_DIR" "$last_seen")"
-  if (( last_seen > 0 )) && [[ ! -f "$state_result" ]]; then
+  if [[ "$EVAL_PROFILE" != "quick" ]] && (( last_seen > 0 )) && [[ ! -f "$state_result" ]]; then
     # Older watcher versions initialized state to the newest checkpoint before
     # evaluating it. Retry that checkpoint once after upgrading.
     last_seen=$((last_seen - EVAL_EVERY))
@@ -61,7 +63,13 @@ while true; do
     if [[ -f "$baseline" ]]; then
       baseline_args=(--baseline "$baseline" --baseline-games "$BASELINE_GAMES")
     fi
-    if "$EVAL_BIN" \
+    if [[ "$EVAL_PROFILE" == "quick" ]]; then
+      if "$QUICK_RUNNER" "$RUN_DIR" "$checkpoint" "$baseline"; then
+        echo "evaluation watcher: finished $checkpoint"
+      else
+        echo "evaluation watcher: failed $checkpoint; skipping it" >&2
+      fi
+    elif "$EVAL_BIN" \
       --run-dir "$RUN_DIR" \
       --checkpoint "$checkpoint" \
       --stockfish "$STOCKFISH_BIN" \

@@ -5,10 +5,10 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
-# Main run controls.
-RUN_DIR="${RUN_DIR:-data/runs/chess}"
-MCTS_VARIANT="${MCTS_VARIANT:-gumbel}" # puct or gumbel
-GUMBEL_SAMPLED_ACTIONS="${GUMBEL_SAMPLED_ACTIONS:-16}"
+# Main run controls. New chess runs use the versioned AlphaZero-v2 network.
+RUN_DIR="${RUN_DIR:-data/runs/chess-az-v2-h4}"
+ARCHITECTURE="${ARCHITECTURE:-chess-az-v2}"
+HISTORY="${HISTORY:-4}"
 
 # Self-play and training scale.
 GAMES="${GAMES:-500}"
@@ -17,16 +17,18 @@ TRAIN_PROGRESS_EVERY="${TRAIN_PROGRESS_EVERY:-10}"
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-4096}"
 BUFFER="${BUFFER:-500000}"
 
-# Network architecture for new run directories. Existing run dirs keep config.json.
-BLOCKS="${BLOCKS:-10}"
-FILTERS="${FILTERS:-64}"
+# Chess-v2 Gumbel self-play defaults: 50% full search, 50% fast search.
+V2_FULL_SIMULATIONS="${V2_FULL_SIMULATIONS:-128}"
+V2_FULL_ROOT_CANDIDATES="${V2_FULL_ROOT_CANDIDATES:-16}"
+V2_FAST_SIMULATIONS="${V2_FAST_SIMULATIONS:-64}"
+V2_FAST_ROOT_CANDIDATES="${V2_FAST_ROOT_CANDIDATES:-8}"
+V2_FULL_SIMULATION_PROBABILITY="${V2_FULL_SIMULATION_PROBABILITY:-0.5}"
 
-# Search and self-play throughput knobs.
-SIMULATIONS="${SIMULATIONS:-400}"
-MCTS_LEAF_BATCH_SIZE="${MCTS_LEAF_BATCH_SIZE:-32}"
-FAST_SIMULATIONS="${FAST_SIMULATIONS:-100}"
-FULL_SIMULATION_PROBABILITY="${FULL_SIMULATION_PROBABILITY:-0.25}"
-THREADS="${THREADS:-32}"
+# Search and self-play throughput knobs. These defaults were selected from a
+# CUDA smoke sweep on the v2 network (RTX 4080 SUPER): leaf=16, threads=16,
+# wait-for=128. Override them for different GPUs or workloads.
+MCTS_LEAF_BATCH_SIZE="${MCTS_LEAF_BATCH_SIZE:-16}"
+THREADS="${THREADS:-16}"
 WAIT_FOR="${WAIT_FOR:-128}"
 BATCH_TIMEOUT_MS="${BATCH_TIMEOUT_MS:-5}"
 TT_ENTRIES="${TT_ENTRIES:-1000000}"
@@ -42,10 +44,13 @@ RESUME_LATEST_CHECKPOINT="${RESUME_LATEST_CHECKPOINT:-1}"
 
 # Device/precision.
 DEVICE="${DEVICE:-cuda}"
+# `auto` means FP16 self-play on CUDA and FP32 on CPU. Training is always FP32.
 INFERENCE_PRECISION="${INFERENCE_PRECISION:-auto}"
 
-# Background checkpoint evaluation. Set EVALUATE_CHECKPOINTS=0 to disable.
-EVALUATE_CHECKPOINTS="${EVALUATE_CHECKPOINTS:-1}"
+# V2 evaluation adapters are not enabled yet. Set this only after selecting a
+# legacy run or adding a v2-compatible evaluator.
+EVALUATE_CHECKPOINTS="${EVALUATE_CHECKPOINTS:-0}"
+EVAL_PROFILE="${EVAL_PROFILE:-quick}"
 EVAL_EVERY="${EVAL_EVERY:-50}"
 EVAL_GAMES="${EVAL_GAMES:-4}"
 BASELINE_GAMES="${BASELINE_GAMES:-4}"
@@ -59,11 +64,15 @@ EVAL_BACKFILL="${EVAL_BACKFILL:-0}"
 mkdir -p "$RUN_DIR"
 
 echo "run dir: $RUN_DIR"
-echo "mcts: $MCTS_VARIANT"
+echo "architecture: $ARCHITECTURE (history=$HISTORY)"
+echo "mcts: gumbel (v2 paired budgets)"
 echo "stdout log: $STDOUT_LOG"
 echo "stderr log: $STDERR_LOG"
 
-if [[ "$RESUME_LATEST_CHECKPOINT" == "1" ]]; then
+# `best` is updated every iteration, whereas numbered checkpoints may be
+# sparse. Only reconstruct it from a numbered checkpoint for older runs that
+# do not already have the active self-play weights.
+if [[ "$RESUME_LATEST_CHECKPOINT" == "1" && ! -f "$RUN_DIR/best.safetensors" ]]; then
   latest_checkpoint=""
   if [[ -d "$RUN_DIR/checkpoints" ]]; then
     latest_checkpoint="$(
@@ -79,28 +88,40 @@ if [[ "$RESUME_LATEST_CHECKPOINT" == "1" ]]; then
 fi
 
 cargo build --release --bin train
-cargo build --release -p checkpoint-eval
+cargo build --release -p checkpoint-eval --bins
+cargo build --release -p engine_app --bin engine-zoo-uci
 
 if [[ "$EVALUATE_CHECKPOINTS" == "1" ]]; then
+  if [[ "$ARCHITECTURE" == "chess-az-v2" ]]; then
+    echo "checkpoint evaluation is not supported for chess-az-v2 yet; set EVALUATE_CHECKPOINTS=0" >&2
+    exit 1
+  fi
   if ! command -v "$STOCKFISH_BIN" >/dev/null 2>&1 && [[ ! -x "$STOCKFISH_BIN" ]]; then
     echo "Stockfish not found: run crates/evaluations/install_stockfish.sh or set STOCKFISH_BIN" >&2
     exit 1
   fi
+  if [[ "$EVAL_PROFILE" == "quick" ]] && ! command -v "${FASTCHESS_BIN:-fastchess}" >/dev/null 2>&1 && [[ ! -x "${FASTCHESS_BIN:-fastchess}" ]]; then
+    echo "Fastchess not found: run crates/evaluations/install_fastchess.sh or set FASTCHESS_BIN" >&2
+    exit 1
+  fi
   mkdir -p "$RUN_DIR/evaluations"
   echo "starting checkpoint evaluator watcher" >> "$RUN_DIR/evaluations/watcher.log"
-  echo "root=$ROOT_DIR run_dir=$RUN_DIR eval_every=$EVAL_EVERY" >> "$RUN_DIR/evaluations/watcher.log"
+  echo "root=$ROOT_DIR run_dir=$RUN_DIR profile=$EVAL_PROFILE eval_every=$EVAL_EVERY" >> "$RUN_DIR/evaluations/watcher.log"
   EVAL_BIN="target/release/checkpoint-eval" \
+  EVAL_PROFILE="$EVAL_PROFILE" \
   EVAL_EVERY="$EVAL_EVERY" EVAL_GAMES="$EVAL_GAMES" BASELINE_GAMES="$BASELINE_GAMES" EVAL_SIMULATIONS="$EVAL_SIMULATIONS" \
-  STOCKFISH_BIN="$STOCKFISH_BIN" STOCKFISH_ELO="$STOCKFISH_ELO" \
+  FASTCHESS_BIN="${FASTCHESS_BIN:-fastchess}" STOCKFISH_BIN="$STOCKFISH_BIN" STOCKFISH_ELO="$STOCKFISH_ELO" \
   STOCKFISH_MOVETIME_MS="$STOCKFISH_MOVETIME_MS" EVAL_DEVICE="$EVAL_DEVICE" EVAL_BACKFILL="$EVAL_BACKFILL" \
   crates/evaluations/watch_checkpoints.sh "$RUN_DIR" >> "$RUN_DIR/evaluations/watcher.log" 2>&1 &
   EVAL_WATCHER_PID=$!
   trap 'kill "$EVAL_WATCHER_PID" 2>/dev/null || true' EXIT
-  echo "checkpoint evaluator: every $EVAL_EVERY checkpoints, 4 games vs Stockfish and 4 vs the prior checkpoint"
+  echo "checkpoint evaluator: profile=$EVAL_PROFILE every $EVAL_EVERY checkpoints"
 fi
 
 target/release/train \
   --game chess \
+  --architecture "$ARCHITECTURE" \
+  --history "$HISTORY" \
   --run-dir "$RUN_DIR" \
   --stderr-log "$STDERR_LOG" \
   --progress-every "$PROGRESS_EVERY" \
@@ -109,21 +130,19 @@ target/release/train \
   --threads "$THREADS" \
   --wait-for "$WAIT_FOR" \
   --batch-timeout-ms "$BATCH_TIMEOUT_MS" \
-  --simulations "$SIMULATIONS" \
   --mcts-leaf-batch-size "$MCTS_LEAF_BATCH_SIZE" \
-  --fast-simulations "$FAST_SIMULATIONS" \
-  --full-simulation-probability "$FULL_SIMULATION_PROBABILITY" \
+  --v2-full-simulations "$V2_FULL_SIMULATIONS" \
+  --v2-full-root-candidates "$V2_FULL_ROOT_CANDIDATES" \
+  --v2-fast-simulations "$V2_FAST_SIMULATIONS" \
+  --v2-fast-root-candidates "$V2_FAST_ROOT_CANDIDATES" \
+  --v2-full-simulation-probability "$V2_FULL_SIMULATION_PROBABILITY" \
   --max-moves "$MAX_MOVES" \
   --tt-entries "$TT_ENTRIES" \
   --train-steps "$TRAIN_STEPS" \
   --train-progress-every "$TRAIN_PROGRESS_EVERY" \
   --minibatch-size "$MINIBATCH_SIZE" \
   --buffer "$BUFFER" \
-  --blocks "$BLOCKS" \
-  --filters "$FILTERS" \
   --mode continuous \
-  --mcts-variant "$MCTS_VARIANT" \
-  --gumbel-sampled-actions "$GUMBEL_SAMPLED_ACTIONS" \
   --numbered-checkpoint-every "$NUMBERED_CHECKPOINT_EVERY" \
   --archive-checkpoint-minutes "$ARCHIVE_CHECKPOINT_MINUTES" \
   --device "$DEVICE" \

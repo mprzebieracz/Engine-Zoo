@@ -1,5 +1,11 @@
-use super::assign_trajectory_rewards;
 use super::Transition;
+use super::{
+    assign_trajectory_rewards, select_temperature_action, ChessV2GumbelProfiles, SelfPlayConfig,
+    SelfPlayTemperature,
+};
+use crate::alphazero::SearchResult;
+use rand::rngs::SmallRng;
+use rand::SeedableRng;
 
 fn transition() -> Transition {
     Transition {
@@ -22,4 +28,40 @@ fn draw_leaves_zeros() {
     let mut traj: Vec<Transition> = (0..4).map(|_| transition()).collect();
     assign_trajectory_rewards(&mut traj, 0.0);
     assert!(traj.iter().all(|t| t.reward == 0.0));
+}
+
+#[test]
+fn chess_v2_defaults_use_paired_gumbel_budgets_and_temperature_schedule() {
+    let cfg = SelfPlayConfig::chess_v2_defaults();
+    assert_eq!(
+        cfg.chess_v2_gumbel_profiles,
+        Some(ChessV2GumbelProfiles::DEFAULT)
+    );
+    assert_eq!(cfg.full_simulation_probability, 0.5);
+    assert_eq!(
+        cfg.chess_v2_temperature,
+        Some(SelfPlayTemperature::default())
+    );
+    assert!(cfg.validate_chess_v2().is_ok());
+}
+
+#[test]
+fn temperature_schedule_transitions_to_argmax() {
+    let schedule = SelfPlayTemperature::default();
+    assert_eq!(schedule.at_ply(0), Some(1.0));
+    assert_eq!(schedule.at_ply(20), Some(0.5));
+    assert_eq!(schedule.at_ply(40), None);
+}
+
+#[test]
+fn temperature_sampling_never_selects_a_zero_probability_action() {
+    let result = SearchResult {
+        policy: vec![0.0, 1.0, 0.0],
+        selected_action: 1,
+        value: 0.0,
+    };
+    let mut rng = SmallRng::seed_from_u64(7);
+    for _ in 0..100 {
+        assert_eq!(select_temperature_action(&result, Some(0.5), &mut rng), 1);
+    }
 }

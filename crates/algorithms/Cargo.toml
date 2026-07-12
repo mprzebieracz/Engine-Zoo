@@ -8,9 +8,11 @@ build = "build.rs"
 [dependencies]
 anyhow.workspace = true
 engine_core = { path = "../core" }
-games = { path = "../games" }
 rand.workspace = true
 rand_distr.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tch.workspace = true
+
+[dev-dependencies]
+games = { path = "../games" }
