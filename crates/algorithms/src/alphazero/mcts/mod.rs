@@ -1,7 +1,9 @@
 mod cache;
 mod core;
+mod evaluation;
 mod gumbel;
 mod puct;
+mod traversal;
 
 #[cfg(test)]
 mod tests;
@@ -16,7 +18,7 @@ use rand::prelude::*;
 
 #[cfg(test)]
 pub(crate) use cache::CachedEvaluation;
-pub(crate) use cache::{EvalTable, EvalTableStats};
+pub use cache::{EvalTable, EvalTableStats};
 pub use core::Mcts;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MctsVariant {
@@ -27,6 +29,34 @@ pub enum MctsVariant {
         /// Root actions considered before sequential halving.
         sampled_actions: usize,
     },
+}
+
+/// The two parameters that must change together when varying a Gumbel search
+/// budget. Keeping them in one value prevents a lower simulation budget from
+/// accidentally retaining an oversized sequential-halving root set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GumbelSearchProfile {
+    pub simulations: usize,
+    pub root_candidates: usize,
+}
+
+impl GumbelSearchProfile {
+    pub const fn new(simulations: usize, root_candidates: usize) -> Self {
+        Self {
+            simulations,
+            root_candidates,
+        }
+    }
+
+    pub fn validate(self) -> Result<(), &'static str> {
+        if self.simulations == 0 {
+            return Err("Gumbel profile simulations must be positive");
+        }
+        if self.root_candidates == 0 {
+            return Err("Gumbel profile root_candidates must be positive");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -59,6 +89,37 @@ impl Default for MctsConfig {
             alpha: 0.3,
             fpu_reduction: 0.1,
         }
+    }
+}
+
+impl MctsConfig {
+    /// Checks invariants required by every MCTS variant.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.c_init.is_finite() || self.c_init < 0.0 {
+            return Err("c_init must be finite and non-negative");
+        }
+        if !self.c_base.is_finite() || self.c_base <= 0.0 {
+            return Err("c_base must be finite and positive");
+        }
+        if self.simulations == 0 {
+            return Err("simulations must be positive");
+        }
+        if self.leaf_batch_size == 0 {
+            return Err("leaf_batch_size must be positive");
+        }
+        if !self.eps.is_finite() || !(0.0..=1.0).contains(&self.eps) {
+            return Err("eps must be finite and in [0, 1]");
+        }
+        if !self.alpha.is_finite() || (self.eps > 0.0 && self.alpha <= 0.0) {
+            return Err("alpha must be finite and positive when root noise is enabled");
+        }
+        if !self.fpu_reduction.is_finite() || self.fpu_reduction < 0.0 {
+            return Err("fpu_reduction must be finite and non-negative");
+        }
+        if matches!(self.variant, MctsVariant::Gumbel { sampled_actions: 0 }) {
+            return Err("Gumbel sampled_actions must be positive");
+        }
+        Ok(())
     }
 }
 
@@ -113,7 +174,8 @@ impl RootQTransform {
     fn apply(self, q: f32) -> f32 {
         let normalized = if self.inv_range == 0.0 {
             0.0
-        } else {
+        }
+        else {
             (q - self.min_value) * self.inv_range
         };
         self.scale * normalized
@@ -171,7 +233,8 @@ impl Node {
     fn q(&self) -> f32 {
         if self.visits == 0 {
             0.0
-        } else {
+        }
+        else {
             self.value_sum / self.visits as f32
         }
     }
@@ -184,7 +247,8 @@ impl Node {
         let visits = self.effective_visits();
         if visits == 0 {
             0.0
-        } else {
+        }
+        else {
             (self.value_sum + self.virtual_loss_count as f32) / visits as f32
         }
     }
@@ -198,7 +262,8 @@ impl<G: Game, E: Evaluator> Agent<G> for Mcts<E> {
         if matches!(variant, MctsVariant::Puct) && explore {
             let mut rng = rand::rng();
             result.sample_action(&mut rng)
-        } else {
+        }
+        else {
             // Gumbel exploration is already supplied by the root Gumbel sample.
             result.best_action()
         }

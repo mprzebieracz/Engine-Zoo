@@ -6,4 +6,3 @@ description = "Core board-game traits and shared engine abstractions"
 
 [dependencies]
 anyhow.workspace = true
-serde.workspace = true

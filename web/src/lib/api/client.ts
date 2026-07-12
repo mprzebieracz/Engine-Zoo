@@ -6,7 +6,7 @@ function base(server?: string) {
   return (server?.replace(/\/$/, '') || ENV_BASE);
 }
 
-async function request<T>(path: string, init?: RequestInit, server?: string): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit, server?: string): Promise<T> {
   const response = await fetch(`${base(server)}${path}`, {
     ...init,
     headers: { 'content-type': 'application/json', ...init?.headers }

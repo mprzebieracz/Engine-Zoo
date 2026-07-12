@@ -21,8 +21,9 @@
 
   let element: HTMLDivElement;
   let ground: Api | undefined;
+  let promotion = $state<{ from: string; to: string; moves: LegalMove[] } | null>(null);
 
-  function state() {
+  function chessState() {
     const chess = new Chess();
     for (const uci of moves) {
       if (!/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(uci)) continue;
@@ -43,8 +44,20 @@
     return result;
   }
 
+  function playOrChoosePromotion(orig: Key, dest: Key) {
+    const candidates = legalMoves.filter((entry: LegalMove) => entry.move.startsWith(`${orig}${dest}`));
+    if (candidates.length === 0) return;
+    if (candidates.length === 1) onmove(candidates[0].move);
+    else promotion = { from: orig, to: dest, moves: candidates };
+  }
+
+  function choosePromotion(move: LegalMove) {
+    promotion = null;
+    onmove(move.move);
+  }
+
   function config(): Config {
-    const chess = state();
+    const chess = chessState();
     const last = moves.at(-1);
     return {
       fen: chess.fen(),
@@ -56,18 +69,17 @@
       highlight: { lastMove: true, check: true },
       movable: {
         free: false,
-        color: disabled ? undefined : (chess.turn() === 'w' ? 'white' : 'black'),
-        dests: disabled ? new Map() : destinations(),
+        color: disabled || promotion ? undefined : (chess.turn() === 'w' ? 'white' : 'black'),
+        dests: disabled || promotion ? new Map() : destinations(),
         showDests: true,
         events: {
           after: (orig, dest) => {
-            const candidate = legalMoves.find((entry: LegalMove) => entry.move.startsWith(`${orig}${dest}`));
-            if (candidate) onmove(candidate.move);
+            playOrChoosePromotion(orig, dest);
           }
         }
       },
-      draggable: { enabled: !disabled, showGhost: true },
-      selectable: { enabled: !disabled }
+      draggable: { enabled: !disabled && !promotion, showGhost: true },
+      selectable: { enabled: !disabled && !promotion }
     };
   }
 
@@ -77,18 +89,39 @@
   });
 
   $effect(() => {
-    moves; legalMoves; disabled; orientation;
+    moves; legalMoves; disabled; orientation; promotion;
     ground?.set(config());
   });
 </script>
 
 <div class="board-shell" class:disabled>
   <div bind:this={element} class="cg-wrap"></div>
+  {#if promotion}
+    <div class="promotion-backdrop" role="button" tabindex="0" aria-label="Cancel promotion" onclick={() => (promotion = null)} onkeydown={(event) => { if (event.key === 'Escape') promotion = null; }}>
+      <div class="promotion-picker" role="dialog" tabindex="-1" aria-label="Choose promotion" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()}>
+        <strong>Promote pawn</strong>
+        <div class="promotion-options">
+          {#each promotion.moves as move}
+            <button class="promotion-option" type="button" onclick={() => choosePromotion(move)}>
+              {({ q: '♛ Queen', r: '♜ Rook', b: '♝ Bishop', n: '♞ Knight' } as Record<string, string>)[move.move[4]] ?? move.move[4]}
+            </button>
+          {/each}
+        </div>
+        <button class="promotion-cancel" type="button" onclick={() => (promotion = null)}>Cancel</button>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
-  .board-shell { width: 100%; aspect-ratio: 1; border-radius: 18px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); border: 1px solid rgba(255,255,255,.09); }
+  .board-shell { position: relative; width: 100%; aspect-ratio: 1; border-radius: 18px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.3); border: 1px solid rgba(255,255,255,.09); }
   .cg-wrap { width: 100%; height: 100%; }
   .disabled { opacity: .88; }
+  .promotion-backdrop { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; background: rgba(15,20,14,.58); }
+  .promotion-picker { display: grid; gap: .75rem; min-width: 13rem; padding: 1rem; border: 1px solid rgba(255,255,255,.2); border-radius: .9rem; background: #fffdf8; color: #1f2328; box-shadow: 0 18px 45px rgba(0,0,0,.28); text-align: center; }
+  .promotion-options { display: grid; gap: .45rem; }
+  .promotion-option, .promotion-cancel { border: 1px solid #ddd3c0; border-radius: .55rem; padding: .5rem .7rem; background: #f5f1e8; cursor: pointer; font: inherit; }
+  .promotion-option:hover, .promotion-cancel:hover { border-color: #2f654f; background: #fff; }
+  .promotion-cancel { font-size: .8rem; color: #6b6256; }
   :global(.cg-wrap cg-board) { border-radius: 16px; overflow: hidden; }
 </style>

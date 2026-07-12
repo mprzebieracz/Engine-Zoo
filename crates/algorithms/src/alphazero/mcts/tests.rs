@@ -5,7 +5,9 @@ use games::Connect4;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 impl<E: Evaluator> Mcts<E> {
     fn seed_rng(&mut self, seed: u64) {
@@ -38,6 +40,13 @@ impl<E: Evaluator> Mcts<E> {
         match &self.inner {
             MctsKind::Puct(core) => core.nodes[0].visits,
             MctsKind::Gumbel(core) => core.nodes[0].visits,
+        }
+    }
+
+    fn node_count(&self) -> usize {
+        match &self.inner {
+            MctsKind::Puct(core) => core.nodes.len(),
+            MctsKind::Gumbel(core) => core.nodes.len(),
         }
     }
 }
@@ -150,6 +159,135 @@ impl RepetitionGame for SinglePathGame {
     fn set_repetition_draw(&mut self) {}
 }
 
+#[derive(Clone, Copy, Default)]
+struct CycleGame {
+    ply: u8,
+    repetition_draw: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct FeatureRepetitionGame {
+    ply: u8,
+    repetitions_before: u8,
+}
+
+impl fmt::Display for FeatureRepetitionGame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ply={}", self.ply)
+    }
+}
+
+impl Game for FeatureRepetitionGame {
+    const ACTION_SIZE: usize = 1;
+    const STATE_SHAPE: [engine_core::game::TensorDim; 3] = [1, 1, 1];
+    const NAME: &'static str = "feature-repetition";
+
+    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
+        (0..1).filter(|_| self.ply == 0)
+    }
+
+    fn step(&mut self, action: Action) {
+        assert_eq!(action, 0);
+        self.ply += 1;
+    }
+
+    fn is_terminal(&self) -> bool {
+        false
+    }
+
+    fn reward(&self) -> f32 {
+        0.0
+    }
+
+    fn encode_state(&self, out: &mut [f32]) {
+        out[0] = f32::from(self.repetitions_before);
+    }
+
+    fn parse_move(&self, s: &str) -> Option<Action> {
+        (s == "0").then_some(0)
+    }
+
+    fn format_action(&self, action: Action) -> String {
+        action.to_string()
+    }
+}
+
+impl RepetitionGame for FeatureRepetitionGame {
+    fn repetition_hash(&self) -> u64 {
+        u64::from(self.ply)
+    }
+
+    fn halfmove_clock(&self) -> usize {
+        100
+    }
+
+    fn set_repetitions_before_current(&mut self, count: u8) {
+        self.repetitions_before = count;
+    }
+
+    fn set_repetition_draw(&mut self) {}
+}
+
+impl fmt::Display for CycleGame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ply={}", self.ply)
+    }
+}
+
+impl Game for CycleGame {
+    const ACTION_SIZE: usize = 1;
+    const STATE_SHAPE: [engine_core::game::TensorDim; 3] = [1, 1, 1];
+    const NAME: &'static str = "cycle";
+
+    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
+        (0..1).filter(|_| self.ply < 2 && !self.repetition_draw)
+    }
+
+    fn step(&mut self, action: Action) {
+        assert_eq!(action, 0);
+        self.ply += 1;
+    }
+
+    fn is_terminal(&self) -> bool {
+        self.repetition_draw
+    }
+
+    fn reward(&self) -> f32 {
+        0.0
+    }
+
+    fn encode_state(&self, out: &mut [f32]) {
+        out[0] = self.ply as f32;
+    }
+
+    fn parse_move(&self, s: &str) -> Option<Action> {
+        (s == "0").then_some(0)
+    }
+
+    fn format_action(&self, action: Action) -> String {
+        action.to_string()
+    }
+}
+
+impl RepetitionGame for CycleGame {
+    fn repetition_hash(&self) -> u64 {
+        if self.ply.is_multiple_of(2) {
+            1
+        }
+        else {
+            2
+        }
+    }
+
+    fn halfmove_clock(&self) -> usize {
+        100
+    }
+
+    fn set_repetition_draw(&mut self) {
+        self.repetition_draw = true;
+    }
+}
+
 #[derive(Clone)]
 struct TerminalGame;
 
@@ -216,9 +354,36 @@ impl Evaluator for UniformEvaluator {
     }
 }
 
+struct CountingEvaluator {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Evaluator for CountingEvaluator {
+    fn evaluate(&mut self, batch: &EvalBatch) -> Vec<Evaluation> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        UniformEvaluator.evaluate(batch)
+    }
+}
+
 struct RecordingEvaluator {
     calls: Arc<Mutex<Vec<usize>>>,
     favor_action_zero: bool,
+}
+
+struct FeatureRecordingEvaluator {
+    encoded: Arc<Mutex<Vec<f32>>>,
+}
+
+impl Evaluator for FeatureRecordingEvaluator {
+    fn evaluate(&mut self, batch: &EvalBatch) -> Vec<Evaluation> {
+        self.encoded.lock().unwrap().extend(
+            batch
+                .states
+                .chunks_exact(FeatureRepetitionGame::state_size())
+                .map(|state| state[0]),
+        );
+        UniformEvaluator.evaluate(batch)
+    }
 }
 
 impl RecordingEvaluator {
@@ -248,7 +413,8 @@ impl Evaluator for RecordingEvaluator {
                     .map(|&a| {
                         if self.favor_action_zero && a == 0 {
                             100.0
-                        } else {
+                        }
+                        else {
                             0.0
                         }
                     })
@@ -299,319 +465,4 @@ fn mcts(simulations: usize) -> Mcts<UniformEvaluator> {
     )
 }
 
-#[test]
-fn terminal_root_returns_reward_without_evaluator() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let mut mcts = Mcts::new(
-        RecordingEvaluator::uniform(calls.clone()),
-        MctsConfig {
-            simulations: 4,
-            eps: 0.0,
-            ..Default::default()
-        },
-    );
-
-    let result = mcts.search(&TerminalGame);
-
-    assert_eq!(result.value, -1.0);
-    assert_eq!(result.policy, vec![0.0, 0.0]);
-    assert!(calls.lock().unwrap().is_empty());
-}
-
-#[test]
-fn puct_finds_forced_terminal_win() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let mut mcts = Mcts::new(
-        RecordingEvaluator::uniform(calls),
-        MctsConfig {
-            simulations: 32,
-            eps: 0.0,
-            ..Default::default()
-        },
-    );
-
-    let result = mcts.search(&ImmediateOutcomeGame::default());
-
-    assert_eq!(result.best_action(), 0);
-    assert!(result.policy[0] > result.policy[1], "{:?}", result.policy);
-    assert!(result.policy[0] > result.policy[2], "{:?}", result.policy);
-}
-
-#[test]
-fn single_leaf_search_evaluates_one_state_per_call() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let mut mcts = Mcts::new(
-        RecordingEvaluator::uniform(calls.clone()),
-        MctsConfig {
-            simulations: 4,
-            eps: 0.0,
-            ..Default::default()
-        },
-    );
-
-    let result = mcts.search(&SinglePathGame::default());
-
-    assert_eq!(result.policy, vec![1.0]);
-    assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
-}
-
-#[test]
-fn batched_puct_evaluates_multiple_states_per_call() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let mut mcts = Mcts::new(
-        RecordingEvaluator::uniform(calls.clone()),
-        MctsConfig {
-            simulations: 8,
-            leaf_batch_size: 4,
-            eps: 0.0,
-            ..Default::default()
-        },
-    );
-
-    let result = mcts.search(&Connect4::default());
-
-    assert!((result.policy.iter().sum::<f32>() - 1.0).abs() < 1e-4);
-    assert_eq!(mcts.virtual_loss_total(), 0);
-    assert!(
-        calls.lock().unwrap().iter().any(|&n| n > 1),
-        "expected at least one batched evaluator call, got {:?}",
-        calls.lock().unwrap()
-    );
-}
-
-#[test]
-fn duplicate_batched_leaves_are_evaluated_once_and_backed_up_each_time() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let mut mcts = Mcts::new(
-        RecordingEvaluator::uniform(calls.clone()),
-        MctsConfig {
-            simulations: 4,
-            leaf_batch_size: 4,
-            eps: 0.0,
-            ..Default::default()
-        },
-    );
-
-    let result = mcts.search(&SinglePathGame::default());
-
-    assert_eq!(result.policy, vec![1.0]);
-    assert_eq!(mcts.virtual_loss_total(), 0);
-    assert_eq!(mcts.root_visits(), 4);
-    assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
-}
-
-#[test]
-fn batched_gumbel_clears_virtual_loss_and_keeps_valid_policy() {
-    let game = Connect4::default();
-    let mut mcts = Mcts::new(
-        UniformEvaluator,
-        MctsConfig {
-            variant: MctsVariant::Gumbel { sampled_actions: 4 },
-            simulations: 32,
-            leaf_batch_size: 8,
-            eps: 0.0,
-            ..Default::default()
-        },
-    );
-    mcts.seed_rng(19);
-
-    let result = mcts.search(&game);
-
-    assert_eq!(mcts.virtual_loss_total(), 0);
-    assert!((result.policy.iter().sum::<f32>() - 1.0).abs() < 1e-4);
-    assert!(mcts.gumbel_root_actions().contains(&result.best_action()));
-}
-
-#[test]
-fn repetition_eval_cache_reuses_network_outputs() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let cache = Arc::new(EvalTable::new(16));
-    let mut mcts = Mcts::new(
-        RecordingEvaluator::uniform(calls.clone()),
-        MctsConfig {
-            simulations: 1,
-            eps: 0.0,
-            ..Default::default()
-        },
-    )
-    .with_eval_cache(cache);
-
-    let first = mcts.search_with_repetitions(&SinglePathGame::default(), |_| 0);
-    let second = mcts.search_with_repetitions(&SinglePathGame::default(), |_| 0);
-
-    assert_eq!(first.policy, vec![1.0]);
-    assert_eq!(second.policy, vec![1.0]);
-    assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
-}
-
-#[test]
-fn lossy_eval_table_overwrites_collisions() {
-    let table = EvalTable::new(1);
-    table.insert(
-        1,
-        CachedEvaluation {
-            legal: vec![0],
-            eval: Evaluation {
-                logits: vec![1.0],
-                value: 0.25,
-            },
-        },
-    );
-    assert_eq!(table.get(1).unwrap().eval.value, 0.25);
-
-    table.insert(
-        2,
-        CachedEvaluation {
-            legal: vec![0],
-            eval: Evaluation {
-                logits: vec![2.0],
-                value: -0.5,
-            },
-        },
-    );
-
-    assert!(table.get(1).is_none());
-    assert_eq!(table.get(2).unwrap().eval.value, -0.5);
-}
-
-#[test]
-fn finds_immediate_win() {
-    // X has three stones in column 0 and is to move.
-    let game = play(&[0, 1, 0, 1, 0, 1]);
-    let result = mcts(400).search(&game);
-    assert_eq!(
-        result.best_action(),
-        0,
-        "should pick the winning column: {:?}",
-        result.policy
-    );
-}
-
-#[test]
-fn blocks_opponent_threat() {
-    // X threatens to complete column 0; O to move must block it.
-    let game = play(&[0, 6, 0, 5, 0]);
-    let result = mcts(2000).search(&game);
-    assert_eq!(
-        result.best_action(),
-        0,
-        "should block column 0: {:?}",
-        result.policy
-    );
-}
-
-#[test]
-fn policy_is_a_distribution() {
-    let game = Connect4::default();
-    let mut mcts = Mcts::new(
-        UniformEvaluator,
-        MctsConfig {
-            simulations: 200,
-            eps: 0.0,
-            ..Default::default()
-        },
-    );
-    let result = mcts.search(&game);
-    let sum: f32 = result.policy.iter().sum();
-    assert!((sum - 1.0).abs() < 1e-4);
-    assert!(result.policy.iter().all(|&p| p >= 0.0));
-}
-
-#[test]
-fn gumbel_selected_action_stays_on_sampled_root_actions() {
-    let game = Connect4::default();
-    let mut mcts = Mcts::new(
-        UniformEvaluator,
-        MctsConfig {
-            variant: MctsVariant::Gumbel { sampled_actions: 3 },
-            simulations: 48,
-            eps: 0.0,
-            ..Default::default()
-        },
-    );
-    mcts.seed_rng(11);
-
-    let result = mcts.search(&game);
-    let sum: f32 = result.policy.iter().sum();
-    let sampled = mcts.gumbel_root_actions();
-    let selected_was_sampled = sampled.contains(&result.best_action());
-
-    assert!((sum - 1.0).abs() < 1e-4);
-    assert_eq!(sampled.len(), 3);
-    assert!(selected_was_sampled, "{:?}", result.policy);
-    assert!(result.policy.iter().all(|&p| p >= 0.0));
-}
-
-#[test]
-fn gumbel_zero_sampled_actions_still_selects_one_root_action() {
-    let game = Connect4::default();
-    let mut mcts = Mcts::new(
-        UniformEvaluator,
-        MctsConfig {
-            variant: MctsVariant::Gumbel { sampled_actions: 0 },
-            simulations: 24,
-            eps: 0.0,
-            ..Default::default()
-        },
-    );
-    mcts.seed_rng(7);
-
-    let result = mcts.search(&game);
-    let sampled = mcts.gumbel_root_actions();
-
-    assert_eq!(sampled.len(), 1);
-    assert_eq!(result.best_action(), sampled[0]);
-    assert!((result.policy.iter().sum::<f32>() - 1.0).abs() < 1e-4);
-    assert!(result.policy.iter().all(|&p| p >= 0.0));
-}
-
-#[test]
-fn gumbel_with_all_root_actions_finds_forced_terminal_win() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let mut mcts = Mcts::new(
-        RecordingEvaluator::favor_action_zero(calls),
-        MctsConfig {
-            variant: MctsVariant::Gumbel { sampled_actions: 3 },
-            simulations: 32,
-            eps: 0.0,
-            ..Default::default()
-        },
-    );
-    mcts.seed_rng(3);
-
-    let result = mcts.search(&ImmediateOutcomeGame::default());
-
-    assert_eq!(result.best_action(), 0);
-    assert!(result.policy[0] > result.policy[1], "{:?}", result.policy);
-    assert!(result.policy[0] > result.policy[2], "{:?}", result.policy);
-}
-
-#[test]
-#[should_panic(expected = "evaluator must return one result per input state")]
-fn rejects_evaluator_result_count_mismatch() {
-    let mut mcts = Mcts::new(
-        EmptyResultEvaluator,
-        MctsConfig {
-            simulations: 1,
-            eps: 0.0,
-            ..Default::default()
-        },
-    );
-
-    let _ = mcts.search(&ImmediateOutcomeGame::default());
-}
-
-#[test]
-#[should_panic(expected = "evaluator logits must match the legal actions for each state")]
-fn rejects_evaluator_logit_count_mismatch() {
-    let mut mcts = Mcts::new(
-        BadLogitEvaluator,
-        MctsConfig {
-            simulations: 1,
-            eps: 0.0,
-            ..Default::default()
-        },
-    );
-
-    let _ = mcts.search(&ImmediateOutcomeGame::default());
-}
+mod cases;

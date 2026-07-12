@@ -10,11 +10,21 @@ mod selfplay;
 mod trainer;
 
 pub use batcher::{Batcher, BatcherClient, InferencePrecision};
-pub use checkpoint::{RunConfig, RunDir};
+pub use checkpoint::{RunArchitecture, RunConfig, RunDir};
 pub use engine_core::rules::RepetitionGame;
 pub use evaluator::{EvalBatch, Evaluation, Evaluator};
-pub use mcts::{Mcts, MctsConfig, MctsVariant, SearchResult};
-pub use network::{AlphaZeroNet, NetConfig};
+pub use mcts::{
+    EvalTable, EvalTableStats, GumbelSearchProfile, Mcts, MctsConfig, MctsVariant, SearchResult,
+};
+pub use network::{
+    wdl_scalar, AlphaZeroNet, ChessAzV2Config, ChessAzV2Net, LegacyAlphaZeroNet, NetConfig,
+    Network, NetworkConfig, NetworkOutput,
+};
 pub use replay::{ReplayBuffer, Transition};
-pub use selfplay::{self_play, self_play_chess, SelfPlayConfig, SelfPlayStats};
-pub use trainer::{build_optimizer, train, TrainConfig, TrainMetrics};
+pub use selfplay::{
+    select_temperature_action, self_play, ChessV2GumbelProfiles, SelfPlayConfig, SelfPlayStats,
+    SelfPlayTemperature,
+};
+pub use trainer::{
+    build_optimizer, train, train_chess_az_v2, wdl_cross_entropy, TrainConfig, TrainMetrics,
+};

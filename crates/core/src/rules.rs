@@ -1,14 +1,6 @@
 use crate::game::Game;
-use serde::Serialize;
 
-/// Optional frontend-oriented state projection for a game.
-pub trait BoardView: Game {
-    type View: Serialize;
-
-    fn board_view(&self) -> Self::View;
-}
-
-/// Optional typed position loading/saving for a game.
+/// Constructs a game from its typed setup representation.
 pub trait PositionCodec: Game {
     type Position;
 
@@ -23,13 +15,15 @@ pub trait PositionCodec: Game {
 /// without depending on a particular search algorithm crate.
 pub trait RepetitionGame: Game + Copy {
     fn repetition_hash(&self) -> u64;
-    fn halfmove_clock(&self) -> usize;
-    fn set_repetition_draw(&mut self);
-}
-
-/// Hook point for future per-game search rules.
-pub trait SearchRules<G: Game>: Copy {
-    fn root_hash(self, _game: &G) -> u64 {
-        0
+    /// Key for cached network evaluations. By default a game's position hash
+    /// is sufficient, but encodings that include history must override this
+    /// with every feature that can affect network output.
+    fn evaluation_cache_key(&self) -> u64 {
+        self.repetition_hash()
     }
+    fn halfmove_clock(&self) -> usize;
+    /// Supplies the full-game repetition count for the current search state.
+    /// Games whose encoding has no repetition feature can keep the default.
+    fn set_repetitions_before_current(&mut self, _count: u8) {}
+    fn set_repetition_draw(&mut self);
 }

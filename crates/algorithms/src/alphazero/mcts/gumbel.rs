@@ -63,7 +63,8 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
 
         let gumbel_scale = if mode == PolicyMode::Explore {
             Gumbel::EXPLORATION_SCALE
-        } else {
+        }
+        else {
             0.0
         };
         let winner = self.run_gumbel(game, root_value, gumbel_scale, driver);
@@ -75,7 +76,8 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
             selected_action,
             value: if self.nodes[0].visits > 0 {
                 self.nodes[0].q()
-            } else {
+            }
+            else {
                 root_value
             },
         }
@@ -106,7 +108,8 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
             for p in &mut policy {
                 *p /= sum;
             }
-        } else {
+        }
+        else {
             let uniform = 1.0 / root.num_children as f32;
             for c in root.first_child..root.first_child + u32::from(root.num_children) {
                 let action = self.nodes[c as usize].action_from_parent as usize;
@@ -207,7 +210,8 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
     fn completed_root_child_q(&self, child: u32, transform: RootQTransform) -> f32 {
         if self.nodes[child as usize].effective_visits() == 0 {
             transform.completed_value
-        } else {
+        }
+        else {
             -self.nodes[child as usize].effective_q()
         }
     }
@@ -232,7 +236,8 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
 
         let weighted_q = if visited_prior_sum > 0.0 {
             prior_weighted_q / visited_prior_sum
-        } else {
+        }
+        else {
             root_value
         };
         let completed_value =
@@ -244,7 +249,8 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
             let child = &self.nodes[c as usize];
             let q = if child.effective_visits() == 0 {
                 completed_value
-            } else {
+            }
+            else {
                 -child.effective_q()
             };
             min_value = min_value.min(q);
@@ -257,7 +263,8 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
             min_value,
             inv_range: if range > Gumbel::Q_EPSILON {
                 range.recip()
-            } else {
+            }
+            else {
                 0.0
             },
             scale: (Gumbel::C_VISIT + max_visits as f32) * Gumbel::C_SCALE,

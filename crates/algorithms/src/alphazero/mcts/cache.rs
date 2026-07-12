@@ -13,7 +13,7 @@ struct EvalTableEntry {
     cached: CachedEvaluation,
 }
 
-pub(crate) struct EvalTable {
+pub struct EvalTable {
     slots: Box<[RwLock<Option<EvalTableEntry>>]>,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -21,7 +21,7 @@ pub(crate) struct EvalTable {
 }
 
 impl EvalTable {
-    pub(crate) fn new(entries: usize) -> Self {
+    pub fn new(entries: usize) -> Self {
         let slots = (0..entries.max(1)).map(|_| RwLock::new(None)).collect();
         EvalTable {
             slots,
@@ -40,7 +40,8 @@ impl EvalTable {
             .map(|entry| entry.cached.clone());
         if hit.is_some() {
             self.hits.fetch_add(1, Ordering::Relaxed);
-        } else {
+        }
+        else {
             self.misses.fetch_add(1, Ordering::Relaxed);
         }
         hit
@@ -52,7 +53,7 @@ impl EvalTable {
         self.inserts.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn stats(&self) -> EvalTableStats {
+    pub fn stats(&self) -> EvalTableStats {
         EvalTableStats {
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
@@ -62,7 +63,7 @@ impl EvalTable {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct EvalTableStats {
+pub struct EvalTableStats {
     pub hits: u64,
     pub misses: u64,
     pub inserts: u64,

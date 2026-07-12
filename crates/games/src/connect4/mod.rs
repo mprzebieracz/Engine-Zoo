@@ -79,7 +79,8 @@ impl Connect4 {
     pub fn current_player(&self) -> i8 {
         if self.ply.is_multiple_of(2) {
             1
-        } else {
+        }
+        else {
             -1
         }
     }
@@ -87,7 +88,8 @@ impl Connect4 {
     fn player1_stones(&self) -> u64 {
         if self.ply.is_multiple_of(2) {
             self.pos
-        } else {
+        }
+        else {
             self.pos ^ self.mask
         }
     }
@@ -104,13 +106,16 @@ impl Game for Connect4 {
 
     fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
         (0..COLS)
-            .filter(|&c| self.column_playable(c))
+            .filter(|&c| self.status == Status::Ongoing && self.column_playable(c))
             .map(|c| c as Action)
     }
 
     fn step(&mut self, action: Action) {
         let col = action as usize;
-        debug_assert!(self.status == Status::Ongoing && col < COLS && self.column_playable(col));
+        assert!(
+            self.status == Status::Ongoing && col < COLS && self.column_playable(col),
+            "illegal Connect Four action {action}"
+        );
 
         let move_bit = (self.mask + bottom_bit(col)) & column_mask(col);
         let placed = self.pos | move_bit;
@@ -121,7 +126,8 @@ impl Game for Connect4 {
 
         if has_alignment(placed) {
             self.status = Status::Loss;
-        } else if self.mask == FULL_MASK {
+        }
+        else if self.mask == FULL_MASK {
             self.status = Status::Draw;
         }
     }
@@ -133,12 +139,14 @@ impl Game for Connect4 {
     fn reward(&self) -> f32 {
         if self.status == Status::Loss {
             -1.0
-        } else {
+        }
+        else {
             0.0
         }
     }
 
     fn encode_state(&self, out: &mut [f32]) {
+        assert_eq!(out.len(), Self::state_size(), "invalid state buffer length");
         let own = self.pos;
         let opp = self.pos ^ self.mask;
         for row_top in 0..ROWS {
@@ -146,9 +154,11 @@ impl Game for Connect4 {
                 let b = bit(col, ROWS - 1 - row_top);
                 out[row_top * COLS + col] = if own & b != 0 {
                     1.0
-                } else if opp & b != 0 {
+                }
+                else if opp & b != 0 {
                     -1.0
-                } else {
+                }
+                else {
                     0.0
                 };
             }
@@ -175,9 +185,11 @@ impl fmt::Display for Connect4 {
                 let b = bit(col, ROWS - 1 - row_top);
                 let cell = if p1 & b != 0 {
                     'X'
-                } else if p2 & b != 0 {
+                }
+                else if p2 & b != 0 {
                     'O'
-                } else {
+                }
+                else {
                     '.'
                 };
                 write!(f, "{cell} ")?;

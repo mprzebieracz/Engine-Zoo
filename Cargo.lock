@@ -289,7 +289,6 @@ version = "0.1.0"
 dependencies = [
  "algorithms",
  "anyhow",
- "chess",
  "clap",
  "engine_core",
  "games",
@@ -457,6 +456,7 @@ dependencies = [
  "algorithms",
  "anyhow",
  "axum",
+ "checkpoint-eval",
  "clap",
  "engine_core",
  "games",
@@ -475,7 +475,6 @@ name = "engine_core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "serde",
 ]
 
 [[package]]

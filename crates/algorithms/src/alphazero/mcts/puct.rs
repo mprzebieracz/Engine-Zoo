@@ -60,7 +60,8 @@ impl<E: Evaluator> MctsCore<E, Puct> {
             selected_action,
             value: if self.nodes[0].visits > 0 {
                 self.nodes[0].q()
-            } else {
+            }
+            else {
                 root_value
             },
         }

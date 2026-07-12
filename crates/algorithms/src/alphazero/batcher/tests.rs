@@ -1,5 +1,5 @@
 use super::*;
-use crate::alphazero::network::{AlphaZeroNet, NetConfig};
+use crate::alphazero::network::{AlphaZeroNet, NetConfig, Network, NetworkConfig};
 use std::fs;
 use std::sync::mpsc::sync_channel;
 use tch::{nn, Device, Tensor};
@@ -122,8 +122,8 @@ fn worker_evaluate_returns_only_requested_legal_logits() {
 
     let mut worker = Worker::new(
         vs,
-        net,
-        cfg,
+        Network::Legacy(net),
+        NetworkConfig::Legacy(cfg),
         Device::Cpu,
         shared(4),
         InferencePrecision::Fp32,
@@ -155,8 +155,8 @@ fn process_splits_combined_results_back_to_each_task() {
     let (tx2, rx2) = sync_channel(1);
     let mut worker = Worker::new(
         vs,
-        net,
-        cfg,
+        Network::Legacy(net),
+        NetworkConfig::Legacy(cfg),
         Device::Cpu,
         shared(8),
         InferencePrecision::Fp32,

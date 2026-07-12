@@ -119,12 +119,14 @@ fn run_game<G: Game>(args: PlayArgs) -> Result<()> {
         let side = ply % 2;
         let mode = if ply < cfg.opening_moves {
             PolicyMode::Explore
-        } else {
+        }
+        else {
             PolicyMode::Deterministic
         };
         let action = if side == 0 {
             first.act_with_mode(&game, mode)
-        } else {
+        }
+        else {
             second.act_with_mode(&game, mode)
         };
         println!(
@@ -170,12 +172,15 @@ fn side_name<G: Game>(side: usize) -> &'static str {
     if G::NAME == ChessGame::NAME {
         if side == 0 {
             "white"
-        } else {
+        }
+        else {
             "black"
         }
-    } else if side == 0 {
+    }
+    else if side == 0 {
         "first"
-    } else {
+    }
+    else {
         "second"
     }
 }

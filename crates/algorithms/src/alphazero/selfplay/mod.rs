@@ -1,8 +1,8 @@
 use super::batcher::{Batcher, BatcherClient};
-use super::mcts::{EvalTable, EvalTableStats, Mcts, MctsConfig, MctsVariant, SearchResult};
+use super::mcts::{GumbelSearchProfile, Mcts, MctsConfig, MctsVariant, SearchResult};
 use super::replay::{ReplayBuffer, Transition};
 use engine_core::game::{Action, Game};
-use games::chess::ChessGame;
+use rand::distr::Distribution;
 use rand::Rng;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,7 +29,8 @@ impl SelfPlayStats {
     pub fn avg_moves_per_game(&self) -> f64 {
         if self.games == 0 {
             0.0
-        } else {
+        }
+        else {
             self.moves as f64 / self.games as f64
         }
     }
@@ -44,12 +45,6 @@ impl SelfPlayStats {
         self.tt_misses += other.tt_misses;
         self.tt_inserts += other.tt_inserts;
     }
-
-    fn add_tt(&mut self, tt: EvalTableStats) {
-        self.tt_hits += tt.hits;
-        self.tt_misses += tt.misses;
-        self.tt_inserts += tt.inserts;
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -59,7 +54,13 @@ pub struct SelfPlayConfig {
     /// Games longer than this are truncated and scored as draws.
     pub max_moves: usize,
     /// Moves sampled from the visit distribution before switching to argmax.
+    ///
+    /// This is retained for legacy self-play. Chess AZ v2 uses
+    /// `chess_v2_temperature` instead.
     pub temperature_moves: usize,
+    /// Chess AZ v2 move-selection schedule. `None` preserves the legacy
+    /// temperature behavior, including Gumbel's historical argmax selection.
+    pub chess_v2_temperature: Option<SelfPlayTemperature>,
     /// Print self-play progress every N completed games. Set 0 to disable.
     pub progress_every: usize,
     /// Maximum chess NN evaluation cache entries for one self-play iteration.
@@ -67,12 +68,75 @@ pub struct SelfPlayConfig {
     pub tt_entries: usize,
     pub fast_simulations: usize,
     pub full_simulation_probability: f32,
+    /// Paired Gumbel profiles for Chess AZ v2 self-play. `None` keeps the
+    /// legacy single-budget configuration above.
+    pub chess_v2_gumbel_profiles: Option<ChessV2GumbelProfiles>,
     pub resignation_enabled: bool,
     pub resignation_threshold: f32,
     pub resignation_consecutive_moves: usize,
     pub resignation_min_ply: usize,
     pub resignation_disable_probability: f32,
     pub mcts: MctsConfig,
+}
+
+/// Temperature schedule for sampling an improved root policy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SelfPlayTemperature {
+    /// Number of initial plies sampled at temperature 1.0.
+    pub full_temperature_plies: usize,
+    /// Number of following plies sampled at `reduced_temperature`.
+    pub reduced_temperature_plies: usize,
+    pub reduced_temperature: f32,
+}
+
+impl Default for SelfPlayTemperature {
+    fn default() -> Self {
+        Self {
+            full_temperature_plies: 20,
+            reduced_temperature_plies: 20,
+            reduced_temperature: 0.5,
+        }
+    }
+}
+
+impl SelfPlayTemperature {
+    pub fn validate(self) -> Result<(), &'static str> {
+        if !self.reduced_temperature.is_finite() || self.reduced_temperature <= 0.0 {
+            return Err("reduced self-play temperature must be finite and positive");
+        }
+        Ok(())
+    }
+
+    pub fn at_ply(self, ply: usize) -> Option<f32> {
+        if ply < self.full_temperature_plies {
+            Some(1.0)
+        }
+        else if ply < self.full_temperature_plies + self.reduced_temperature_plies {
+            Some(self.reduced_temperature)
+        }
+        else {
+            None
+        }
+    }
+}
+
+/// The randomized search budgets used by Chess AZ v2 self-play.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChessV2GumbelProfiles {
+    pub full: GumbelSearchProfile,
+    pub fast: GumbelSearchProfile,
+}
+
+impl ChessV2GumbelProfiles {
+    pub const DEFAULT: Self = Self {
+        full: GumbelSearchProfile::new(128, 16),
+        fast: GumbelSearchProfile::new(64, 8),
+    };
+
+    pub fn validate(self) -> Result<(), &'static str> {
+        self.full.validate()?;
+        self.fast.validate()
+    }
 }
 
 impl Default for SelfPlayConfig {
@@ -82,10 +146,12 @@ impl Default for SelfPlayConfig {
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
             max_moves: 256,
             temperature_moves: 30,
+            chess_v2_temperature: None,
             progress_every: 25,
             tt_entries: 1_000_000,
             fast_simulations: 100,
             full_simulation_probability: 0.25,
+            chess_v2_gumbel_profiles: None,
             resignation_enabled: true,
             resignation_threshold: -0.95,
             resignation_consecutive_moves: 3,
@@ -93,6 +159,49 @@ impl Default for SelfPlayConfig {
             resignation_disable_probability: 0.10,
             mcts: MctsConfig::default(),
         }
+    }
+}
+
+impl SelfPlayConfig {
+    /// Defaults for the new chess-only AlphaZero v2 format. This is separate
+    /// from `Default` so existing generic and legacy chess callers keep their
+    /// previous self-play behavior.
+    pub fn chess_v2_defaults() -> Self {
+        Self {
+            temperature_moves: 0,
+            chess_v2_temperature: Some(SelfPlayTemperature::default()),
+            fast_simulations: ChessV2GumbelProfiles::DEFAULT.fast.simulations,
+            full_simulation_probability: 0.5,
+            chess_v2_gumbel_profiles: Some(ChessV2GumbelProfiles::DEFAULT),
+            mcts: MctsConfig {
+                simulations: ChessV2GumbelProfiles::DEFAULT.full.simulations,
+                variant: MctsVariant::Gumbel {
+                    sampled_actions: ChessV2GumbelProfiles::DEFAULT.full.root_candidates,
+                },
+                ..MctsConfig::default()
+            },
+            ..Self::default()
+        }
+    }
+
+    /// Validates the optional Chess AZ v2 self-play additions. Legacy callers
+    /// may leave both fields as `None`.
+    pub fn validate_chess_v2(&self) -> Result<(), &'static str> {
+        if let Some(temperature) = self.chess_v2_temperature {
+            temperature.validate()?;
+        }
+        if let Some(profiles) = self.chess_v2_gumbel_profiles {
+            profiles.validate()?;
+            if !matches!(self.mcts.variant, MctsVariant::Gumbel { .. }) {
+                return Err("Chess AZ v2 Gumbel profiles require Gumbel MCTS");
+            }
+            if !self.full_simulation_probability.is_finite()
+                || !(0.0..=1.0).contains(&self.full_simulation_probability)
+            {
+                return Err("full simulation probability must be finite and in [0, 1]");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -116,10 +225,12 @@ pub fn self_play<G: Game>(
                 while finished.load(Ordering::Relaxed) < cfg.num_games {
                     let Some(completed) = play_game::<G>(&mut mcts, cfg, || {
                         finished.load(Ordering::Relaxed) >= cfg.num_games
-                    }) else {
+                    })
+                    else {
                         break;
                     };
-                    let Ok(done_before) = claim_completed_game(finished, cfg.num_games) else {
+                    let Ok(done_before) = claim_completed_game(finished, cfg.num_games)
+                    else {
                         break;
                     };
                     replay.add(completed.trajectory);
@@ -131,53 +242,6 @@ pub fn self_play<G: Game>(
         }
     });
     Arc::try_unwrap(stats).unwrap().into_inner().unwrap()
-}
-
-/// Chess-specific self-play path: MCTS searches on the lightweight
-/// `ChessPosition` while the full `ChessGame` owns real-game repetition
-/// history for replay generation.
-pub fn self_play_chess(
-    batcher: &Batcher,
-    replay: &ReplayBuffer,
-    cfg: &SelfPlayConfig,
-) -> SelfPlayStats {
-    let finished = AtomicUsize::new(0);
-    let started = Instant::now();
-    let eval_cache = (cfg.tt_entries > 0).then(|| Arc::new(EvalTable::new(cfg.tt_entries)));
-    let stats = Arc::new(Mutex::new(SelfPlayStats::default()));
-
-    std::thread::scope(|scope| {
-        for _ in 0..cfg.threads.max(1) {
-            let eval_cache = eval_cache.clone();
-            let stats = Arc::clone(&stats);
-            let finished = &finished;
-            scope.spawn(move || {
-                let mut mcts = Mcts::new(batcher.client(), cfg.mcts);
-                if let Some(cache) = eval_cache {
-                    mcts = mcts.with_eval_cache(cache);
-                }
-                while finished.load(Ordering::Relaxed) < cfg.num_games {
-                    let Some(completed) = play_chess_game(&mut mcts, cfg, || {
-                        finished.load(Ordering::Relaxed) >= cfg.num_games
-                    }) else {
-                        break;
-                    };
-                    let Ok(done_before) = claim_completed_game(finished, cfg.num_games) else {
-                        break;
-                    };
-                    replay.add(completed.trajectory);
-                    stats.lock().unwrap().add(completed.stats);
-                    let done = done_before + 1;
-                    maybe_print_progress(done, cfg, &stats, started);
-                }
-            });
-        }
-    });
-    let mut stats = Arc::try_unwrap(stats).unwrap().into_inner().unwrap();
-    if let Some(eval_cache) = eval_cache {
-        stats.add_tt(eval_cache.stats());
-    }
-    stats
 }
 
 fn claim_completed_game(finished: &AtomicUsize, target: usize) -> Result<usize, usize> {
@@ -249,82 +313,6 @@ fn play_game<G: Game>(
     Some(CompletedGame { stats, trajectory })
 }
 
-fn play_chess_game(
-    mcts: &mut Mcts<BatcherClient>,
-    cfg: &SelfPlayConfig,
-    should_stop: impl Fn() -> bool,
-) -> Option<CompletedGame> {
-    let mut game = ChessGame::default();
-    let mut trajectory: Vec<Transition> = Vec::new();
-    let mut rng = rand::rng();
-    let resignation_disabled =
-        rng.random_bool(cfg.resignation_disable_probability.clamp(0.0, 1.0) as f64);
-    let mut resignation_streak = 0usize;
-    let mut resigned_value = None;
-    let mut stats = SelfPlayStats {
-        games: 1,
-        ..Default::default()
-    };
-
-    while !game.is_terminal() && trajectory.len() < cfg.max_moves {
-        if should_stop() {
-            return None;
-        }
-        let mut state = vec![0.0f32; ChessGame::state_size()];
-        game.encode_state(&mut state);
-
-        let full_search = rng.random_bool(cfg.full_simulation_probability.clamp(0.0, 1.0) as f64);
-        let simulations = if full_search {
-            stats.full_searches += 1;
-            cfg.mcts.simulations
-        } else {
-            stats.fast_searches += 1;
-            cfg.fast_simulations.max(1)
-        };
-        mcts.set_simulations(simulations);
-
-        let position = game.position();
-        let result =
-            mcts.search_with_repetitions(&position, |hash| game.repetitions_before_current(hash));
-        let action = select_self_play_action(
-            &result,
-            mcts.config().variant,
-            trajectory.len(),
-            cfg.temperature_moves,
-            &mut rng,
-        );
-        let policy = sparse_policy(&result.policy);
-
-        trajectory.push(Transition {
-            state,
-            policy,
-            reward: 0.0,
-        });
-
-        if cfg.resignation_enabled
-            && !resignation_disabled
-            && trajectory.len() >= cfg.resignation_min_ply
-            && result.value < cfg.resignation_threshold
-        {
-            resignation_streak += 1;
-        } else {
-            resignation_streak = 0;
-        }
-        if resignation_streak >= cfg.resignation_consecutive_moves.max(1) {
-            resigned_value = Some(-1.0);
-            stats.resignations += 1;
-            break;
-        }
-
-        game.step(action);
-    }
-
-    let terminal_reward = resigned_value.unwrap_or_else(|| -game.reward());
-    assign_trajectory_rewards(&mut trajectory, terminal_reward);
-    stats.moves = trajectory.len();
-    Some(CompletedGame { stats, trajectory })
-}
-
 fn select_self_play_action<R: Rng + ?Sized>(
     result: &SearchResult,
     variant: MctsVariant,
@@ -334,9 +322,55 @@ fn select_self_play_action<R: Rng + ?Sized>(
 ) -> Action {
     if matches!(variant, MctsVariant::Gumbel { .. }) || ply >= temperature_moves {
         result.best_action()
-    } else {
+    }
+    else {
         result.sample_action(rng)
     }
+}
+
+/// Samples `p^(1/T)` without assigning mass to illegal/zero-probability
+/// actions. `None` means deterministic argmax.
+pub fn select_temperature_action<R: Rng + ?Sized>(
+    result: &SearchResult,
+    temperature: Option<f32>,
+    rng: &mut R,
+) -> Action {
+    let Some(temperature) = temperature
+    else {
+        return result.best_action();
+    };
+    assert!(
+        temperature.is_finite() && temperature > 0.0,
+        "self-play temperature must be finite and positive"
+    );
+    if temperature == 1.0 {
+        return result.sample_action(rng);
+    }
+
+    let exponent = 1.0_f64 / f64::from(temperature);
+    let log_probabilities: Vec<f64> = result
+        .policy
+        .iter()
+        .map(|&probability| {
+            if probability > 0.0 {
+                f64::from(probability).ln()
+            }
+            else {
+                f64::NEG_INFINITY
+            }
+        })
+        .collect();
+    let max_log_probability = log_probabilities
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let weights: Vec<f64> = log_probabilities
+        .into_iter()
+        .map(|log_probability| ((log_probability - max_log_probability) * exponent).exp())
+        .collect();
+    rand::distr::weighted::WeightedIndex::new(weights)
+        .expect("search of a non-terminal position returns a non-empty policy")
+        .sample(rng) as Action
 }
 
 fn sparse_policy(policy: &[f32]) -> Vec<(Action, f32)> {

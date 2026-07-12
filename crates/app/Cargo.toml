@@ -17,11 +17,16 @@ path = "src/bin/train.rs"
 name = "eval"
 path = "src/bin/eval.rs"
 
+[[bin]]
+name = "engine-zoo-uci"
+path = "src/bin/engine-zoo-uci.rs"
+
 [dependencies]
 algorithms = { path = "../algorithms" }
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+checkpoint-eval = { path = "../evaluations" }
 engine_core = { path = "../core" }
 games = { path = "../games" }
 libc.workspace = true
