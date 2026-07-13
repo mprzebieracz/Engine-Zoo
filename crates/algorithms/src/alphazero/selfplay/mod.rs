@@ -263,9 +263,10 @@ fn maybe_print_progress(
     let elapsed = started.elapsed().as_secs_f64().max(1e-6);
     let stats = stats.lock().unwrap();
     println!(
-        "self-play progress: {done}/{} games, {:.1} games/s, {:.1} moves/game",
+        "self-play progress: {done}/{} games, {:.1} games/s, {:.1} positions/s, {:.1} moves/game",
         cfg.num_games,
         done as f64 / elapsed,
+        stats.moves as f64 / elapsed,
         stats.avg_moves_per_game()
     );
 }
@@ -276,7 +277,7 @@ fn play_game<G: Game>(
     should_stop: impl Fn() -> bool,
 ) -> Option<CompletedGame> {
     let mut game = G::default();
-    let mut trajectory: Vec<Transition> = Vec::new();
+    let mut trajectory = Vec::with_capacity(cfg.max_moves.min(256));
     let mut rng = rand::rng();
 
     while !game.is_terminal() && trajectory.len() < cfg.max_moves {
@@ -294,11 +295,9 @@ fn play_game<G: Game>(
             cfg.temperature_moves,
             &mut rng,
         );
-        let policy = sparse_policy(&result.policy);
-
         trajectory.push(Transition {
             state,
-            policy,
+            policy: result.policy,
             reward: 0.0,
         });
         game.step(action);
@@ -351,7 +350,7 @@ pub fn select_temperature_action<R: Rng + ?Sized>(
     let log_probabilities: Vec<f64> = result
         .policy
         .iter()
-        .map(|&probability| {
+        .map(|&(_, probability)| {
             if probability > 0.0 {
                 f64::from(probability).ln()
             }
@@ -368,18 +367,10 @@ pub fn select_temperature_action<R: Rng + ?Sized>(
         .into_iter()
         .map(|log_probability| ((log_probability - max_log_probability) * exponent).exp())
         .collect();
-    rand::distr::weighted::WeightedIndex::new(weights)
+    let index = rand::distr::weighted::WeightedIndex::new(weights)
         .expect("search of a non-terminal position returns a non-empty policy")
-        .sample(rng) as Action
-}
-
-fn sparse_policy(policy: &[f32]) -> Vec<(Action, f32)> {
-    policy
-        .iter()
-        .enumerate()
-        .filter(|(_, &p)| p > 0.0)
-        .map(|(a, &p)| (a as Action, p))
-        .collect()
+        .sample(rng);
+    result.policy[index].0
 }
 
 /// Walks the trajectory backwards from the terminal reward, flipping sign

@@ -18,7 +18,10 @@ fn from_fen(fen: &str) -> ChessGame {
             status,
             halfmove_clock: 0,
         },
-        position_counts: HashMap::with_capacity(16),
+        position_counts: HashMap::with_capacity_and_hasher(
+            16,
+            zobrist::ZobristBuildHasher::default(),
+        ),
     };
     game.record_position();
     game

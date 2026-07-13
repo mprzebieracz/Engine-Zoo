@@ -1,6 +1,6 @@
 use super::super::evaluator::Evaluator;
-use super::core::{MctsCore, SearchDriver};
-use super::{argmax, Node, SearchResult};
+use super::core::{LeafBatch, MctsCore, SearchDriver};
+use super::{Node, SearchResult};
 use engine_core::agent::PolicyMode;
 use engine_core::game::{Action, Game};
 
@@ -20,7 +20,7 @@ impl<E: Evaluator> MctsCore<E, Puct> {
     {
         if game.is_terminal() {
             return SearchResult {
-                policy: vec![0.0; G::ACTION_SIZE],
+                policy: Vec::new(),
                 selected_action: 0,
                 value: game.reward(),
             };
@@ -41,19 +41,22 @@ impl<E: Evaluator> MctsCore<E, Puct> {
         self.build_policy_from(&root_legal, &root_eval, mode == PolicyMode::Explore);
         self.expand(0);
 
-        let mut leaves = Vec::with_capacity(self.leaf_batch_size());
+        let mut batch = LeafBatch::with_capacity(self.leaf_batch_size());
         let mut simulations_done = 0usize;
         while simulations_done < self.cfg.simulations {
             simulations_done += self.collect_leaf_batch(
                 game,
                 self.cfg.simulations - simulations_done,
                 driver,
-                &mut leaves,
+                &mut batch.leaves,
             );
-            self.finish_leaf_batch(&mut leaves, driver);
+            self.finish_leaf_batch(&mut batch, driver);
         }
-        let policy = self.root_visit_policy::<G>();
-        let selected_action = argmax(&policy) as Action;
+        let policy = self.root_visit_policy();
+        let selected_action = policy
+            .iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map_or(0, |&(action, _)| action);
 
         SearchResult {
             policy,
@@ -67,19 +70,25 @@ impl<E: Evaluator> MctsCore<E, Puct> {
         }
     }
 
-    fn root_visit_policy<G: Game>(&self) -> Vec<f32> {
+    fn root_visit_policy(&self) -> Vec<(Action, f32)> {
         let root = &self.nodes[0];
-        let mut policy = vec![0.0f32; G::ACTION_SIZE];
+        let mut policy = Vec::with_capacity(usize::from(root.num_children));
 
         for c in root.first_child..root.first_child + root.num_children as u32 {
             let child = &self.nodes[c as usize];
-            policy[child.action_from_parent as usize] = child.visits as f32;
+            policy.push((child.action_from_parent, child.visits as f32));
         }
 
-        let sum: f32 = policy.iter().sum();
+        let sum: f32 = policy.iter().map(|&(_, probability)| probability).sum();
         if sum > 0.0 {
-            for x in &mut policy {
-                *x /= sum;
+            for (_, probability) in &mut policy {
+                *probability /= sum;
+            }
+        }
+        else if !policy.is_empty() {
+            let uniform = 1.0 / policy.len() as f32;
+            for (_, probability) in &mut policy {
+                *probability = uniform;
             }
         }
         policy

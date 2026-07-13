@@ -55,5 +55,8 @@ pub struct Evaluation {
 /// Position evaluator used by MCTS: policy logits over legal actions plus a
 /// value in [-1, 1] from the side to move's perspective.
 pub trait Evaluator: Send {
-    fn evaluate(&mut self, batch: &EvalBatch) -> Vec<Evaluation>;
+    /// Evaluates `batch` while allowing implementations to temporarily take
+    /// ownership of its backing allocations. Implementations must restore a
+    /// reusable batch before returning.
+    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation>;
 }

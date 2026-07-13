@@ -71,6 +71,7 @@ pub(super) struct MctsCore<E: Evaluator, V> {
     pub(super) nodes: Vec<Node>,
     pub(super) batch: EvalBatch,
     pub(super) policy_buf: Vec<(Action, f32, f32)>,
+    pub(super) repetition_path: Vec<u64>,
     pub(super) eval_cache: Option<Arc<EvalTable>>,
     pub(super) rng: SmallRng,
     pub(super) variant: V,
@@ -79,6 +80,24 @@ pub(super) struct MctsCore<E: Evaluator, V> {
 pub(super) struct PendingLeaf<G> {
     pub(super) node: u32,
     pub(super) game: G,
+}
+
+pub(super) struct LeafBatch<G> {
+    pub(super) leaves: Vec<PendingLeaf<G>>,
+    pub(super) pending: Vec<PendingBackup>,
+    pub(super) unique_games: Vec<G>,
+    pub(super) result_by_node: Vec<(u32, usize)>,
+}
+
+impl<G> LeafBatch<G> {
+    pub(super) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            leaves: Vec::with_capacity(capacity),
+            pending: Vec::with_capacity(capacity),
+            unique_games: Vec::with_capacity(capacity),
+            result_by_node: Vec::with_capacity(capacity),
+        }
+    }
 }
 
 pub(super) struct PendingBackup {
@@ -293,6 +312,7 @@ impl<E: Evaluator, V> MctsCore<E, V> {
             nodes: Vec::new(),
             batch: EvalBatch::new(),
             policy_buf: Vec::new(),
+            repetition_path: Vec::with_capacity(128),
             eval_cache: None,
             rng: SmallRng::from_os_rng(),
             variant,

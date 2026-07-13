@@ -112,7 +112,8 @@ fn analyze_chess_az_v2<const HISTORY: usize>(
     // deterministic PUCT for stable, comparable browser results.
     mcts_cfg.variant = MctsVariant::Puct;
     let mut mcts = Mcts::new(batcher.client(), mcts_cfg);
+    let root_hash = game.position().hash();
     analyze_game_mcts_with_repetitions(state, &mut mcts, network, |hash| {
-        game.repetitions_before(hash)
+        game.repetitions_before_root(hash, root_hash)
     })
 }

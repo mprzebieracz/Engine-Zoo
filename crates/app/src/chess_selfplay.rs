@@ -8,7 +8,7 @@ use algorithms::alphazero::{
     select_temperature_action, Batcher, BatcherClient, EvalTable, Mcts, MctsVariant, ReplayBuffer,
     SelfPlayConfig, SelfPlayStats, Transition,
 };
-use engine_core::game::{Action, Game};
+use engine_core::game::Game;
 use games::{ChessAzGame, ChessAzState, ChessGame};
 use rand::Rng;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -133,7 +133,7 @@ fn play_chess_game(
     should_stop: impl Fn() -> bool,
 ) -> Option<CompletedGame> {
     let mut game = ChessGame::default();
-    let mut trajectory = Vec::new();
+    let mut trajectory = Vec::with_capacity(cfg.max_moves.min(256));
     let mut rng = rand::rng();
     let resignation_disabled =
         rng.random_bool(cfg.resignation_disable_probability.clamp(0.0, 1.0) as f64);
@@ -176,8 +176,10 @@ fn play_chess_game(
         }
 
         let search_state = game.legacy_state();
-        let result = mcts
-            .search_with_repetitions(&search_state, |hash| game.repetitions_before_current(hash));
+        let root_hash = game.position().hash();
+        let result = mcts.search_with_repetitions(&search_state, |hash| {
+            game.repetitions_before_root(hash, root_hash)
+        });
         let action = if let Some(temperature) = cfg.chess_v2_temperature {
             select_temperature_action(&result, temperature.at_ply(trajectory.len()), &mut rng)
         }
@@ -189,23 +191,17 @@ fn play_chess_game(
         else {
             result.sample_action(&mut rng)
         };
-        let policy = result
-            .policy
-            .iter()
-            .enumerate()
-            .filter(|(_, probability)| **probability > 0.0)
-            .map(|(action, probability)| (action as Action, *probability))
-            .collect();
+        let search_value = result.value;
         trajectory.push(Transition {
             state,
-            policy,
+            policy: result.policy,
             reward: 0.0,
         });
 
         if cfg.resignation_enabled
             && !resignation_disabled
             && trajectory.len() >= cfg.resignation_min_ply
-            && result.value < cfg.resignation_threshold
+            && search_value < cfg.resignation_threshold
         {
             resignation_streak += 1;
         }
@@ -235,7 +231,7 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
     should_stop: impl Fn() -> bool,
 ) -> Option<CompletedGame> {
     let mut game = ChessAzGame::<HISTORY>::default();
-    let mut trajectory = Vec::new();
+    let mut trajectory = Vec::with_capacity(cfg.max_moves.min(256));
     let mut rng = rand::rng();
     let resignation_disabled =
         rng.random_bool(cfg.resignation_disable_probability.clamp(0.0, 1.0) as f64);
@@ -255,21 +251,33 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
         search_state.encode_state(&mut encoded);
 
         let full_search = rng.random_bool(cfg.full_simulation_probability as f64);
-        let profiles = cfg
-            .chess_v2_gumbel_profiles
-            .expect("chess AZ v2 requires paired Gumbel profiles");
-        let profile = if full_search {
-            stats.full_searches += 1;
-            profiles.full
+        if let Some(profiles) = cfg.chess_v2_gumbel_profiles {
+            let profile = if full_search {
+                stats.full_searches += 1;
+                profiles.full
+            }
+            else {
+                stats.fast_searches += 1;
+                profiles.fast
+            };
+            mcts.set_gumbel_profile(profile);
         }
         else {
-            stats.fast_searches += 1;
-            profiles.fast
-        };
-        mcts.set_gumbel_profile(profile);
+            let simulations = if full_search {
+                stats.full_searches += 1;
+                cfg.mcts.simulations
+            }
+            else {
+                stats.fast_searches += 1;
+                cfg.fast_simulations.max(1)
+            };
+            mcts.set_simulations(simulations);
+        }
 
-        let result =
-            mcts.search_with_repetitions(&search_state, |hash| game.repetitions_before(hash));
+        let root_hash = game.position().hash();
+        let result = mcts.search_with_repetitions(&search_state, |hash| {
+            game.repetitions_before_root(hash, root_hash)
+        });
         let action = select_temperature_action(
             &result,
             cfg.chess_v2_temperature
@@ -277,23 +285,17 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
                 .at_ply(trajectory.len()),
             &mut rng,
         );
-        let policy = result
-            .policy
-            .iter()
-            .enumerate()
-            .filter(|(_, probability)| **probability > 0.0)
-            .map(|(action, probability)| (action as Action, *probability))
-            .collect();
+        let search_value = result.value;
         trajectory.push(Transition {
             state: encoded,
-            policy,
+            policy: result.policy,
             reward: 0.0,
         });
 
         if cfg.resignation_enabled
             && !resignation_disabled
             && trajectory.len() >= cfg.resignation_min_ply
-            && result.value < cfg.resignation_threshold
+            && search_value < cfg.resignation_threshold
         {
             resignation_streak += 1;
         }
@@ -345,9 +347,10 @@ fn maybe_print_progress(
     let elapsed = started.elapsed().as_secs_f64().max(1e-6);
     let stats = stats.lock().unwrap();
     println!(
-        "self-play progress: {done}/{} games, {:.1} games/s, {:.1} moves/game",
+        "self-play progress: {done}/{} games, {:.1} games/s, {:.1} positions/s, {:.1} moves/game",
         cfg.num_games,
         done as f64 / elapsed,
+        stats.moves as f64 / elapsed,
         stats.avg_moves_per_game()
     );
 }
