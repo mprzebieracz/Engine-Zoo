@@ -146,9 +146,13 @@ pub(super) fn run<G: Game>(
     let mut iteration = 0usize;
     while args.forever || iteration < args.iterations {
         println!("=== iteration {iteration} ===");
+        let batcher_before = self_play_batcher.stats();
         let self_play_started = Instant::now();
         let self_play_stats = self_play_fn(&self_play_batcher, &replay, &sp_cfg);
         let self_play_secs = self_play_started.elapsed().as_secs_f64();
+        let batcher_stats = self_play_batcher.stats().since(batcher_before);
+        let games_per_sec = self_play_stats.games as f64 / self_play_secs.max(f64::EPSILON);
+        let positions_per_sec = self_play_stats.moves as f64 / self_play_secs.max(f64::EPSILON);
         let tt_queries = self_play_stats.tt_hits + self_play_stats.tt_misses;
         let tt_hit_rate = if tt_queries == 0 {
             0.0
@@ -169,6 +173,15 @@ pub(super) fn run<G: Game>(
             self_play_stats.resignations,
             100.0 * tt_hit_rate
         );
+        println!(
+            "batcher stats: requests={} states={} inference_batches={} avg_batch={:.1} max_batch_highwater={}",
+            batcher_stats.submitted_batches,
+            batcher_stats.submitted_states,
+            batcher_stats.inference_batches,
+            batcher_stats.submitted_states as f64
+                / batcher_stats.inference_batches.max(1) as f64,
+            batcher_stats.max_inference_batch,
+        );
 
         let train_started = Instant::now();
         let metrics = train(&net, &mut opt, &replay, device, &cfg.net, &train_cfg);
@@ -181,6 +194,8 @@ pub(super) fn run<G: Game>(
             "mcts_variant": match args.mcts_variant { SearchKind::Puct => "puct", SearchKind::Gumbel => "gumbel" },
             "buffer_size": replay.len(),
             "self_play_secs": self_play_secs,
+            "games_per_sec": games_per_sec,
+            "positions_per_sec": positions_per_sec,
             "train_secs": train_secs,
             "games": args.games,
             "self_play_games": self_play_stats.games,
@@ -207,11 +222,18 @@ pub(super) fn run<G: Game>(
             "resignation_consecutive_moves": sp_cfg.resignation_consecutive_moves,
             "resignation_disable_probability": sp_cfg.resignation_disable_probability,
             "self_play_precision": match self_play_precision { InferencePrecision::Fp32 => "fp32", InferencePrecision::Fp16 => "fp16" },
+            "submitted_batches": batcher_stats.submitted_batches,
+            "submitted_states": batcher_stats.submitted_states,
+            "inference_batches": batcher_stats.inference_batches,
+            "coalesced_extra_requests": batcher_stats.coalesced_extra_requests,
+            "avg_inference_batch": batcher_stats.submitted_states as f64 / batcher_stats.inference_batches.max(1) as f64,
+            "max_submitted_batch_highwater": batcher_stats.max_submitted_batch,
+            "max_inference_batch_highwater": batcher_stats.max_inference_batch,
         });
+        record["train_steps"] = metrics.as_ref().map_or(0, |m| m.train_steps).into();
         if let Some(m) = &metrics {
             record["policy_loss"] = m.policy_loss.into();
             record["value_loss"] = m.value_loss.into();
-            record["train_steps"] = m.train_steps.into();
         }
 
         match args.mode {

@@ -82,12 +82,12 @@ pub fn analyze_game_net<G: Game>(game: G, mut evaluator: impl Evaluator) -> Resu
     let legal: Vec<_> = game.legal_actions().collect();
     let mut state = vec![0.0f32; G::state_size()];
     game.encode_state(&mut state);
-    let batch = EvalBatch {
+    let mut batch = EvalBatch {
         states: state,
         legal: legal.clone(),
         offsets: vec![0, legal.len() as u32],
     };
-    let eval = evaluator.evaluate(&batch);
+    let eval = evaluator.evaluate(&mut batch);
     anyhow::ensure!(eval.len() == 1, "evaluator returned {} results", eval.len());
     let probs = softmax(&eval[0].logits);
     let policy: Vec<MoveScore> = legal
@@ -117,7 +117,7 @@ pub fn analyze_game_mcts<G: Game, E: Evaluator>(
         .map(|action| MoveScore {
             action,
             mv: game.format_action(action),
-            p: result.policy[action as usize],
+            p: result.probability(action),
         })
         .collect();
     let mut analysis = with_best(result.value, policy.clone());
@@ -153,7 +153,7 @@ where
         .map(|action| MoveScore {
             action,
             mv: game.format_action(action),
-            p: result.policy[action as usize],
+            p: result.probability(action),
         })
         .collect();
     let mut analysis = with_best(result.value, policy.clone());

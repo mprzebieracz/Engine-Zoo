@@ -173,8 +173,8 @@ fn process_splits_combined_results_back_to_each_task() {
     ]);
 
     assert_eq!(combined.len(), 3);
-    assert_close(&rx1.recv().unwrap(), &expected_first);
-    assert_close(&rx2.recv().unwrap(), &expected_second);
+    assert_close(&rx1.recv().unwrap().evaluations, &expected_first);
+    assert_close(&rx2.recv().unwrap().evaluations, &expected_second);
 }
 
 #[test]
@@ -186,14 +186,69 @@ fn client_evaluate_round_trips_through_worker_thread() {
     let direct_net = AlphaZeroNet::new(&direct_vs.root(), &cfg);
     direct_vs.load(&weights).unwrap();
 
-    let request = batch(&[0.0, 2.0], &[&[1, 4, 0], &[3]]);
+    let mut request = batch(&[0.0, 2.0], &[&[1, 4, 0], &[3]]);
     let expected = direct_eval(&direct_net, &cfg, &request);
 
     let batcher = Batcher::new(&cfg, &weights, Device::Cpu, 2, Duration::from_millis(50)).unwrap();
     let mut client = batcher.client();
-    let actual = client.evaluate(&request);
+    let actual = client.evaluate(&mut request);
 
     assert_close(&actual, &expected);
+    fs::remove_file(weights).unwrap();
+}
+
+#[test]
+fn client_returns_the_submitted_vector_allocations_for_reuse() {
+    let cfg = tiny_cfg();
+    let weights = save_weights(&cfg);
+    let batcher = Batcher::new(&cfg, &weights, Device::Cpu, 1, Duration::from_millis(1)).unwrap();
+    let mut client = batcher.client();
+    let mut request = batch(&[0.25, 0.5], &[&[0, 2], &[1, 3, 4]]);
+    request.states.reserve(32);
+    request.legal.reserve(32);
+    request.offsets.reserve(32);
+
+    let pointers = (
+        request.states.as_ptr(),
+        request.legal.as_ptr(),
+        request.offsets.as_ptr(),
+    );
+    let capacities = (
+        request.states.capacity(),
+        request.legal.capacity(),
+        request.offsets.capacity(),
+    );
+
+    let evaluations = client.evaluate(&mut request);
+
+    assert_eq!(evaluations.len(), 2);
+    assert_eq!(request.states.as_ptr(), pointers.0);
+    assert_eq!(request.legal.as_ptr(), pointers.1);
+    assert_eq!(request.offsets.as_ptr(), pointers.2);
+    assert_eq!(request.states.capacity(), capacities.0);
+    assert_eq!(request.legal.capacity(), capacities.1);
+    assert_eq!(request.offsets.capacity(), capacities.2);
+    fs::remove_file(weights).unwrap();
+}
+
+#[test]
+fn batcher_stats_record_submission_and_coalescing_sizes() {
+    let cfg = tiny_cfg();
+    let weights = save_weights(&cfg);
+    let batcher = Batcher::new(&cfg, &weights, Device::Cpu, 1, Duration::from_millis(1)).unwrap();
+    let before = batcher.stats();
+    let mut client = batcher.client();
+    let mut request = batch(&[0.25, 0.5], &[&[0], &[1]]);
+
+    let _ = client.evaluate(&mut request);
+    let stats = batcher.stats().since(before);
+
+    assert_eq!(stats.submitted_batches, 1);
+    assert_eq!(stats.submitted_states, 2);
+    assert_eq!(stats.inference_batches, 1);
+    assert_eq!(stats.coalesced_extra_requests, 0);
+    assert!(stats.max_submitted_batch >= 2);
+    assert!(stats.max_inference_batch >= 2);
     fs::remove_file(weights).unwrap();
 }
 
@@ -203,7 +258,7 @@ fn batcher_reloads_weights_without_restarting_client() {
     let first_weights = save_seeded_weights(&cfg, 101);
     let second_weights = save_seeded_weights(&cfg, 202);
 
-    let request = batch(&[0.75, -1.25], &[&[0, 2, 4], &[1, 3]]);
+    let mut request = batch(&[0.75, -1.25], &[&[0, 2, 4], &[1, 3]]);
 
     let mut first_vs = nn::VarStore::new(Device::Cpu);
     let first_net = AlphaZeroNet::new(&first_vs.root(), &cfg);
@@ -224,10 +279,10 @@ fn batcher_reloads_weights_without_restarting_client() {
     )
     .unwrap();
     let mut client = batcher.client();
-    assert_close(&client.evaluate(&request), &expected_first);
+    assert_close(&client.evaluate(&mut request), &expected_first);
 
     batcher.reload_weights(&second_weights).unwrap();
-    assert_close(&client.evaluate(&request), &expected_second);
+    assert_close(&client.evaluate(&mut request), &expected_second);
 
     fs::remove_file(first_weights).unwrap();
     fs::remove_file(second_weights).unwrap();
@@ -253,6 +308,49 @@ fn fp16_inference_is_rejected_on_cpu() {
     assert!(err
         .to_string()
         .contains("FP16 inference is only supported on CUDA"));
+    fs::remove_file(weights).unwrap();
+}
+
+#[test]
+fn fp16_cuda_legal_gather_matches_fp32() {
+    if !tch::Cuda::is_available() {
+        return;
+    }
+    let cfg = tiny_cfg();
+    let weights = save_seeded_weights(&cfg, 303);
+    let device = Device::Cuda(0);
+    let fp32 = Batcher::new_with_precision(
+        &cfg,
+        &weights,
+        device,
+        2,
+        Duration::from_millis(1),
+        InferencePrecision::Fp32,
+    )
+    .unwrap();
+    let fp16 = Batcher::new_with_precision(
+        &cfg,
+        &weights,
+        device,
+        2,
+        Duration::from_millis(1),
+        InferencePrecision::Fp16,
+    )
+    .unwrap();
+    let mut fp32_client = fp32.client();
+    let mut fp16_client = fp16.client();
+    let mut request32 = batch(&[0.125, -0.75], &[&[4, 0, 2], &[1, 3]]);
+    let mut request16 = batch(&[0.125, -0.75], &[&[4, 0, 2], &[1, 3]]);
+
+    let actual32 = fp32_client.evaluate(&mut request32);
+    let actual16 = fp16_client.evaluate(&mut request16);
+    assert_eq!(actual32.len(), actual16.len());
+    for (fp32, fp16) in actual32.iter().zip(&actual16) {
+        for (&a, &b) in fp32.logits.iter().zip(&fp16.logits) {
+            assert!((a - b).abs() < 5e-3, "FP32 logit {a} != FP16 logit {b}");
+        }
+        assert!((fp32.value - fp16.value).abs() < 5e-3);
+    }
     fs::remove_file(weights).unwrap();
 }
 

@@ -292,10 +292,11 @@ pub(super) fn v2_best_action<const HISTORY: usize>(
             ..Default::default()
         },
     );
+    let root_hash = game.position().hash();
     Ok(mcts
         .search_with_repetitions_mode(
             &game.search_state(),
-            |hash| game.repetitions_before(hash),
+            |hash| game.repetitions_before_root(hash, root_hash),
             PolicyMode::Deterministic,
         )
         .best_action())

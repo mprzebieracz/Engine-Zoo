@@ -220,10 +220,11 @@ fn evaluate_v2_puzzles<const HISTORY: usize>(
     let mut mcts = Mcts::new(evaluator, mcts_config);
     evaluate_moves(puzzles, |puzzle| {
         let game = ChessAzGame::<HISTORY>::from_fen(&puzzle.fen)?;
+        let root_hash = game.position().hash();
         let action = mcts
             .search_with_repetitions_mode(
                 &game.search_state(),
-                |hash| game.repetitions_before(hash),
+                |hash| game.repetitions_before_root(hash, root_hash),
                 PolicyMode::Deterministic,
             )
             .best_action();
@@ -278,6 +279,18 @@ mod tests {
         let mut p = puzzle("bad", None, None);
         p.accepted_moves = vec!["a1a1".into()];
         assert!(evaluate_moves(&[p], |_| Ok("a1b1".into())).is_err());
+    }
+
+    #[test]
+    fn checked_in_tactical_suite_has_legal_canonical_moves() {
+        let puzzles = read_puzzles(Cursor::new(include_str!(
+            "../suites/chess/puzzles-tactics-v1.jsonl"
+        )))
+        .unwrap();
+        assert!(puzzles.len() >= 16);
+        assert!(
+            evaluate_moves(&puzzles, |puzzle| { Ok(puzzle.accepted_moves[0].clone()) }).is_ok()
+        );
     }
 
     #[test]

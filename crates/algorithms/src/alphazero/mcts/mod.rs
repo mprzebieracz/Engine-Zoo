@@ -129,7 +129,8 @@ impl MctsConfig {
 /// Gumbel AlphaZero, it is the search-improved policy
 /// `softmax(root_logits + transformed_completed_q)` used as the policy target.
 pub struct SearchResult {
-    pub policy: Vec<f32>,
+    /// Normalized probability mass for legal root actions only.
+    pub policy: Vec<(Action, f32)>,
     pub selected_action: Action,
     pub value: f32,
 }
@@ -142,17 +143,28 @@ impl SearchResult {
 
     /// Samples from the returned policy distribution.
     pub fn sample_action<R: Rng + ?Sized>(&self, rng: &mut R) -> Action {
-        WeightedIndex::new(&self.policy)
+        let index = WeightedIndex::new(self.policy.iter().map(|&(_, probability)| probability))
             .expect("search of a non-terminal position returns a non-empty policy")
-            .sample(rng) as Action
+            .sample(rng);
+        self.policy[index].0
     }
-}
 
-pub(crate) fn argmax(xs: &[f32]) -> usize {
-    xs.iter()
-        .enumerate()
-        .max_by(|a, b| a.1.total_cmp(b.1))
-        .map_or(0, |(i, _)| i)
+    /// Probability assigned to `action`, or zero when the action is illegal.
+    pub fn probability(&self, action: Action) -> f32 {
+        self.policy
+            .iter()
+            .find_map(|&(candidate, probability)| (candidate == action).then_some(probability))
+            .unwrap_or(0.0)
+    }
+
+    /// Expands the sparse legal-action policy for compatibility consumers.
+    pub fn dense_policy(&self, action_size: usize) -> Vec<f32> {
+        let mut dense = vec![0.0; action_size];
+        for &(action, probability) in &self.policy {
+            dense[action as usize] = probability;
+        }
+        dense
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -189,6 +201,8 @@ impl RootQTransform {
 struct Node {
     parent: Option<u32>,
     hash: u64,
+    repetitions_before_current: u8,
+    repetition_cached: bool,
     first_child: u32,
     action_from_parent: Action,
     visits: u32,
@@ -215,6 +229,8 @@ impl Node {
         Node {
             parent,
             hash,
+            repetitions_before_current: 0,
+            repetition_cached: false,
             first_child: 0,
             action_from_parent,
             visits: 0,

@@ -42,9 +42,49 @@ pub struct BatcherClient {
     shared: Arc<Shared>,
 }
 
+/// Cumulative dynamic-batching counters. Taking two snapshots around a
+/// self-play round gives the exact request and coalescing totals for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BatcherStats {
+    pub submitted_batches: u64,
+    pub submitted_states: u64,
+    pub inference_batches: u64,
+    /// Requests beyond the first that shared an inference pass.
+    pub coalesced_extra_requests: u64,
+    pub max_submitted_batch: u64,
+    pub max_inference_batch: u64,
+}
+
+impl BatcherStats {
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            submitted_batches: self
+                .submitted_batches
+                .saturating_sub(earlier.submitted_batches),
+            submitted_states: self
+                .submitted_states
+                .saturating_sub(earlier.submitted_states),
+            inference_batches: self
+                .inference_batches
+                .saturating_sub(earlier.inference_batches),
+            coalesced_extra_requests: self
+                .coalesced_extra_requests
+                .saturating_sub(earlier.coalesced_extra_requests),
+            // Maxima are cumulative high-water marks and cannot be differenced.
+            max_submitted_batch: self.max_submitted_batch,
+            max_inference_batch: self.max_inference_batch,
+        }
+    }
+}
+
 struct Task {
     batch: EvalBatch,
-    tx: SyncSender<Vec<Evaluation>>,
+    tx: SyncSender<EvalResponse>,
+}
+
+struct EvalResponse {
+    batch: EvalBatch,
+    evaluations: Vec<Evaluation>,
 }
 
 struct Reload {
@@ -58,6 +98,7 @@ struct Pending {
     /// Total states across `tasks`.
     count: usize,
     stop: bool,
+    stats: BatcherStats,
 }
 
 impl Pending {
@@ -67,6 +108,7 @@ impl Pending {
             reloads: VecDeque::new(),
             count: 0,
             stop: false,
+            stats: BatcherStats::default(),
         }
     }
 }
@@ -188,6 +230,10 @@ impl Batcher {
         }
     }
 
+    pub fn stats(&self) -> BatcherStats {
+        self.shared.pending.lock().unwrap().stats
+    }
+
     /// Reloads network weights inside the existing worker, preserving the
     /// worker thread and grow-only staging buffers between self-play rounds.
     pub fn reload_weights(&self, weights: &Path) -> Result<()> {
@@ -220,28 +266,31 @@ impl Drop for Batcher {
 }
 
 impl Evaluator for BatcherClient {
-    fn evaluate(&mut self, batch: &EvalBatch) -> Vec<Evaluation> {
+    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation> {
         let n = batch.len();
         if n == 0 {
             return Vec::new();
         }
-        // The submitted data must outlive this call on another thread, so it
-        // is copied out of the caller's reusable buffers.
-        let owned = EvalBatch {
-            states: batch.states.clone(),
-            legal: batch.legal.clone(),
-            offsets: batch.offsets.clone(),
-        };
+        // Transfer the caller's reusable allocations across the worker
+        // boundary. The response returns the same vectors for the next search
+        // request, avoiding three allocations and full-vector copies here.
+        let owned = std::mem::take(batch);
 
         let (tx, rx) = sync_channel(1);
         {
             let mut pending = self.shared.pending.lock().unwrap();
             assert!(!pending.stop, "batcher already shut down");
+            pending.stats.submitted_batches += 1;
+            pending.stats.submitted_states += n as u64;
+            pending.stats.max_submitted_batch = pending.stats.max_submitted_batch.max(n as u64);
             pending.tasks.push(Task { batch: owned, tx });
             pending.count += n;
         }
         self.shared.cv.notify_all();
-        rx.recv()
-            .expect("batcher worker died (it panics only on inference errors)")
+        let response = rx
+            .recv()
+            .expect("batcher worker died (it panics only on inference errors)");
+        *batch = response.batch;
+        response.evaluations
     }
 }

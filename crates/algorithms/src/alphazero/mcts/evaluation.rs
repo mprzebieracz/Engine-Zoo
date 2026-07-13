@@ -32,16 +32,17 @@ impl<E: Evaluator, V> MctsCore<E, V> {
             return Vec::new();
         }
         self.batch.clear();
+        let expected = games.len();
         let mut legal_per_state = Vec::with_capacity(games.len());
         for game in games {
             let begin = self.batch.legal.len();
             self.enqueue_state(game);
             legal_per_state.push(self.batch.legal[begin..].to_vec());
         }
-        let results = self.evaluator.evaluate(&self.batch);
+        let results = self.evaluator.evaluate(&mut self.batch);
         debug_assert_eq!(
             results.len(),
-            self.batch.len(),
+            expected,
             "evaluator must return one result per input state"
         );
         legal_per_state.into_iter().zip(results).collect()
@@ -79,36 +80,46 @@ impl<E: Evaluator, V> MctsCore<E, V> {
             return Vec::new();
         }
 
-        let cache = self.eval_cache.clone();
+        let Some(cache) = self.eval_cache.clone()
+        else {
+            return self.evaluate_positions(games);
+        };
         let mut out = vec![None; games.len()];
-        let mut miss_indexes = Vec::new();
+        let mut miss_destinations = Vec::new();
+        let mut miss_keys = Vec::new();
         let mut miss_games = Vec::new();
 
         for (i, game) in games.iter().enumerate() {
             let key = game.evaluation_cache_key();
-            if let Some(cache) = &cache {
-                if let Some(cached) = cache.get(key) {
-                    out[i] = Some((cached.legal, cached.eval));
-                    continue;
-                }
+            // Distinct tree nodes can transpose to the same encoded state in
+            // one leaf batch. The shared table cannot contain the first miss
+            // until inference completes, so deduplicate those misses locally.
+            if let Some(unique) = miss_keys.iter().position(|&candidate| candidate == key) {
+                miss_destinations.push((i, unique));
+                continue;
             }
-            miss_indexes.push(i);
+            if let Some(cached) = cache.get(key) {
+                out[i] = Some((cached.legal, cached.eval));
+                continue;
+            }
+            let unique = miss_games.len();
+            miss_destinations.push((i, unique));
+            miss_keys.push(key);
             miss_games.push(*game);
         }
 
         let miss_results = self.evaluate_positions(&miss_games);
-        for ((i, game), (legal, eval)) in miss_indexes.into_iter().zip(miss_games).zip(miss_results)
-        {
-            if let Some(cache) = &cache {
-                cache.insert(
-                    game.evaluation_cache_key(),
-                    CachedEvaluation {
-                        legal: legal.clone(),
-                        eval: eval.clone(),
-                    },
-                );
-            }
-            out[i] = Some((legal, eval));
+        for (&key, (legal, eval)) in miss_keys.iter().zip(&miss_results) {
+            cache.insert(
+                key,
+                CachedEvaluation {
+                    legal: legal.clone(),
+                    eval: eval.clone(),
+                },
+            );
+        }
+        for (i, unique) in miss_destinations {
+            out[i] = Some(miss_results[unique].clone());
         }
 
         out.into_iter()

@@ -1,8 +1,8 @@
 use super::super::evaluator::Evaluator;
-use super::core::{MctsCore, SearchDriver};
+use super::core::{LeafBatch, MctsCore, SearchDriver};
 use super::{Node, RootAction, RootQTransform, SearchResult};
 use engine_core::agent::PolicyMode;
-use engine_core::game::Game;
+use engine_core::game::{Action, Game};
 use rand::prelude::*;
 
 #[derive(Debug)]
@@ -40,7 +40,7 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
     {
         if game.is_terminal() {
             return SearchResult {
-                policy: vec![0.0; G::ACTION_SIZE],
+                policy: Vec::new(),
                 selected_action: 0,
                 value: game.reward(),
             };
@@ -69,7 +69,7 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
         };
         let winner = self.run_gumbel(game, root_value, gumbel_scale, driver);
         let selected_action = self.nodes[winner as usize].action_from_parent;
-        let policy = self.root_gumbel_policy::<G>(root_value);
+        let policy = self.root_gumbel_policy(root_value);
 
         SearchResult {
             policy,
@@ -83,10 +83,10 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
         }
     }
 
-    fn root_gumbel_policy<G: Game>(&self, root_value: f32) -> Vec<f32> {
+    fn root_gumbel_policy(&self, root_value: f32) -> Vec<(Action, f32)> {
         let root = &self.nodes[0];
         let transform = self.root_q_transform(root_value);
-        let mut policy = vec![0.0f32; G::ACTION_SIZE];
+        let mut policy = Vec::with_capacity(usize::from(root.num_children));
         let mut max_search_logit = f32::NEG_INFINITY;
 
         for c in root.first_child..root.first_child + u32::from(root.num_children) {
@@ -100,20 +100,19 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
             let child = &self.nodes[c as usize];
             let q = self.completed_root_child_q(c, transform);
             let p = (child.logit + transform.apply(q) - max_search_logit).exp();
-            policy[child.action_from_parent as usize] = p;
+            policy.push((child.action_from_parent, p));
             sum += p;
         }
 
         if sum.is_finite() && sum > 0.0 {
-            for p in &mut policy {
-                *p /= sum;
+            for (_, probability) in &mut policy {
+                *probability /= sum;
             }
         }
         else {
             let uniform = 1.0 / root.num_children as f32;
-            for c in root.first_child..root.first_child + u32::from(root.num_children) {
-                let action = self.nodes[c as usize].action_from_parent as usize;
-                policy[action] = uniform;
+            for (_, probability) in &mut policy {
+                *probability = uniform;
             }
         }
         policy
@@ -128,19 +127,21 @@ impl<E: Evaluator> MctsCore<E, Gumbel> {
         debug_assert!(!self.variant.root_actions.is_empty());
 
         let schedule = gumbel_visit_schedule(self.variant.root_actions.len(), self.cfg.simulations);
-        let mut leaves = Vec::with_capacity(self.leaf_batch_size());
+        let mut batch = LeafBatch::with_capacity(self.leaf_batch_size());
         for considered_visit in schedule {
             let transform = self.root_q_transform(root_value);
             let child = self
                 .best_gumbel_action_with_visits(considered_visit, transform)
                 .expect("Gumbel visit schedule must always have a considered action");
-            leaves.push(self.collect_leaf(game, Some(child), driver));
-            if leaves.len() >= self.leaf_batch_size() {
-                self.finish_leaf_batch(&mut leaves, driver);
+            batch
+                .leaves
+                .push(self.collect_leaf(game, Some(child), driver));
+            if batch.leaves.len() >= self.leaf_batch_size() {
+                self.finish_leaf_batch(&mut batch, driver);
             }
         }
-        if !leaves.is_empty() {
-            self.finish_leaf_batch(&mut leaves, driver);
+        if !batch.leaves.is_empty() {
+            self.finish_leaf_batch(&mut batch, driver);
         }
 
         self.select_gumbel_winner(root_value)

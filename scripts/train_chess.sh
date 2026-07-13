@@ -17,18 +17,24 @@ TRAIN_PROGRESS_EVERY="${TRAIN_PROGRESS_EVERY:-10}"
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-4096}"
 BUFFER="${BUFFER:-500000}"
 
-# Chess-v2 Gumbel self-play defaults: 50% full search, 50% fast search.
-V2_FULL_SIMULATIONS="${V2_FULL_SIMULATIONS:-128}"
-V2_FULL_ROOT_CANDIDATES="${V2_FULL_ROOT_CANDIDATES:-16}"
-V2_FAST_SIMULATIONS="${V2_FAST_SIMULATIONS:-64}"
-V2_FAST_ROOT_CANDIDATES="${V2_FAST_ROOT_CANDIDATES:-8}"
+# Chess-v2 search budgets: Gumbel uses paired root-candidate profiles; PUCT
+# uses the full/fast simulation counts directly.
+V2_FULL_SIMULATIONS="${V2_FULL_SIMULATIONS:-400}"
+V2_FULL_ROOT_CANDIDATES="${V2_FULL_ROOT_CANDIDATES:-32}"
+V2_FAST_SIMULATIONS="${V2_FAST_SIMULATIONS:-100}"
+V2_FAST_ROOT_CANDIDATES="${V2_FAST_ROOT_CANDIDATES:-16}"
 V2_FULL_SIMULATION_PROBABILITY="${V2_FULL_SIMULATION_PROBABILITY:-0.5}"
+MCTS_VARIANT="${MCTS_VARIANT:-gumbel}"
+case "$MCTS_VARIANT" in
+  puct|gumbel) ;;
+  *) echo "MCTS_VARIANT must be 'puct' or 'gumbel' (got: $MCTS_VARIANT)" >&2; exit 1 ;;
+esac
 
 # Search and self-play throughput knobs. These defaults were selected from a
-# CUDA smoke sweep on the v2 network (RTX 4080 SUPER): leaf=16, threads=16,
-# wait-for=128. Override them for different GPUs or workloads.
-MCTS_LEAF_BATCH_SIZE="${MCTS_LEAF_BATCH_SIZE:-16}"
-THREADS="${THREADS:-16}"
+# CUDA sweep on the v2 network (RTX 4080 SUPER): leaf=32, threads=16,
+# wait-for=256. Override them for different GPUs or workloads.
+MCTS_LEAF_BATCH_SIZE="${MCTS_LEAF_BATCH_SIZE:-24}"
+THREADS="${THREADS:-24}"
 WAIT_FOR="${WAIT_FOR:-128}"
 BATCH_TIMEOUT_MS="${BATCH_TIMEOUT_MS:-5}"
 TT_ENTRIES="${TT_ENTRIES:-1000000}"
@@ -65,7 +71,7 @@ mkdir -p "$RUN_DIR"
 
 echo "run dir: $RUN_DIR"
 echo "architecture: $ARCHITECTURE (history=$HISTORY)"
-echo "mcts: gumbel (v2 paired budgets)"
+echo "mcts: $MCTS_VARIANT"
 echo "stdout log: $STDOUT_LOG"
 echo "stderr log: $STDERR_LOG"
 
@@ -136,6 +142,7 @@ target/release/train \
   --v2-fast-simulations "$V2_FAST_SIMULATIONS" \
   --v2-fast-root-candidates "$V2_FAST_ROOT_CANDIDATES" \
   --v2-full-simulation-probability "$V2_FULL_SIMULATION_PROBABILITY" \
+  --mcts-variant "$MCTS_VARIANT" \
   --max-moves "$MAX_MOVES" \
   --tt-entries "$TT_ENTRIES" \
   --train-steps "$TRAIN_STEPS" \

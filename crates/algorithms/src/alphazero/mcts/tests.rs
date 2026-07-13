@@ -341,7 +341,7 @@ impl Game for TerminalGame {
 struct UniformEvaluator;
 
 impl Evaluator for UniformEvaluator {
-    fn evaluate(&mut self, batch: &EvalBatch) -> Vec<Evaluation> {
+    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation> {
         (0..batch.len())
             .map(|i| {
                 let n = (batch.offsets[i + 1] - batch.offsets[i]) as usize;
@@ -359,7 +359,7 @@ struct CountingEvaluator {
 }
 
 impl Evaluator for CountingEvaluator {
-    fn evaluate(&mut self, batch: &EvalBatch) -> Vec<Evaluation> {
+    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         UniformEvaluator.evaluate(batch)
     }
@@ -375,7 +375,7 @@ struct FeatureRecordingEvaluator {
 }
 
 impl Evaluator for FeatureRecordingEvaluator {
-    fn evaluate(&mut self, batch: &EvalBatch) -> Vec<Evaluation> {
+    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation> {
         self.encoded.lock().unwrap().extend(
             batch
                 .states
@@ -403,7 +403,7 @@ impl RecordingEvaluator {
 }
 
 impl Evaluator for RecordingEvaluator {
-    fn evaluate(&mut self, batch: &EvalBatch) -> Vec<Evaluation> {
+    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation> {
         self.calls.lock().unwrap().push(batch.len());
         (0..batch.len())
             .map(|i| {
@@ -428,7 +428,7 @@ impl Evaluator for RecordingEvaluator {
 struct EmptyResultEvaluator;
 
 impl Evaluator for EmptyResultEvaluator {
-    fn evaluate(&mut self, _batch: &EvalBatch) -> Vec<Evaluation> {
+    fn evaluate(&mut self, _batch: &mut EvalBatch) -> Vec<Evaluation> {
         Vec::new()
     }
 }
@@ -436,7 +436,7 @@ impl Evaluator for EmptyResultEvaluator {
 struct BadLogitEvaluator;
 
 impl Evaluator for BadLogitEvaluator {
-    fn evaluate(&mut self, batch: &EvalBatch) -> Vec<Evaluation> {
+    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation> {
         (0..batch.len())
             .map(|_| Evaluation {
                 logits: Vec::new(),

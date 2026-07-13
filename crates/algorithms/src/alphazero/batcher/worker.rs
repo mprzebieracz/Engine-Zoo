@@ -84,6 +84,12 @@ impl Worker {
                         pending = guard;
                     }
 
+                    let states = pending.count as u64;
+                    pending.stats.inference_batches += 1;
+                    pending.stats.coalesced_extra_requests +=
+                        pending.tasks.len().saturating_sub(1) as u64;
+                    pending.stats.max_inference_batch =
+                        pending.stats.max_inference_batch.max(states);
                     pending.count = 0;
                     Work::Tasks(std::mem::take(&mut pending.tasks))
                 }
@@ -147,7 +153,10 @@ impl Worker {
         for task in tasks {
             let chunk: Vec<Evaluation> = iter.by_ref().take(task.batch.len()).collect();
             // A dropped receiver just means the client gave up; not fatal.
-            let _ = task.tx.send(chunk);
+            let _ = task.tx.send(EvalResponse {
+                batch: task.batch,
+                evaluations: chunk,
+            });
         }
     }
 
@@ -197,7 +206,6 @@ impl Worker {
             NetworkOutput::Legacy { policy, value } => (policy, value),
             NetworkOutput::ChessAzV2 { policy, wdl } => (policy.flatten(1, -1), wdl_scalar(&wdl)),
         };
-        let policy = policy.to_kind(Kind::Float);
         let value = value.to_kind(Kind::Float);
 
         let max_actions = tasks
@@ -261,7 +269,10 @@ impl Worker {
                     true,
                     false,
                 );
-                let gathered_gpu = policy.gather(1, &index_gpu, false);
+                // Gather before widening FP16 output. Almost every policy
+                // logit is discarded, so casting the full chess policy is
+                // avoidable work and memory traffic.
+                let gathered_gpu = policy.gather(1, &index_gpu, false).to_kind(Kind::Float);
                 // Synchronous D2H into pinned memory: fast DMA, data valid on return.
                 gathered_host
                     .narrow(0, 0, n)
@@ -296,6 +307,7 @@ impl Worker {
             }
         }
         else {
+            let policy = policy.to_kind(Kind::Float);
             let policy_flat: Vec<f32> = policy.contiguous().view(-1).try_into().unwrap();
             let values: Vec<f32> = value.contiguous().view(-1).try_into().unwrap();
             let action_size = policy.size()[1] as usize;

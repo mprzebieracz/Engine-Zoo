@@ -1,5 +1,5 @@
 use super::super::evaluator::Evaluator;
-use super::core::{MctsCore, PendingBackup, PendingLeaf, PendingResult, SearchDriver};
+use super::core::{LeafBatch, MctsCore, PendingBackup, PendingLeaf, PendingResult, SearchDriver};
 use engine_core::game::Game;
 use engine_core::rules::RepetitionGame;
 
@@ -52,13 +52,13 @@ impl<E: Evaluator, V> MctsCore<E, V> {
         // The callback reports occurrences before the root, so retain the
         // root itself here. Otherwise a simulated return to the root omits
         // one occurrence and fails to recognize a threefold repetition.
-        let mut history_stack = Vec::with_capacity(64);
-        history_stack.push(current.repetition_hash());
+        self.repetition_path.clear();
+        self.repetition_path.push(current.repetition_hash());
 
         if node != 0 {
             current.step(self.nodes[node as usize].action_from_parent);
-            history_stack.push(current.repetition_hash());
-            self.cache_repetition_state(node, &mut current, root_repetitions, &history_stack);
+            self.repetition_path.push(current.repetition_hash());
+            self.cache_repetition_state(node, &mut current, root_repetitions);
         }
 
         loop {
@@ -75,34 +75,38 @@ impl<E: Evaluator, V> MctsCore<E, V> {
             };
             node = best;
             current.step(self.nodes[best as usize].action_from_parent);
-            history_stack.push(current.repetition_hash());
-            self.cache_repetition_state(best, &mut current, root_repetitions, &history_stack);
+            self.repetition_path.push(current.repetition_hash());
+            self.cache_repetition_state(best, &mut current, root_repetitions);
         }
 
         (node, current)
     }
 
-    fn cache_repetition_state<G, F>(
-        &mut self,
-        node: u32,
-        game: &mut G,
-        root_repetitions: F,
-        history_stack: &[u64],
-    ) where
+    fn cache_repetition_state<G, F>(&mut self, node: u32, game: &mut G, root_repetitions: F)
+    where
         G: RepetitionGame,
         F: Fn(u64) -> u8 + Copy,
     {
-        if self.nodes[node as usize].visits != 0 {
-            return;
+        let repetitions_before = if self.nodes[node as usize].repetition_cached {
+            self.nodes[node as usize].repetitions_before_current
         }
-        let hash = game.repetition_hash();
-        self.nodes[node as usize].hash = hash;
-        let repetitions_before = self.repetitions_before_current(
-            hash,
-            game.halfmove_clock(),
-            root_repetitions,
-            history_stack,
-        );
+        else {
+            let hash = game.repetition_hash();
+            let repetitions_before = self.repetitions_before_current(
+                hash,
+                game.halfmove_clock(),
+                root_repetitions,
+                &self.repetition_path,
+            );
+            let cached = &mut self.nodes[node as usize];
+            cached.hash = hash;
+            cached.repetitions_before_current = repetitions_before;
+            cached.repetition_cached = true;
+            repetitions_before
+        };
+        // History-aware search states cannot reconstruct occurrences older
+        // than their retained frames. Restore the authoritative tree count
+        // on every traversal, including revisits of an expanded node.
         game.set_repetitions_before_current(repetitions_before);
         if !game.is_terminal() && repetitions_before >= 2 {
             game.set_repetition_draw();
@@ -174,50 +178,50 @@ impl<E: Evaluator, V> MctsCore<E, V> {
         }
     }
 
-    pub(super) fn finish_leaf_batch<G, D>(&mut self, leaves: &mut Vec<PendingLeaf<G>>, driver: D)
+    pub(super) fn finish_leaf_batch<G, D>(&mut self, batch: &mut LeafBatch<G>, driver: D)
     where
         G: Game,
         D: SearchDriver<G>,
     {
-        if leaves.is_empty() {
+        if batch.leaves.is_empty() {
             return;
         }
 
-        let mut pending = Vec::<PendingBackup>::with_capacity(leaves.len());
-        let mut unique_games = Vec::<G>::with_capacity(leaves.len());
-        let mut result_by_node = Vec::<(u32, usize)>::with_capacity(leaves.len());
+        batch.pending.clear();
+        batch.unique_games.clear();
+        batch.result_by_node.clear();
 
-        for leaf in leaves.drain(..) {
+        for leaf in batch.leaves.drain(..) {
             if self.nodes[leaf.node as usize].terminal {
-                pending.push(PendingBackup {
+                batch.pending.push(PendingBackup {
                     node: leaf.node,
                     result: PendingResult::Terminal,
                 });
                 continue;
             }
-            let idx = match find_leaf_result(&result_by_node, leaf.node) {
+            let idx = match find_leaf_result(&batch.result_by_node, leaf.node) {
                 Some(idx) => idx,
                 None => {
-                    let idx = unique_games.len();
-                    result_by_node.push((leaf.node, idx));
-                    unique_games.push(leaf.game);
+                    let idx = batch.unique_games.len();
+                    batch.result_by_node.push((leaf.node, idx));
+                    batch.unique_games.push(leaf.game);
                     idx
                 }
             };
-            pending.push(PendingBackup {
+            batch.pending.push(PendingBackup {
                 node: leaf.node,
                 result: PendingResult::Evaluation(idx),
             });
         }
 
-        let evaluations = driver.evaluate_many(self, &unique_games);
+        let evaluations = driver.evaluate_many(self, &batch.unique_games);
         debug_assert_eq!(
             evaluations.len(),
-            unique_games.len(),
+            batch.unique_games.len(),
             "driver must return one result per unique non-terminal leaf"
         );
 
-        for backup in pending {
+        for backup in batch.pending.drain(..) {
             match backup.result {
                 PendingResult::Terminal => {
                     let reward = self.nodes[backup.node as usize].reward;

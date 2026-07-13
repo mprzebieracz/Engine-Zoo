@@ -7,6 +7,7 @@ mod game;
 mod legacy;
 pub mod notation;
 mod position;
+mod zobrist;
 
 pub use action::{
     decode_az_move, decode_move, encode_az_move, encode_move, AzActionError, AZ_ACTION_SIZE,

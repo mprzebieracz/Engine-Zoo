@@ -243,6 +243,7 @@ fn v2_action<const HISTORY: usize>(
     simulations: usize,
     sampled: bool,
 ) -> Result<engine_core::game::Action> {
+    let root_hash = game.position().hash();
     let result = Mcts::new(
         evaluator,
         MctsConfig {
@@ -254,7 +255,7 @@ fn v2_action<const HISTORY: usize>(
     )
     .search_with_repetitions_mode(
         &game.search_state(),
-        |hash| game.repetitions_before(hash),
+        |hash| game.repetitions_before_root(hash, root_hash),
         if sampled {
             PolicyMode::Explore
         }

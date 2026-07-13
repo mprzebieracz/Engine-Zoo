@@ -15,7 +15,7 @@ fn terminal_root_returns_reward_without_evaluator() {
     let result = mcts.search(&TerminalGame);
 
     assert_eq!(result.value, -1.0);
-    assert_eq!(result.policy, vec![0.0, 0.0]);
+    assert!(result.policy.is_empty());
     assert!(calls.lock().unwrap().is_empty());
 }
 
@@ -34,8 +34,16 @@ fn puct_finds_forced_terminal_win() {
     let result = mcts.search(&ImmediateOutcomeGame::default());
 
     assert_eq!(result.best_action(), 0);
-    assert!(result.policy[0] > result.policy[1], "{:?}", result.policy);
-    assert!(result.policy[0] > result.policy[2], "{:?}", result.policy);
+    assert!(
+        result.probability(0) > result.probability(1),
+        "{:?}",
+        result.policy
+    );
+    assert!(
+        result.probability(0) > result.probability(2),
+        "{:?}",
+        result.policy
+    );
 }
 
 #[test]
@@ -52,7 +60,7 @@ fn single_leaf_search_evaluates_one_state_per_call() {
 
     let result = mcts.search(&SinglePathGame::default());
 
-    assert_eq!(result.policy, vec![1.0]);
+    assert_eq!(result.policy, vec![(0, 1.0)]);
     assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
 }
 
@@ -71,7 +79,7 @@ fn batched_puct_evaluates_multiple_states_per_call() {
 
     let result = mcts.search(&Connect4::default());
 
-    assert!((result.policy.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+    assert!((result.policy.iter().map(|&(_, p)| p).sum::<f32>() - 1.0).abs() < 1e-4);
     assert_eq!(mcts.virtual_loss_total(), 0);
     assert!(
         calls.lock().unwrap().iter().any(|&n| n > 1),
@@ -95,7 +103,7 @@ fn duplicate_batched_leaves_are_evaluated_once_and_backed_up_each_time() {
 
     let result = mcts.search(&SinglePathGame::default());
 
-    assert_eq!(result.policy, vec![1.0]);
+    assert_eq!(result.policy, vec![(0, 1.0)]);
     assert_eq!(mcts.virtual_loss_total(), 0);
     assert_eq!(mcts.root_visits(), 4);
     assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
@@ -140,7 +148,7 @@ fn batched_gumbel_clears_virtual_loss_and_keeps_valid_policy() {
     let result = mcts.search(&game);
 
     assert_eq!(mcts.virtual_loss_total(), 0);
-    assert!((result.policy.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+    assert!((result.policy.iter().map(|&(_, p)| p).sum::<f32>() - 1.0).abs() < 1e-4);
     assert!(mcts.gumbel_root_actions().contains(&result.best_action()));
 }
 
@@ -161,9 +169,31 @@ fn repetition_eval_cache_reuses_network_outputs() {
     let first = mcts.search_with_repetitions(&SinglePathGame::default(), |_| 0);
     let second = mcts.search_with_repetitions(&SinglePathGame::default(), |_| 0);
 
-    assert_eq!(first.policy, vec![1.0]);
-    assert_eq!(second.policy, vec![1.0]);
+    assert_eq!(first.policy, vec![(0, 1.0)]);
+    assert_eq!(second.policy, vec![(0, 1.0)]);
     assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
+}
+
+#[test]
+fn simultaneous_cache_key_misses_are_inferred_once_and_restore_order() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut mcts = Mcts::new(
+        RecordingEvaluator::uniform(calls.clone()),
+        MctsConfig::default(),
+    )
+    .with_eval_cache(Arc::new(EvalTable::new(16)));
+    let games = [SinglePathGame::default(), SinglePathGame::default()];
+
+    let results = match &mut mcts.inner {
+        MctsKind::Puct(core) => core.evaluate_repetition_positions(&games),
+        MctsKind::Gumbel(_) => unreachable!(),
+    };
+
+    assert_eq!(*calls.lock().unwrap(), vec![1]);
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].0, vec![0]);
+    assert_eq!(results[1].0, vec![0]);
+    assert_eq!(results[0].1.logits, results[1].1.logits);
 }
 
 #[test]
@@ -281,9 +311,13 @@ fn policy_is_a_distribution() {
         },
     );
     let result = mcts.search(&game);
-    let sum: f32 = result.policy.iter().sum();
+    let sum: f32 = result.policy.iter().map(|&(_, p)| p).sum();
     assert!((sum - 1.0).abs() < 1e-4);
-    assert!(result.policy.iter().all(|&p| p >= 0.0));
+    assert!(result.policy.iter().all(|&(_, p)| p >= 0.0));
+    let dense = result.dense_policy(Connect4::ACTION_SIZE);
+    for &(action, probability) in &result.policy {
+        assert_eq!(dense[action as usize], probability);
+    }
 }
 
 #[test]
@@ -301,14 +335,14 @@ fn gumbel_selected_action_stays_on_sampled_root_actions() {
     mcts.seed_rng(11);
 
     let result = mcts.search(&game);
-    let sum: f32 = result.policy.iter().sum();
+    let sum: f32 = result.policy.iter().map(|&(_, p)| p).sum();
     let sampled = mcts.gumbel_root_actions();
     let selected_was_sampled = sampled.contains(&result.best_action());
 
     assert!((sum - 1.0).abs() < 1e-4);
     assert_eq!(sampled.len(), 3);
     assert!(selected_was_sampled, "{:?}", result.policy);
-    assert!(result.policy.iter().all(|&p| p >= 0.0));
+    assert!(result.policy.iter().all(|&(_, p)| p >= 0.0));
 }
 
 #[test]
@@ -342,8 +376,16 @@ fn gumbel_with_all_root_actions_finds_forced_terminal_win() {
     let result = mcts.search(&ImmediateOutcomeGame::default());
 
     assert_eq!(result.best_action(), 0);
-    assert!(result.policy[0] > result.policy[1], "{:?}", result.policy);
-    assert!(result.policy[0] > result.policy[2], "{:?}", result.policy);
+    assert!(
+        result.probability(0) > result.probability(1),
+        "{:?}",
+        result.policy
+    );
+    assert!(
+        result.probability(0) > result.probability(2),
+        "{:?}",
+        result.policy
+    );
 }
 
 #[test]

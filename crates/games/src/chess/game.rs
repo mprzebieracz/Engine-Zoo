@@ -3,6 +3,7 @@ use super::az::ChessAzState;
 use super::legacy::{self, ChessLegacyState};
 use super::notation;
 use super::position::{ChessPosition, Status};
+use super::zobrist::ZobristBuildHasher;
 use chess::{Board, BoardStatus, ChessMove, Color, MoveGen};
 use engine_core::game::{Action, Game, TensorDim};
 use std::collections::HashMap;
@@ -13,7 +14,7 @@ use std::str::FromStr;
 pub struct ChessGame {
     pub(super) pos: ChessPosition,
     /// Zobrist hash occurrence counts since the last irreversible move.
-    pub(super) position_counts: HashMap<u64, u8>,
+    pub(super) position_counts: HashMap<u64, u8, ZobristBuildHasher>,
 }
 
 impl ChessGame {
@@ -45,8 +46,13 @@ impl ChessGame {
     }
 
     pub fn repetitions_before_current(&self, hash: u64) -> u8 {
+        self.repetitions_before_root(hash, self.pos.hash())
+    }
+
+    /// Number of occurrences before an explicitly cached search root.
+    pub fn repetitions_before_root(&self, hash: u64, root_hash: u64) -> u8 {
         let count = self.position_counts.get(&hash).copied().unwrap_or(0);
-        if hash == self.pos.hash() {
+        if hash == root_hash {
             count.saturating_sub(1)
         }
         else {
@@ -92,7 +98,7 @@ impl ChessGame {
                 status,
                 halfmove_clock,
             },
-            position_counts: HashMap::with_capacity(16),
+            position_counts: HashMap::with_capacity_and_hasher(16, ZobristBuildHasher::default()),
         };
         game.record_position();
         Ok(game)
@@ -120,7 +126,7 @@ impl Default for ChessGame {
     fn default() -> Self {
         let mut game = ChessGame {
             pos: ChessPosition::default(),
-            position_counts: HashMap::with_capacity(16),
+            position_counts: HashMap::with_capacity_and_hasher(16, ZobristBuildHasher::default()),
         };
         game.record_position();
         game

@@ -3,6 +3,7 @@ use super::az::ChessAzState;
 use super::game::ChessGame;
 use super::notation;
 use super::position::ChessPosition;
+use super::zobrist::ZobristBuildHasher;
 use chess::Board;
 use engine_core::game::{Action, Game};
 use engine_core::rules::RepetitionGame;
@@ -16,7 +17,7 @@ use std::collections::HashMap;
 #[derive(Clone)]
 pub struct ChessAzGame<const HISTORY: usize> {
     search: ChessAzState<HISTORY>,
-    position_counts: HashMap<u64, u8>,
+    position_counts: HashMap<u64, u8, ZobristBuildHasher>,
 }
 
 impl<const HISTORY: usize> ChessAzGame<HISTORY> {
@@ -24,7 +25,7 @@ impl<const HISTORY: usize> ChessAzGame<HISTORY> {
         let hash = position.hash();
         Self {
             search: ChessAzState::new(position),
-            position_counts: HashMap::from([(hash, 1)]),
+            position_counts: HashMap::from_iter([(hash, 1)]),
         }
     }
 
@@ -61,11 +62,16 @@ impl<const HISTORY: usize> ChessAzGame<HISTORY> {
     /// MCTS supplies this for every descendant hash, then combines it with
     /// repetitions along its simulated branch to adjudicate threefold draws.
     pub fn repetitions_before(&self, hash: u64) -> u8 {
+        self.repetitions_before_root(hash, self.position().hash())
+    }
+
+    /// Number of occurrences before an explicitly cached search root.
+    pub fn repetitions_before_root(&self, hash: u64, root_hash: u64) -> u8 {
         let count = self.position_counts.get(&hash).copied().unwrap_or(0);
         // The table includes the current root only when this is its hash.
         // Every other position occurred strictly before the root and must be
         // passed through unchanged for a descendant MCTS repetition check.
-        if hash == self.position().hash() {
+        if hash == root_hash {
             count.saturating_sub(1)
         }
         else {
@@ -129,6 +135,26 @@ impl<const HISTORY: usize> Default for ChessAzGame<HISTORY> {
 mod tests {
     use super::*;
     use engine_core::game::Game;
+
+    fn assert_rules_for_history<const HISTORY: usize>() {
+        let mut game = ChessAzGame::<HISTORY>::default();
+        assert_eq!(game.search_state().legal_actions().count(), 20);
+        for mv in [
+            "b1c3", "b8c6", "c3b1", "c6b8", "b1c3", "b8c6", "c3b1", "c6b8",
+        ] {
+            game.step(game.parse_move(mv).unwrap());
+        }
+        assert!(game.is_terminal());
+        assert_eq!(game.reward(), 0.0);
+        assert_eq!(game.repetitions_before_current(), 2);
+    }
+
+    #[test]
+    fn legal_moves_and_full_repetition_work_for_every_supported_history() {
+        assert_rules_for_history::<1>();
+        assert_rules_for_history::<4>();
+        assert_rules_for_history::<8>();
+    }
 
     #[test]
     fn one_step_updates_search_history_and_full_repetition() {

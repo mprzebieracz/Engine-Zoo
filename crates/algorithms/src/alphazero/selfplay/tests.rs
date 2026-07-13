@@ -54,14 +54,14 @@ fn temperature_schedule_transitions_to_argmax() {
 }
 
 #[test]
-fn temperature_sampling_never_selects_a_zero_probability_action() {
+fn temperature_sampling_returns_the_sparse_action_id() {
     let result = SearchResult {
-        policy: vec![0.0, 1.0, 0.0],
-        selected_action: 1,
+        policy: vec![(42, 1.0)],
+        selected_action: 42,
         value: 0.0,
     };
     let mut rng = SmallRng::seed_from_u64(7);
     for _ in 0..100 {
-        assert_eq!(select_temperature_action(&result, Some(0.5), &mut rng), 1);
+        assert_eq!(select_temperature_action(&result, Some(0.5), &mut rng), 42);
     }
 }
