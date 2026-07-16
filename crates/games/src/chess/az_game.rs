@@ -1,4 +1,4 @@
-use super::action::decode_az_move;
+use super::action::decode_v2_action;
 use super::az::ChessAzState;
 use super::game::ChessGame;
 use super::notation;
@@ -92,7 +92,7 @@ impl<const HISTORY: usize> ChessAzGame<HISTORY> {
     }
 
     pub fn san_for_action(&self, action: Action) -> String {
-        match decode_az_move(self.board(), action) {
+        match decode_v2_action(self.board(), action) {
             Ok(mv) => notation::san(self.board(), mv),
             Err(_) => self.format_action(action),
         }

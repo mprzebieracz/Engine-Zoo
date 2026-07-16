@@ -1,6 +1,4 @@
-use super::action::{
-    decode_az_move, encode_az_move, encode_move, square_to_az_cell, AZ_ACTION_SIZE,
-};
+use super::action::{decode_v2_action, encode_v2_action, square_to_az_cell, AZ_ACTION_SIZE};
 use super::position::ChessPosition;
 use chess::{Board, ChessMove, Color, MoveGen, Piece};
 use engine_core::game::{Action, Game, TensorDim};
@@ -93,15 +91,15 @@ impl<const HISTORY: usize> Game for ChessAzState<HISTORY> {
     const NAME: &'static str = "chess-az-v2";
 
     fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
-        MoveGen::new_legal(self.board()).map(|mv| encode_az_move(self.board(), mv))
+        MoveGen::new_legal(self.board()).map(|mv| encode_v2_action(self.board(), mv))
     }
 
     fn step(&mut self, action: Action) {
-        let mv = decode_az_move(self.board(), action)
+        let mv = decode_v2_action(self.board(), action)
             .unwrap_or_else(|error| panic!("invalid v2 chess action: {error}"));
         assert!(self.board().legal(mv), "illegal v2 chess move {mv}");
         let mut next = self.current().position;
-        next.step_without_repetition(action_to_legacy(mv));
+        next.play_with_effect(mv);
         let repetitions_before = self
             .frames
             .iter()
@@ -165,11 +163,11 @@ impl<const HISTORY: usize> Game for ChessAzState<HISTORY> {
         let mv = ChessMove::from_str(s.trim()).ok()?;
         self.board()
             .legal(mv)
-            .then(|| encode_az_move(self.board(), mv))
+            .then(|| encode_v2_action(self.board(), mv))
     }
 
     fn format_action(&self, action: Action) -> String {
-        decode_az_move(self.board(), action)
+        decode_v2_action(self.board(), action)
             .map(|mv| mv.to_string())
             .unwrap_or_else(|error| error.to_string())
     }
@@ -222,10 +220,6 @@ impl<const HISTORY: usize> fmt::Display for ChessAzState<HISTORY> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.current().position.fmt(f)
     }
-}
-
-fn action_to_legacy(mv: ChessMove) -> Action {
-    encode_move(mv)
 }
 
 /// Encodes one historical frame from `perspective`, which is always the side

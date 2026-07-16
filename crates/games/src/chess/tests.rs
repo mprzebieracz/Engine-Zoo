@@ -66,7 +66,7 @@ fn action_roundtrip_over_random_games() {
             }
             let legal: Vec<u32> = g.legal_actions().collect();
             for &a in &legal {
-                assert_eq!(encode_move(decode_move(a)), a);
+                assert_eq!(encode_v1_action(decode_v1_action(a)), a);
                 assert!((a as usize) < ChessGame::ACTION_SIZE);
             }
             g.step(*legal.choose(&mut rng).unwrap());
@@ -115,7 +115,7 @@ fn az_actions_roundtrip_over_random_games_without_collisions() {
             let legal: Vec<_> = MoveGen::new_legal(game.board()).collect();
             let actions: Vec<_> = legal
                 .iter()
-                .map(|&mv| encode_az_move(game.board(), mv))
+                .map(|&mv| encode_v2_action(game.board(), mv))
                 .collect();
             assert!(actions
                 .iter()
@@ -125,9 +125,9 @@ fn az_actions_roundtrip_over_random_games_without_collisions() {
             unique.dedup();
             assert_eq!(unique.len(), legal.len(), "legal moves collided in {game}");
             for (&mv, &action) in legal.iter().zip(&actions) {
-                assert_eq!(decode_az_move(game.board(), action).unwrap(), mv);
+                assert_eq!(decode_v2_action(game.board(), action).unwrap(), mv);
             }
-            game.step(encode_move(*legal.choose(&mut rng).unwrap()));
+            game.step(encode_v1_action(*legal.choose(&mut rng).unwrap()));
         }
     }
 }
@@ -159,15 +159,15 @@ fn az_codec_handles_promotions_castling_and_en_passant() {
         mv.get_promotion().is_some() && mv.get_source().get_file() != mv.get_dest().get_file()
     }));
     for mv in legal.into_iter().filter(|mv| mv.get_promotion().is_some()) {
-        let action = encode_az_move(promotions.board(), mv);
-        assert_eq!(decode_az_move(promotions.board(), action).unwrap(), mv);
+        let action = encode_v2_action(promotions.board(), mv);
+        assert_eq!(decode_v2_action(promotions.board(), action).unwrap(), mv);
     }
 
     let castles = from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
     for text in ["e1g1", "e1c1"] {
         let mv = ChessMove::from_str(text).unwrap();
-        let action = encode_az_move(castles.board(), mv);
-        assert_eq!(decode_az_move(castles.board(), action).unwrap(), mv);
+        let action = encode_v2_action(castles.board(), mv);
+        assert_eq!(decode_v2_action(castles.board(), action).unwrap(), mv);
     }
 
     let mut ep = ChessGame::default();
@@ -175,8 +175,8 @@ fn az_codec_handles_promotions_castling_and_en_passant() {
         ep.step(ep.parse_move(text).unwrap());
     }
     let mv = ChessMove::from_str("e5d6").unwrap();
-    let action = encode_az_move(ep.board(), mv);
-    assert_eq!(decode_az_move(ep.board(), action).unwrap(), mv);
+    let action = encode_v2_action(ep.board(), mv);
+    assert_eq!(decode_v2_action(ep.board(), action).unwrap(), mv);
 }
 
 #[test]
@@ -186,11 +186,11 @@ fn az_codec_is_color_canonical_and_rejects_invalid_actions() {
     let white_move = ChessMove::from_str("e2e4").unwrap();
     let black_move = ChessMove::from_str("e7e5").unwrap();
     assert_eq!(
-        encode_az_move(white.board(), white_move),
-        encode_az_move(black.board(), black_move)
+        encode_v2_action(white.board(), white_move),
+        encode_v2_action(black.board(), black_move)
     );
     assert_eq!(
-        decode_az_move(white.board(), AZ_ACTION_SIZE as Action),
+        decode_v2_action(white.board(), AZ_ACTION_SIZE as Action),
         Err(AzActionError::OutOfRange(AZ_ACTION_SIZE as Action))
     );
 }
@@ -352,6 +352,15 @@ fn fifty_move_rule_is_a_draw() {
     assert!(g.is_terminal());
     assert_eq!(g.pos.status, Status::DrawFiftyMoveRule);
     assert_eq!(g.reward(), 0.0);
+}
+
+#[test]
+fn move_effect_describes_move_properties_even_when_terminal() {
+    let mut position = from_fen("7k/R7/6K1/8/8/8/8/8 w - - 0 1").position();
+    let effect = position.play_with_effect(ChessMove::from_str("a7a8").unwrap());
+
+    assert_eq!(position.status, Status::Checkmate);
+    assert!(!effect.is_irreversible());
 }
 
 #[test]

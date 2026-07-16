@@ -1,4 +1,4 @@
-use super::action::{decode_move, encode_move};
+use super::action::{decode_v1_action, encode_v1_action};
 use super::az::ChessAzState;
 use super::legacy::{self, ChessLegacyState};
 use super::notation;
@@ -42,7 +42,7 @@ impl ChessGame {
     }
 
     pub fn san_for_action(&self, action: Action) -> String {
-        notation::san(self.board(), decode_move(action))
+        notation::san(self.board(), decode_v1_action(action))
     }
 
     pub fn repetitions_before_current(&self, hash: u64) -> u8 {
@@ -139,11 +139,14 @@ impl Game for ChessGame {
     const NAME: &'static str = "chess";
 
     fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
-        MoveGen::new_legal(&self.pos.board).map(encode_move)
+        MoveGen::new_legal(&self.pos.board).map(encode_v1_action)
     }
 
     fn step(&mut self, action: Action) {
-        let irreversible = self.pos.step_without_repetition(action);
+        let irreversible = self
+            .pos
+            .play_with_effect(decode_v1_action(action))
+            .is_irreversible();
         if self.pos.is_terminal() {
             return;
         }
@@ -169,11 +172,11 @@ impl Game for ChessGame {
 
     fn parse_move(&self, s: &str) -> Option<Action> {
         let mv = ChessMove::from_str(s.trim()).ok()?;
-        self.pos.board.legal(mv).then(|| encode_move(mv))
+        self.pos.board.legal(mv).then(|| encode_v1_action(mv))
     }
 
     fn format_action(&self, action: Action) -> String {
-        decode_move(action).to_string()
+        decode_v1_action(action).to_string()
     }
 }
 

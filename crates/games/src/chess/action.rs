@@ -112,13 +112,13 @@ fn az_plane_for_move(side_to_move: Color, mv: ChessMove) -> u32 {
     panic!("chess move has unsupported AlphaZero geometry: {mv}");
 }
 
-pub fn encode_az_move(board: &Board, mv: ChessMove) -> Action {
+pub fn encode_v2_action(board: &Board, mv: ChessMove) -> Action {
     let side_to_move = board.side_to_move();
     let (row, col) = square_to_az_cell(side_to_move, mv.get_source());
     az_plane_for_move(side_to_move, mv) * 64 + row as u32 * 8 + col as u32
 }
 
-pub fn decode_az_move(board: &Board, action: Action) -> Result<ChessMove, AzActionError> {
+pub fn decode_v2_action(board: &Board, action: Action) -> Result<ChessMove, AzActionError> {
     if action as usize >= AZ_ACTION_SIZE {
         return Err(AzActionError::OutOfRange(action));
     }
@@ -183,7 +183,7 @@ fn action_cell_to_square(row: u32, column: u32) -> Square {
     )
 }
 
-pub fn encode_move(mv: ChessMove) -> Action {
+pub fn encode_v1_action(mv: ChessMove) -> Action {
     let from = square_to_action_cell(mv.get_source());
     let to = square_to_action_cell(mv.get_dest());
     let promotion = match mv.get_promotion() {
@@ -197,7 +197,7 @@ pub fn encode_move(mv: ChessMove) -> Action {
     (from * 64 + to) * 5 + promotion
 }
 
-pub fn decode_move(action: Action) -> ChessMove {
+pub fn decode_v1_action(action: Action) -> ChessMove {
     let promotion = match action % 5 {
         0 => None,
         1 => Some(Piece::Queen),
