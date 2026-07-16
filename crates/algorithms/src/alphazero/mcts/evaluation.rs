@@ -8,6 +8,51 @@ use engine_core::rules::RepetitionGame;
 use rand::prelude::*;
 use rand_distr::Gamma;
 
+pub(super) fn build_policy<M: Copy>(
+    policy_buf: &mut Vec<(M, f32, f32)>,
+    legal: &[M],
+    res: &Evaluation,
+    root_noise: bool,
+    eps: f32,
+    alpha: f32,
+    rng: &mut SmallRng,
+) {
+    debug_assert_eq!(legal.len(), res.logits.len());
+    debug_assert!(res.logits.iter().all(|logit| logit.is_finite()));
+    policy_buf.clear();
+    let max_logit = res.logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0;
+    for (&action, &logit) in legal.iter().zip(&res.logits) {
+        let prior = (logit - max_logit).exp();
+        policy_buf.push((action, prior, logit));
+        sum += prior;
+    }
+    if sum.is_finite() && sum > 0.0 {
+        for (_, prior, _) in policy_buf.iter_mut() {
+            *prior /= sum;
+        }
+    }
+    else if !policy_buf.is_empty() {
+        let uniform = 1.0 / policy_buf.len() as f32;
+        for (_, prior, _) in policy_buf.iter_mut() {
+            *prior = uniform;
+        }
+    }
+    if root_noise && eps > 0.0 && !policy_buf.is_empty() {
+        let gamma = Gamma::new(alpha, 1.0).expect("alpha > 0");
+        let mut noise: Vec<f32> = (0..policy_buf.len()).map(|_| gamma.sample(rng)).collect();
+        let noise_sum: f32 = noise.iter().sum();
+        if noise_sum > 0.0 {
+            for x in &mut noise {
+                *x /= noise_sum;
+            }
+        }
+        for ((_, prior, _), noise) in policy_buf.iter_mut().zip(&noise) {
+            *prior = (1.0 - eps) * *prior + eps * noise;
+        }
+    }
+}
+
 impl<E: EncodedEvaluator, V> MctsCore<E, V> {
     /// Encodes `game` and its legal actions as the next entry of `self.batch`.
     fn enqueue_state<G: Game>(&mut self, game: &G) {
@@ -154,41 +199,15 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V> {
             "evaluator must return finite logits for legal actions"
         );
 
-        self.policy_buf.clear();
-        let max_logit = res.logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let mut sum = 0.0f32;
-        for (&action, &logit) in legal.iter().zip(&res.logits) {
-            let prior = (logit - max_logit).exp();
-            self.policy_buf.push((action, prior, logit));
-            sum += prior;
-        }
-        if sum.is_finite() && sum > 0.0 {
-            for (_, prior, _) in &mut self.policy_buf {
-                *prior /= sum;
-            }
-        }
-        else if !self.policy_buf.is_empty() {
-            let uniform = 1.0 / self.policy_buf.len() as f32;
-            for (_, prior, _) in &mut self.policy_buf {
-                *prior = uniform;
-            }
-        }
-
-        if root_noise && self.cfg.eps > 0.0 && !self.policy_buf.is_empty() {
-            let gamma = Gamma::new(self.cfg.alpha, 1.0).expect("alpha > 0");
-            let mut noise: Vec<f32> = (0..self.policy_buf.len())
-                .map(|_| gamma.sample(&mut self.rng))
-                .collect();
-            let noise_sum: f32 = noise.iter().sum();
-            if noise_sum > 0.0 {
-                for x in &mut noise {
-                    *x /= noise_sum;
-                }
-            }
-            for ((_, prior, _), noise) in self.policy_buf.iter_mut().zip(&noise) {
-                *prior = (1.0 - self.cfg.eps) * *prior + self.cfg.eps * noise;
-            }
-        }
+        build_policy(
+            &mut self.policy_buf,
+            legal,
+            res,
+            root_noise,
+            self.cfg.eps,
+            self.cfg.alpha,
+            &mut self.rng,
+        );
     }
 
     /// Creates all legal children of `node`, contiguous in the arena.
