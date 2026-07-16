@@ -2,7 +2,8 @@ use algorithms::alphazero::{Batcher, Mcts, MctsConfig, RunArchitecture};
 use anyhow::{Context, Result};
 use engine_core::agent::PolicyMode;
 use engine_core::game::Game;
-use games::{ChessAzGame, ChessGame};
+use engine_core::notation::GameNotation;
+use games::{decode_v2_action, ChessGame};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -219,16 +220,18 @@ fn evaluate_v2_puzzles<const HISTORY: usize>(
 ) -> Result<(Vec<PuzzleResult>, PuzzleSummary)> {
     let mut mcts = Mcts::new(evaluator, mcts_config);
     evaluate_moves(puzzles, |puzzle| {
-        let game = ChessAzGame::<HISTORY>::from_fen(&puzzle.fen)?;
-        let root_hash = game.position().hash();
+        let game = ChessGame::from_fen(&puzzle.fen)?;
+        let state = game.history_state::<HISTORY>();
+        let repetition_context = game.repetition_context();
         let action = mcts
             .search_with_repetitions_mode(
-                &game.search_state(),
-                |hash| game.repetitions_before_root(hash, root_hash),
+                &state,
+                |hash| repetition_context.occurrences_before_root(hash),
                 PolicyMode::Deterministic,
             )
             .best_action();
-        Ok(game.format_action(action))
+        let mv = decode_v2_action(game.board(), action).context("decoding puzzle v2 action")?;
+        Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
     })
 }
 

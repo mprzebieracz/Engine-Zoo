@@ -14,9 +14,10 @@ use axum::{Json, Router};
 use clap::ValueEnum;
 use engine_core::agent::PolicyMode;
 use engine_core::game::Game;
+use engine_core::notation::GameNotation;
 use games::chess::notation;
 use games::setup::{ChessSetup, Connect4Setup, GameSetup};
-use games::{ChessAzGame, ChessGame, Connect4};
+use games::{decode_v2_action, ChessGame, ChessHistoryState, Connect4};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
@@ -34,8 +35,6 @@ mod session_view;
 mod sessions;
 
 pub use analysis::analyze_request;
-#[cfg(test)]
-use analysis::chess_az_state;
 use http::*;
 pub use http::{game_name, open_existing_run, resolve_model, run_dir};
 use session_view::*;
@@ -104,108 +103,7 @@ struct AppState {
 
 enum LiveSession {
     Chess(Box<SessionState<ChessGame>>),
-    ChessAzV2(Box<ChessAzV2Session>),
     Connect4(SessionState<Connect4>),
-}
-
-/// The authoritative v2 game owns both full-game adjudication and its bounded,
-/// allocation-free neural history.
-struct ChessAzV2Session {
-    id: u64,
-    game: ChessAzGameKind,
-    moves: Vec<String>,
-    san_moves: Vec<String>,
-    model: String,
-    human_turn: bool,
-    simulations: usize,
-    wait_for_count: usize,
-}
-
-enum ChessAzGameKind {
-    H1(Box<ChessAzGame<1>>),
-    H4(Box<ChessAzGame<4>>),
-    H8(Box<ChessAzGame<8>>),
-}
-
-impl ChessAzGameKind {
-    fn new(history: usize, initial: games::chess::ChessPosition) -> Result<Self> {
-        match history {
-            1 => Ok(Self::H1(Box::new(ChessAzGame::new(initial)))),
-            4 => Ok(Self::H4(Box::new(ChessAzGame::new(initial)))),
-            8 => Ok(Self::H8(Box::new(ChessAzGame::new(initial)))),
-            _ => anyhow::bail!("chess-az-v2 history must be 1, 4, or 8, got {history}"),
-        }
-    }
-
-    fn parse_move(&self, mv: &str) -> Option<engine_core::game::Action> {
-        match self {
-            Self::H1(state) => state.parse_move(mv),
-            Self::H4(state) => state.parse_move(mv),
-            Self::H8(state) => state.parse_move(mv),
-        }
-    }
-
-    fn step(&mut self, action: engine_core::game::Action) {
-        match self {
-            Self::H1(state) => state.step(action),
-            Self::H4(state) => state.step(action),
-            Self::H8(state) => state.step(action),
-        }
-    }
-
-    fn format_action(&self, action: engine_core::game::Action) -> String {
-        match self {
-            Self::H1(state) => state.format_action(action),
-            Self::H4(state) => state.format_action(action),
-            Self::H8(state) => state.format_action(action),
-        }
-    }
-
-    fn san_for_action(&self, action: engine_core::game::Action) -> String {
-        match self {
-            Self::H1(game) => game.san_for_action(action),
-            Self::H4(game) => game.san_for_action(action),
-            Self::H8(game) => game.san_for_action(action),
-        }
-    }
-
-    fn is_terminal(&self) -> bool {
-        match self {
-            Self::H1(game) => game.is_terminal(),
-            Self::H4(game) => game.is_terminal(),
-            Self::H8(game) => game.is_terminal(),
-        }
-    }
-
-    fn reward(&self) -> f32 {
-        match self {
-            Self::H1(game) => game.reward(),
-            Self::H4(game) => game.reward(),
-            Self::H8(game) => game.reward(),
-        }
-    }
-
-    fn board_text(&self) -> String {
-        match self {
-            Self::H1(game) => game.position().to_string(),
-            Self::H4(game) => game.position().to_string(),
-            Self::H8(game) => game.position().to_string(),
-        }
-    }
-
-    fn legal_moves(&self) -> Vec<(engine_core::game::Action, String)> {
-        match self {
-            Self::H1(game) => legal_moves_for(&game.search_state()),
-            Self::H4(game) => legal_moves_for(&game.search_state()),
-            Self::H8(game) => legal_moves_for(&game.search_state()),
-        }
-    }
-}
-
-fn legal_moves_for<G: Game>(game: &G) -> Vec<(engine_core::game::Action, String)> {
-    game.legal_actions()
-        .map(|action| (action, game.format_action(action)))
-        .collect()
 }
 
 struct SessionState<G: Game> {
@@ -217,6 +115,7 @@ struct SessionState<G: Game> {
     human_turn: bool,
     simulations: usize,
     wait_for_count: usize,
+    v2_history: Option<usize>,
 }
 
 pub async fn serve(cfg: ServeConfig) -> Result<()> {
@@ -290,12 +189,10 @@ mod tests {
             moves: vec!["e2e4".into(), "e7e5".into(), "g1f3".into(), "b8c6".into()],
         };
 
-        let h1 = chess_az_state::<1>(&position).unwrap();
-        assert_eq!(h1.search_state().board(), h1.board());
-        let h4 = chess_az_state::<4>(&position).unwrap();
-        assert_eq!(h4.search_state().board(), h4.board());
-        let h8 = chess_az_state::<8>(&position).unwrap();
-        assert_eq!(h8.search_state().board(), h8.board());
+        let game = ChessGame::from_setup(&position).unwrap();
+        assert_eq!(game.history_state::<1>().board(), game.board());
+        assert_eq!(game.history_state::<4>().board(), game.board());
+        assert_eq!(game.history_state::<8>().board(), game.board());
     }
 
     #[test]
@@ -304,23 +201,51 @@ mod tests {
             fen: Some("8/8/8/8/8/8/8/K6k b - - 0 1".into()),
             moves: Vec::new(),
         };
-        let game = chess_az_state::<4>(&position).unwrap();
-        assert_eq!(game.search_state().board(), game.board());
+        let game = ChessGame::from_setup(&position).unwrap();
+        assert_eq!(game.history_state::<4>().board(), game.board());
+    }
+
+    fn assert_v2_session<const HISTORY: usize>() {
+        let mut session = SessionState {
+            id: 1,
+            game: ChessGame::default(),
+            moves: Vec::new(),
+            san_moves: Vec::new(),
+            model: "best".into(),
+            human_turn: true,
+            simulations: 1,
+            wait_for_count: 1,
+            v2_history: Some(HISTORY),
+        };
+        let mv = games::chess::ChessUciNotation
+            .parse_move(&session.game.position(), "e2e4")
+            .unwrap();
+        let expected_action = games::encode_v2_action(session.game.board(), mv);
+        let initial_board = *session.game.board();
+        let view = session_view_chess(&session);
+        let rendered = view["legal_moves"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["move"] == "e2e4")
+            .unwrap();
+        assert_eq!(rendered["action"], json!(expected_action));
+
+        play_chess_human_turn(&mut session, "e2e4").unwrap();
+        assert_ne!(*session.game.board(), initial_board);
+        assert_eq!(
+            session.game.board(),
+            session.game.history_state::<HISTORY>().board()
+        );
+        assert_eq!(session.moves, ["e2e4"]);
+        assert_eq!(session.v2_history, Some(HISTORY));
     }
 
     #[test]
-    fn v2_session_replays_and_steps_for_all_supported_histories() {
-        let position = ChessSetup {
-            fen: None,
-            moves: vec!["e2e4".into(), "e7e5".into(), "g1f3".into()],
-        };
-        for history in [1, 4, 8] {
-            let mut session =
-                create_chess_az_v2_session(1, position.clone(), "best".into(), true, 1, 1, history)
-                    .unwrap();
-            play_chess_az_v2_human_turn(&mut session, "b8c6").unwrap();
-            assert_eq!(session.moves.last(), Some(&"b8c6".to_owned()));
-        }
+    fn v2_session_views_and_native_moves_preserve_all_history_lengths() {
+        assert_v2_session::<1>();
+        assert_v2_session::<4>();
+        assert_v2_session::<8>();
     }
 
     #[test]

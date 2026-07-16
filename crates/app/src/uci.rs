@@ -2,7 +2,8 @@ use algorithms::alphazero::{Batcher, Mcts, MctsConfig, MctsVariant, RunArchitect
 use anyhow::{Context, Result};
 use engine_core::agent::PolicyMode;
 use engine_core::game::Game;
-use games::{ChessAzGame, ChessGame};
+use engine_core::notation::GameNotation;
+use games::{decode_v2_action, ChessGame};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tch::Device;
@@ -41,56 +42,11 @@ pub struct ChessUciEngine {
     pub game: ChessGame,
     batcher: Option<Batcher>,
     loaded: Option<LoadedModel>,
-    v2_game: Option<ChessAzGameKind>,
-    position_base: ChessGame,
     position_moves: Vec<String>,
 }
 
 struct LoadedModel {
     architecture: RunArchitecture,
-}
-
-/// The v2 feature history is part of the search state, whereas the UCI
-/// protocol's `position` command is kept in the legacy `ChessGame` format.
-enum ChessAzGameKind {
-    H1(Box<ChessAzGame<1>>),
-    H4(Box<ChessAzGame<4>>),
-    H8(Box<ChessAzGame<8>>),
-}
-
-impl ChessAzGameKind {
-    fn new(history: usize, game: &ChessGame) -> Result<Self> {
-        match history {
-            1 => Ok(Self::H1(Box::new(ChessAzGame::from_game(game)))),
-            4 => Ok(Self::H4(Box::new(ChessAzGame::from_game(game)))),
-            8 => Ok(Self::H8(Box::new(ChessAzGame::from_game(game)))),
-            _ => anyhow::bail!("chess-az-v2 history must be 1, 4, or 8, got {history}"),
-        }
-    }
-
-    fn parse_move(&self, mv: &str) -> Option<engine_core::game::Action> {
-        match self {
-            Self::H1(state) => state.parse_move(mv),
-            Self::H4(state) => state.parse_move(mv),
-            Self::H8(state) => state.parse_move(mv),
-        }
-    }
-
-    fn step(&mut self, action: engine_core::game::Action) {
-        match self {
-            Self::H1(state) => state.step(action),
-            Self::H4(state) => state.step(action),
-            Self::H8(state) => state.step(action),
-        }
-    }
-
-    fn format_action(&self, action: engine_core::game::Action) -> String {
-        match self {
-            Self::H1(state) => state.format_action(action),
-            Self::H4(state) => state.format_action(action),
-            Self::H8(state) => state.format_action(action),
-        }
-    }
 }
 
 impl Default for ChessUciEngine {
@@ -106,8 +62,6 @@ impl ChessUciEngine {
             game: ChessGame::default(),
             batcher: None,
             loaded: None,
-            v2_game: None,
-            position_base: ChessGame::default(),
             position_moves: Vec::new(),
         }
     }
@@ -117,33 +71,27 @@ impl ChessUciEngine {
             Some(fen) => ChessGame::from_fen(fen)?,
             None => ChessGame::default(),
         };
-        let position_base = game.clone();
         for mv in moves {
-            let action = game
-                .parse_move(mv)
+            let mv = games::chess::ChessUciNotation
+                .parse_move(&game.position(), mv)
                 .ok_or_else(|| anyhow::anyhow!("illegal chess move {mv}"))?;
-            game.step(action);
+            game.play(mv);
         }
         self.game = game;
-        self.position_base = position_base;
         self.position_moves = moves.to_vec();
-        self.v2_game = None;
         Ok(())
     }
 
     pub fn invalidate_model(&mut self) {
         self.batcher = None;
         self.loaded = None;
-        self.v2_game = None;
     }
 
     /// Starts a fresh game without reloading unchanged network weights.
     /// MCTS clears its per-search tree before every search.
     pub fn new_game(&mut self) {
         self.game = ChessGame::default();
-        self.position_base = ChessGame::default();
         self.position_moves.clear();
-        self.v2_game = None;
     }
 
     fn ensure_model(&mut self) -> Result<()> {
@@ -200,38 +148,16 @@ impl ChessUciEngine {
                 Ok(self.game.format_action(action))
             }
             RunArchitecture::ChessAzV2(v2) => {
-                if self.v2_game.is_none() {
-                    let mut game = ChessAzGameKind::new(v2.history, &self.position_base)?;
-                    for mv in &self.position_moves {
-                        let action = game
-                            .parse_move(mv)
-                            .ok_or_else(|| anyhow::anyhow!("illegal v2 chess move {mv}"))?;
-                        game.step(action);
-                    }
-                    self.v2_game = Some(game);
-                }
-                let game = self.v2_game.as_mut().expect("v2 game initialized");
-                let action = match game {
-                    ChessAzGameKind::H1(game) => v2_action(
-                        evaluator,
-                        game,
-                        simulations,
-                        self.position_moves.len() < self.settings.opening_plies,
-                    ),
-                    ChessAzGameKind::H4(game) => v2_action(
-                        evaluator,
-                        game,
-                        simulations,
-                        self.position_moves.len() < self.settings.opening_plies,
-                    ),
-                    ChessAzGameKind::H8(game) => v2_action(
-                        evaluator,
-                        game,
-                        simulations,
-                        self.position_moves.len() < self.settings.opening_plies,
-                    ),
+                let sampled = self.position_moves.len() < self.settings.opening_plies;
+                let action = match v2.history {
+                    1 => v2_action::<1>(evaluator, &self.game, simulations, sampled),
+                    4 => v2_action::<4>(evaluator, &self.game, simulations, sampled),
+                    8 => v2_action::<8>(evaluator, &self.game, simulations, sampled),
+                    history => anyhow::bail!("unsupported chess history {history}"),
                 }?;
-                Ok(game.format_action(action))
+                let mv = decode_v2_action(self.game.board(), action)
+                    .context("decoding v2 UCI bestmove")?;
+                Ok(games::chess::ChessUciNotation.format_move(&self.game.position(), mv))
             }
         }
     }
@@ -239,11 +165,12 @@ impl ChessUciEngine {
 
 fn v2_action<const HISTORY: usize>(
     evaluator: algorithms::alphazero::BatcherClient,
-    game: &ChessAzGame<HISTORY>,
+    game: &ChessGame,
     simulations: usize,
     sampled: bool,
 ) -> Result<engine_core::game::Action> {
-    let root_hash = game.position().hash();
+    let state = game.history_state::<HISTORY>();
+    let context = game.repetition_context();
     let result = Mcts::new(
         evaluator,
         MctsConfig {
@@ -254,8 +181,8 @@ fn v2_action<const HISTORY: usize>(
         },
     )
     .search_with_repetitions_mode(
-        &game.search_state(),
-        |hash| game.repetitions_before_root(hash, root_hash),
+        &state,
+        |hash| context.occurrences_before_root(hash),
         if sampled {
             PolicyMode::Explore
         }
