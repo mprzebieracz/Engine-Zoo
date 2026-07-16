@@ -1,4 +1,4 @@
-use super::super::evaluator::{Evaluation, Evaluator};
+use super::super::evaluator::{EncodedEvaluator, Evaluation};
 use super::cache::CachedEvaluation;
 use super::core::MctsCore;
 use super::Node;
@@ -7,15 +7,17 @@ use engine_core::rules::RepetitionGame;
 use rand::prelude::*;
 use rand_distr::Gamma;
 
-impl<E: Evaluator, V> MctsCore<E, V> {
+impl<E: EncodedEvaluator, V> MctsCore<E, V> {
     /// Encodes `game` and its legal actions as the next entry of `self.batch`.
     fn enqueue_state<G: Game>(&mut self, game: &G) {
         let start = self.batch.states.len();
         self.batch.states.resize(start + G::state_size(), 0.0);
         game.encode_state(&mut self.batch.states[start..]);
 
-        self.batch.legal.extend(game.legal_actions());
-        self.batch.offsets.push(self.batch.legal.len() as u32);
+        self.batch.legal_actions.extend(game.legal_actions());
+        self.batch
+            .offsets
+            .push(self.batch.legal_actions.len() as u32);
     }
 
     pub(super) fn evaluate_position<G: Game>(&mut self, game: &G) -> (Vec<Action>, Evaluation) {
@@ -35,9 +37,9 @@ impl<E: Evaluator, V> MctsCore<E, V> {
         let expected = games.len();
         let mut legal_per_state = Vec::with_capacity(games.len());
         for game in games {
-            let begin = self.batch.legal.len();
+            let begin = self.batch.legal_actions.len();
             self.enqueue_state(game);
-            legal_per_state.push(self.batch.legal[begin..].to_vec());
+            legal_per_state.push(self.batch.legal_actions[begin..].to_vec());
         }
         let results = self.evaluator.evaluate(&mut self.batch);
         debug_assert_eq!(

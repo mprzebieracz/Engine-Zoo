@@ -255,7 +255,7 @@ impl Worker {
                             let end = task.batch.offsets[s + 1] as usize;
                             let dst = &mut idx[row * width as usize..(row + 1) * width as usize];
                             dst.fill(0); // padding gathers action 0, never read
-                            for (k, &a) in task.batch.legal[begin..end].iter().enumerate() {
+                            for (k, &a) in task.batch.legal_actions[begin..end].iter().enumerate() {
                                 dst[k] = i64::from(a);
                             }
                             row += 1;
@@ -317,7 +317,7 @@ impl Worker {
                 for s in 0..task.batch.len() {
                     let begin = task.batch.offsets[s] as usize;
                     let end = task.batch.offsets[s + 1] as usize;
-                    let logits = task.batch.legal[begin..end]
+                    let logits = task.batch.legal_actions[begin..end]
                         .iter()
                         .map(|&a| policy_flat[row * action_size + a as usize])
                         .collect();

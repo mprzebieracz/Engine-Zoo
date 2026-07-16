@@ -15,18 +15,18 @@ fn tiny_cfg() -> NetConfig {
     }
 }
 
-fn batch(states: &[f32], legal_per_state: &[&[u32]]) -> EvalBatch {
-    let mut legal = Vec::new();
+fn batch(states: &[f32], legal_per_state: &[&[u32]]) -> EncodedEvalBatch {
+    let mut legal_actions = Vec::new();
     let mut offsets = Vec::with_capacity(legal_per_state.len() + 1);
     offsets.push(0);
     for actions in legal_per_state {
-        legal.extend_from_slice(actions);
-        offsets.push(legal.len() as u32);
+        legal_actions.extend_from_slice(actions);
+        offsets.push(legal_actions.len() as u32);
     }
 
-    EvalBatch {
+    EncodedEvalBatch {
         states: states.to_vec(),
-        legal,
+        legal_actions,
         offsets,
     }
 }
@@ -40,7 +40,7 @@ fn shared(wait_for_count: usize) -> Arc<Shared> {
     })
 }
 
-fn direct_eval(net: &AlphaZeroNet, cfg: &NetConfig, batch: &EvalBatch) -> Vec<Evaluation> {
+fn direct_eval(net: &AlphaZeroNet, cfg: &NetConfig, batch: &EncodedEvalBatch) -> Vec<Evaluation> {
     let n = batch.len();
     let states = Tensor::from_slice(&batch.states).view([
         n as i64,
@@ -57,7 +57,7 @@ fn direct_eval(net: &AlphaZeroNet, cfg: &NetConfig, batch: &EvalBatch) -> Vec<Ev
         .map(|row| {
             let begin = batch.offsets[row] as usize;
             let end = batch.offsets[row + 1] as usize;
-            let logits = batch.legal[begin..end]
+            let logits = batch.legal_actions[begin..end]
                 .iter()
                 .map(|&a| policy_flat[row * action_size + a as usize])
                 .collect();
@@ -205,17 +205,17 @@ fn client_returns_the_submitted_vector_allocations_for_reuse() {
     let mut client = batcher.client();
     let mut request = batch(&[0.25, 0.5], &[&[0, 2], &[1, 3, 4]]);
     request.states.reserve(32);
-    request.legal.reserve(32);
+    request.legal_actions.reserve(32);
     request.offsets.reserve(32);
 
     let pointers = (
         request.states.as_ptr(),
-        request.legal.as_ptr(),
+        request.legal_actions.as_ptr(),
         request.offsets.as_ptr(),
     );
     let capacities = (
         request.states.capacity(),
-        request.legal.capacity(),
+        request.legal_actions.capacity(),
         request.offsets.capacity(),
     );
 
@@ -223,10 +223,10 @@ fn client_returns_the_submitted_vector_allocations_for_reuse() {
 
     assert_eq!(evaluations.len(), 2);
     assert_eq!(request.states.as_ptr(), pointers.0);
-    assert_eq!(request.legal.as_ptr(), pointers.1);
+    assert_eq!(request.legal_actions.as_ptr(), pointers.1);
     assert_eq!(request.offsets.as_ptr(), pointers.2);
     assert_eq!(request.states.capacity(), capacities.0);
-    assert_eq!(request.legal.capacity(), capacities.1);
+    assert_eq!(request.legal_actions.capacity(), capacities.1);
     assert_eq!(request.offsets.capacity(), capacities.2);
     fs::remove_file(weights).unwrap();
 }

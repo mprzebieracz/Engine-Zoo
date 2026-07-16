@@ -1,4 +1,4 @@
-use super::super::evaluator::{EvalBatch, Evaluation, Evaluator};
+use super::super::evaluator::{EncodedEvalBatch, EncodedEvaluator, Evaluation};
 use super::cache::EvalTable;
 use super::gumbel::Gumbel;
 use super::puct::Puct;
@@ -50,11 +50,11 @@ impl CoreConfig {
 
 /// Runtime facade over the concrete MCTS variants. Callers can choose the
 /// variant from config at runtime; internally each variant has typed state.
-pub struct Mcts<E: Evaluator> {
+pub struct Mcts<E: EncodedEvaluator> {
     pub(super) inner: MctsKind<E>,
 }
 
-pub(super) enum MctsKind<E: Evaluator> {
+pub(super) enum MctsKind<E: EncodedEvaluator> {
     Puct(MctsCore<E, Puct>),
     Gumbel(MctsCore<E, Gumbel>),
 }
@@ -65,11 +65,11 @@ pub(super) enum MctsKind<E: Evaluator> {
 /// loss while the batch is open, and sends the unique non-terminal leaves to
 /// the evaluator together. The shared `Batcher` can still coalesce requests
 /// from many self-play threads into larger GPU batches.
-pub(super) struct MctsCore<E: Evaluator, V> {
+pub(super) struct MctsCore<E: EncodedEvaluator, V> {
     pub(super) evaluator: E,
     pub(super) cfg: CoreConfig,
     pub(super) nodes: Vec<Node>,
-    pub(super) batch: EvalBatch,
+    pub(super) batch: EncodedEvalBatch,
     pub(super) policy_buf: Vec<(Action, f32, f32)>,
     pub(super) repetition_path: Vec<u64>,
     pub(super) eval_cache: Option<Arc<EvalTable>>,
@@ -120,18 +120,18 @@ struct RepetitionSearch<F> {
 
 pub(super) trait SearchDriver<G: Game>: Copy {
     fn root_hash(self, game: &G) -> u64;
-    fn evaluate<E: Evaluator, V>(
+    fn evaluate<E: EncodedEvaluator, V>(
         self,
         mcts: &mut MctsCore<E, V>,
         game: &G,
     ) -> (Vec<Action>, Evaluation);
-    fn descend<E: Evaluator, V>(
+    fn descend<E: EncodedEvaluator, V>(
         self,
         mcts: &mut MctsCore<E, V>,
         game: &G,
         child: Option<u32>,
     ) -> (u32, G);
-    fn evaluate_many<E: Evaluator, V>(
+    fn evaluate_many<E: EncodedEvaluator, V>(
         self,
         mcts: &mut MctsCore<E, V>,
         games: &[G],
@@ -143,7 +143,7 @@ impl<G: Game> SearchDriver<G> for StandardSearch {
         0
     }
 
-    fn evaluate<E: Evaluator, V>(
+    fn evaluate<E: EncodedEvaluator, V>(
         self,
         mcts: &mut MctsCore<E, V>,
         game: &G,
@@ -151,7 +151,7 @@ impl<G: Game> SearchDriver<G> for StandardSearch {
         mcts.evaluate_position(game)
     }
 
-    fn descend<E: Evaluator, V>(
+    fn descend<E: EncodedEvaluator, V>(
         self,
         mcts: &mut MctsCore<E, V>,
         game: &G,
@@ -160,7 +160,7 @@ impl<G: Game> SearchDriver<G> for StandardSearch {
         mcts.descend(game, child.unwrap_or(0))
     }
 
-    fn evaluate_many<E: Evaluator, V>(
+    fn evaluate_many<E: EncodedEvaluator, V>(
         self,
         mcts: &mut MctsCore<E, V>,
         games: &[G],
@@ -178,7 +178,7 @@ where
         game.repetition_hash()
     }
 
-    fn evaluate<E: Evaluator, V>(
+    fn evaluate<E: EncodedEvaluator, V>(
         self,
         mcts: &mut MctsCore<E, V>,
         game: &G,
@@ -186,7 +186,7 @@ where
         mcts.evaluate_repetition_position(game)
     }
 
-    fn descend<E: Evaluator, V>(
+    fn descend<E: EncodedEvaluator, V>(
         self,
         mcts: &mut MctsCore<E, V>,
         game: &G,
@@ -195,7 +195,7 @@ where
         mcts.descend_repetition(game, child.unwrap_or(0), self.root_repetitions)
     }
 
-    fn evaluate_many<E: Evaluator, V>(
+    fn evaluate_many<E: EncodedEvaluator, V>(
         self,
         mcts: &mut MctsCore<E, V>,
         games: &[G],
@@ -204,7 +204,7 @@ where
     }
 }
 
-impl<E: Evaluator> Mcts<E> {
+impl<E: EncodedEvaluator> Mcts<E> {
     pub fn new(evaluator: E, cfg: MctsConfig) -> Self {
         cfg.validate().expect("invalid MCTS configuration");
         let core_cfg = CoreConfig::from_mcts(cfg);
@@ -304,13 +304,13 @@ impl<E: Evaluator> Mcts<E> {
     }
 }
 
-impl<E: Evaluator, V> MctsCore<E, V> {
+impl<E: EncodedEvaluator, V> MctsCore<E, V> {
     fn new(evaluator: E, cfg: CoreConfig, variant: V) -> Self {
         MctsCore {
             evaluator,
             cfg,
             nodes: Vec::new(),
-            batch: EvalBatch::new(),
+            batch: EncodedEvalBatch::new(),
             policy_buf: Vec::new(),
             repetition_path: Vec::with_capacity(128),
             eval_cache: None,

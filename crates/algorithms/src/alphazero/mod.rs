@@ -13,7 +13,7 @@ mod trainer;
 pub use batcher::{Batcher, BatcherClient, BatcherStats, InferencePrecision};
 pub use checkpoint::{RunArchitecture, RunConfig, RunDir};
 pub use engine_core::rules::RepetitionGame;
-pub use evaluator::{EvalBatch, Evaluation, Evaluator};
+pub use evaluator::{EncodedEvalBatch, EncodedEvaluator, Evaluation};
 pub use mcts::{
     EvalTable, EvalTableStats, GumbelSearchProfile, Mcts, MctsConfig, MctsVariant, SearchResult,
 };

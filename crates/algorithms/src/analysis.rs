@@ -1,4 +1,4 @@
-use crate::alphazero::{Batcher, EvalBatch, Evaluator, Mcts, MctsConfig, NetConfig};
+use crate::alphazero::{Batcher, EncodedEvalBatch, EncodedEvaluator, Mcts, MctsConfig, NetConfig};
 use anyhow::Result;
 use engine_core::agent::PolicyMode;
 use engine_core::game::{Action, Game};
@@ -77,13 +77,16 @@ pub fn analyze_game<G: Game>(
 /// Evaluates an already-constructed game. This keeps position construction in
 /// the owning integration crate while allowing alternate game state wrappers
 /// (such as history-aware chess) to share the API analysis schema.
-pub fn analyze_game_net<G: Game>(game: G, mut evaluator: impl Evaluator) -> Result<Analysis> {
+pub fn analyze_game_net<G: Game>(
+    game: G,
+    mut evaluator: impl EncodedEvaluator,
+) -> Result<Analysis> {
     let legal: Vec<_> = game.legal_actions().collect();
     let mut state = vec![0.0f32; G::state_size()];
     game.encode_state(&mut state);
-    let mut batch = EvalBatch {
+    let mut batch = EncodedEvalBatch {
         states: state,
-        legal: legal.clone(),
+        legal_actions: legal.clone(),
         offsets: vec![0, legal.len() as u32],
     };
     let eval = evaluator.evaluate(&mut batch);
@@ -104,7 +107,7 @@ pub fn analyze_game_net<G: Game>(game: G, mut evaluator: impl Evaluator) -> Resu
 }
 
 /// Runs ordinary deterministic MCTS for an already-constructed game.
-pub fn analyze_game_mcts<G: Game, E: Evaluator>(
+pub fn analyze_game_mcts<G: Game, E: EncodedEvaluator>(
     game: G,
     mcts: &mut Mcts<E>,
     network: Analysis,
@@ -138,7 +141,7 @@ pub fn analyze_game_mcts_with_repetitions<G, E, F>(
 ) -> Result<Analysis>
 where
     G: RepetitionGame,
-    E: Evaluator,
+    E: EncodedEvaluator,
     F: Fn(u64) -> u8 + Copy,
 {
     let result = mcts.search_with_repetitions_mode(
