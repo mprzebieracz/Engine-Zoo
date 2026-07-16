@@ -121,6 +121,16 @@ impl Connect4 {
         }
     }
 
+    pub const fn position_bits(&self) -> u64 {
+        self.pos
+    }
+    pub const fn occupied_bits(&self) -> u64 {
+        self.mask
+    }
+    pub const fn is_ongoing(&self) -> bool {
+        matches!(self.status, Status::Ongoing)
+    }
+
     fn player1_stones(&self) -> u64 {
         if self.ply.is_multiple_of(2) {
             self.pos

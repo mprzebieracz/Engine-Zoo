@@ -1,5 +1,8 @@
 use engine_core::GameState;
 
+pub mod connect4;
+pub use connect4::Connect4AzRepresentation;
+
 /// Index into the fixed policy vector of one AlphaZero representation.
 /// This is not a native game move.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
