@@ -58,20 +58,12 @@ pub fn analyze_request(
 
 /// Replays a request from its setup. A FEN with no accompanying moves has no
 /// recoverable preceding frames, so the unavailable feature history is padded.
-pub(super) fn chess_az_state<const HISTORY: usize>(
+fn chess_az_state_snapshot<const HISTORY: usize>(
     position: &ChessSetup,
-) -> Result<ChessAzGame<HISTORY>> {
-    let mut game = match &position.fen {
-        Some(fen) => ChessAzGame::from_fen(fen)?,
-        None => ChessAzGame::default(),
-    };
-    for text in &position.moves {
-        let action = game
-            .parse_move(text)
-            .ok_or_else(|| anyhow::anyhow!("illegal v2 chess move {text}"))?;
-        game.step(action);
-    }
-    Ok(game)
+) -> Result<(ChessGame, ChessHistoryState<HISTORY>)> {
+    let game = ChessGame::from_setup(position)?;
+    let state = game.history_state::<HISTORY>();
+    Ok((game, state))
 }
 
 fn inference_precision(device: Device) -> InferencePrecision {
@@ -90,8 +82,7 @@ fn analyze_chess_az_v2<const HISTORY: usize>(
     device: Device,
     cfg: &AnalyzeConfig,
 ) -> Result<Analysis> {
-    let game = chess_az_state::<HISTORY>(position)?;
-    let state = game.search_state();
+    let (game, state) = chess_az_state_snapshot::<HISTORY>(position)?;
     if state.is_terminal() {
         return Ok(Analysis {
             value: state.reward(),
@@ -122,8 +113,8 @@ fn analyze_chess_az_v2<const HISTORY: usize>(
     // deterministic PUCT for stable, comparable browser results.
     mcts_cfg.variant = MctsVariant::Puct;
     let mut mcts = Mcts::new(batcher.client(), mcts_cfg);
-    let root_hash = game.position().hash();
+    let repetition_context = game.repetition_context();
     analyze_game_mcts_with_repetitions(state, &mut mcts, network, |hash| {
-        game.repetitions_before_root(hash, root_hash)
+        repetition_context.occurrences_before_root(hash)
     })
 }

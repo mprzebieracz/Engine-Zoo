@@ -2,7 +2,6 @@
 
 mod action;
 mod az;
-mod az_game;
 mod game;
 mod legacy;
 pub mod notation;
@@ -15,7 +14,6 @@ pub use action::{
     AZ_ACTION_SIZE,
 };
 pub use az::ChessHistoryState;
-pub use az_game::ChessAzGame;
 pub use game::{ChessGame, ChessRepetitionContext};
 pub use legacy::ChessLegacyState;
 pub use notation::ChessUciNotation;

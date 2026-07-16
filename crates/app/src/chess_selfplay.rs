@@ -9,7 +9,7 @@ use algorithms::alphazero::{
     SelfPlayConfig, SelfPlayStats, Transition,
 };
 use engine_core::game::Game;
-use games::{ChessAzGame, ChessGame, ChessHistoryState};
+use games::{decode_v2_action, ChessGame, ChessHistoryState};
 use rand::Rng;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -73,9 +73,7 @@ pub fn self_play_chess(
     stats
 }
 
-/// Chess AZ v2 self-play. The search state owns its bounded encoded history;
-/// `ChessGame` remains the authoritative source for full-game repetition and
-/// terminal adjudication.
+/// Chess AZ v2 self-play using one authoritative game and a search snapshot.
 pub fn self_play_chess_az_v2<const HISTORY: usize>(
     batcher: &Batcher,
     replay: &ReplayBuffer,
@@ -230,7 +228,7 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
     cfg: &SelfPlayConfig,
     should_stop: impl Fn() -> bool,
 ) -> Option<CompletedGame> {
-    let mut game = ChessAzGame::<HISTORY>::default();
+    let mut game = ChessGame::default();
     let mut trajectory = Vec::with_capacity(cfg.max_moves.min(256));
     let mut rng = rand::rng();
     let resignation_disabled =
@@ -247,7 +245,7 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
             return None;
         }
         let mut encoded = vec![0.0; ChessHistoryState::<HISTORY>::state_size()];
-        let search_state = game.search_state();
+        let search_state = game.history_state::<HISTORY>();
         search_state.encode_state(&mut encoded);
 
         let full_search = rng.random_bool(cfg.full_simulation_probability as f64);
@@ -274,9 +272,9 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
             mcts.set_simulations(simulations);
         }
 
-        let root_hash = game.position().hash();
+        let repetition_context = game.repetition_context();
         let result = mcts.search_with_repetitions(&search_state, |hash| {
-            game.repetitions_before_root(hash, root_hash)
+            repetition_context.occurrences_before_root(hash)
         });
         let action = select_temperature_action(
             &result,
@@ -307,7 +305,9 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
             stats.resignations += 1;
             break;
         }
-        game.step(action);
+        let mv = decode_v2_action(game.board(), action)
+            .expect("MCTS returned an invalid chess AZ v2 action");
+        game.play(mv);
     }
 
     let mut value = resigned_value.unwrap_or_else(|| -game.reward());
