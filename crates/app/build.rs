@@ -10,12 +10,13 @@ fn main() {
     let rpath = format!("-Wl,-rpath,{libtorch}/lib");
     // Test harnesses and bins: runnable without LD_LIBRARY_PATH.
     println!("cargo:rustc-link-arg={rpath}");
-    // Force a DT_NEEDED entry for libtorch.so (whose own deps pull in
-    // libtorch_cuda.so): with the default --as-needed it gets dropped because
-    // no symbol is referenced directly, and Cuda::is_available() then reports
-    // false at runtime. The standard tch-rs workaround, minus the
-    // --copy-dt-needed-entries flag that rust-lld doesn't support.
-    println!("cargo:rustc-link-arg-bins=-Wl,--no-as-needed");
-    println!("cargo:rustc-link-arg-bins=-ltorch");
-    println!("cargo:rustc-link-arg-bins=-Wl,--as-needed");
+    // Linux linkers may drop libtorch.so because no symbol is referenced
+    // directly. Keep the dependency there so CUDA registrations are loaded.
+    // Apple ld does not understand these GNU linker flags; libtorch's normal
+    // dependency graph is sufficient on macOS.
+    if cfg!(target_os = "linux") {
+        println!("cargo:rustc-link-arg-bins=-Wl,--no-as-needed");
+        println!("cargo:rustc-link-arg-bins=-ltorch");
+        println!("cargo:rustc-link-arg-bins=-Wl,--as-needed");
+    }
 }
