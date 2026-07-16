@@ -8,15 +8,15 @@ pub(super) fn create_session_inner(
     let session = match state.game {
         GameKind::Chess => {
             let position = match req.position {
-                Some(PositionSpec::Chess(position)) => position,
+                Some(GameSetup::Chess(position)) => position,
                 Some(_) => anyhow::bail!("session position does not match chess"),
-                None => ChessPosition::default(),
+                None => ChessSetup::default(),
             };
             let (_, cfg) = open_existing_run::<ChessGame>(&state.run_dir)?;
             match cfg.architecture {
                 RunArchitecture::Legacy => LiveSession::Chess(SessionState {
                     id,
-                    game: ChessGame::from_position(&position)?,
+                    game: ChessGame::from_setup(&position)?,
                     moves: position.moves.clone(),
                     san_moves: Vec::new(),
                     model: req.model,
@@ -40,14 +40,14 @@ pub(super) fn create_session_inner(
         }
         GameKind::Connect4 => {
             let position = match req.position {
-                Some(PositionSpec::Connect4(position)) => position,
+                Some(GameSetup::Connect4(position)) => position,
                 Some(_) => anyhow::bail!("session position does not match connect4"),
-                None => Connect4Position::default(),
+                None => Connect4Setup::default(),
             };
             let moves = position.moves.iter().map(ToString::to_string).collect();
             LiveSession::Connect4(SessionState {
                 id,
-                game: Connect4::from_position(&position)?,
+                game: Connect4::from_setup(&position)?,
                 moves,
                 san_moves: Vec::new(),
                 model: req.model,
@@ -122,7 +122,7 @@ pub(super) fn play_chess_human_turn(session: &mut SessionState<ChessGame>, mv: &
 
 pub(super) fn create_chess_az_v2_session(
     id: u64,
-    position: ChessPosition,
+    position: ChessSetup,
     model: String,
     human_turn: bool,
     simulations: usize,
@@ -132,11 +132,11 @@ pub(super) fn create_chess_az_v2_session(
     // A bare FEN has no recoverable earlier positions, so its v2 history is
     // intentionally zero-padded. When `moves` are supplied, replaying them
     // here reconstructs the same feature frames used during self-play.
-    let setup = ChessPosition {
+    let setup = ChessSetup {
         fen: position.fen,
         moves: Vec::new(),
     };
-    let initial = ChessGame::from_position(&setup)?.position();
+    let initial = ChessGame::from_setup(&setup)?.position();
     let mut game = ChessAzGameKind::new(history, initial)?;
     for mv in &position.moves {
         let action = game

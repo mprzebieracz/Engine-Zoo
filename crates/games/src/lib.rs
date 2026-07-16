@@ -1,6 +1,6 @@
 pub mod chess;
 pub mod connect4;
-pub mod position;
+pub mod setup;
 
 pub use chess::{
     decode_v1_action, decode_v2_action, encode_v1_action, encode_v2_action, AzActionError,

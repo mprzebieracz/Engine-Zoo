@@ -5,7 +5,7 @@ use crate::visualization::{
 use algorithms::analysis::{Analysis, AnalyzeMode};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use games::position::{ChessPosition, Connect4Position, PositionSpec};
+use games::setup::{ChessSetup, Connect4Setup, GameSetup};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
@@ -101,7 +101,7 @@ struct BenchCase {
     name: Option<String>,
     #[serde(default)]
     category: Option<String>,
-    position: PositionSpec,
+    position: GameSetup,
     #[serde(default)]
     expected: Vec<String>,
 }
@@ -249,13 +249,9 @@ fn remote_analyze_request(server: &str, req: &AnalyzeRequest) -> Result<Analysis
     Ok(serde_json::from_str(&body)?)
 }
 
-fn position_from_cli(
-    game: GameKind,
-    fen: Option<String>,
-    moves: Vec<String>,
-) -> Result<PositionSpec> {
+fn position_from_cli(game: GameKind, fen: Option<String>, moves: Vec<String>) -> Result<GameSetup> {
     Ok(match game {
-        GameKind::Chess => PositionSpec::Chess(ChessPosition { fen, moves }),
+        GameKind::Chess => GameSetup::Chess(ChessSetup { fen, moves }),
         GameKind::Connect4 => {
             anyhow::ensure!(fen.is_none(), "connect4 positions use --moves, not --fen");
             let moves = moves
@@ -265,7 +261,7 @@ fn position_from_cli(
                         .with_context(|| format!("parsing move {m}"))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            PositionSpec::Connect4(Connect4Position { moves })
+            GameSetup::Connect4(Connect4Setup { moves })
         }
     })
 }

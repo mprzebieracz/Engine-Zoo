@@ -18,13 +18,17 @@ pub fn analyze_request(
         timeout: BATCH_TIMEOUT,
     };
     match (game, req.position) {
-        (GameKind::Chess, PositionSpec::Chess(position)) => {
+        (GameKind::Chess, GameSetup::Chess(position)) => {
             let (_, run_cfg) = open_existing_run::<ChessGame>(&run_dir)?;
             let weights = resolve_model(&run_dir, &req.model);
             match run_cfg.architecture {
-                RunArchitecture::Legacy => {
-                    analyze_position::<ChessGame>(&run_cfg.net, &weights, &position, device, &cfg)
-                }
+                RunArchitecture::Legacy => analyze_game(
+                    ChessGame::from_setup(&position)?,
+                    &run_cfg.net,
+                    &weights,
+                    device,
+                    &cfg,
+                ),
                 RunArchitecture::ChessAzV2(v2) => match v2.history {
                     1 => analyze_chess_az_v2::<1>(&run_cfg, &weights, &position, device, &cfg),
                     4 => analyze_chess_az_v2::<4>(&run_cfg, &weights, &position, device, &cfg),
@@ -33,10 +37,16 @@ pub fn analyze_request(
                 },
             }
         }
-        (GameKind::Connect4, PositionSpec::Connect4(position)) => {
+        (GameKind::Connect4, GameSetup::Connect4(position)) => {
             let (_, run_cfg) = open_existing_run::<Connect4>(&run_dir)?;
             let weights = resolve_model(&run_dir, &req.model);
-            analyze_position::<Connect4>(&run_cfg.net, &weights, &position, device, &cfg)
+            analyze_game(
+                Connect4::from_setup(&position)?,
+                &run_cfg.net,
+                &weights,
+                device,
+                &cfg,
+            )
         }
         (expected, other) => anyhow::bail!(
             "server is configured for {}, but request position is {:?}",
@@ -49,7 +59,7 @@ pub fn analyze_request(
 /// Replays a request from its setup. A FEN with no accompanying moves has no
 /// recoverable preceding frames, so the unavailable feature history is padded.
 pub(super) fn chess_az_state<const HISTORY: usize>(
-    position: &ChessPosition,
+    position: &ChessSetup,
 ) -> Result<ChessAzGame<HISTORY>> {
     let mut game = match &position.fen {
         Some(fen) => ChessAzGame::from_fen(fen)?,
@@ -76,7 +86,7 @@ fn inference_precision(device: Device) -> InferencePrecision {
 fn analyze_chess_az_v2<const HISTORY: usize>(
     run_cfg: &RunConfig,
     weights: &Path,
-    position: &ChessPosition,
+    position: &ChessSetup,
     device: Device,
     cfg: &AnalyzeConfig,
 ) -> Result<Analysis> {

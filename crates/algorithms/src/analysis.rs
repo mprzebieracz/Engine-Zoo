@@ -2,7 +2,7 @@ use crate::alphazero::{Batcher, EvalBatch, Evaluator, Mcts, MctsConfig, NetConfi
 use anyhow::Result;
 use engine_core::agent::PolicyMode;
 use engine_core::game::{Action, Game};
-use engine_core::rules::{PositionCodec, RepetitionGame};
+use engine_core::rules::RepetitionGame;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
@@ -41,14 +41,13 @@ pub struct AnalyzeConfig {
     pub timeout: Duration,
 }
 
-pub fn analyze_position<G: PositionCodec>(
+pub fn analyze_game<G: Game>(
+    game: G,
     net_cfg: &NetConfig,
     weights: &Path,
-    position: &G::Position,
     device: Device,
     cfg: &AnalyzeConfig,
 ) -> Result<Analysis> {
-    let game = G::from_position(position)?;
     if game.is_terminal() {
         return Ok(Analysis {
             value: game.reward(),
