@@ -9,6 +9,7 @@ build = "build.rs"
 anyhow.workspace = true
 engine_core = { path = "../core" }
 games = { path = "../games" }
+chess.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 serde.workspace = true

@@ -57,6 +57,14 @@ impl ChessPosition {
         self.board.get_hash()
     }
 
+    pub fn board(&self) -> &Board {
+        &self.board
+    }
+
+    pub fn ply(&self) -> u16 {
+        self.ply
+    }
+
     pub fn halfmove_clock(&self) -> usize {
         self.halfmove_clock as usize
     }
