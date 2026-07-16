@@ -13,7 +13,7 @@ impl<E: EncodedEvaluator> MctsCore<E, Puct> {
         game: &G,
         mode: PolicyMode,
         driver: D,
-    ) -> SearchResult
+    ) -> SearchResult<Action>
     where
         G: Game,
         D: SearchDriver<G>,
@@ -21,7 +21,7 @@ impl<E: EncodedEvaluator> MctsCore<E, Puct> {
         if game.is_terminal() {
             return SearchResult {
                 policy: Vec::new(),
-                selected_action: 0,
+                selected_move: 0,
                 value: game.reward(),
             };
         }
@@ -53,14 +53,14 @@ impl<E: EncodedEvaluator> MctsCore<E, Puct> {
             self.finish_leaf_batch(&mut batch, driver);
         }
         let policy = self.root_visit_policy();
-        let selected_action = policy
+        let selected_move = policy
             .iter()
             .max_by(|a, b| a.1.total_cmp(&b.1))
             .map_or(0, |&(action, _)| action);
 
         SearchResult {
             policy,
-            selected_action,
+            selected_move,
             value: if self.nodes[0].visits > 0 {
                 self.nodes[0].q()
             }

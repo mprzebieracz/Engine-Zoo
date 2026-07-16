@@ -9,6 +9,29 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestMove {
+    Left,
+    Right,
+}
+
+#[test]
+fn search_result_supports_native_move_types() {
+    let result = SearchResult {
+        policy: vec![(TestMove::Left, 0.0), (TestMove::Right, 1.0)],
+        selected_move: TestMove::Right,
+        value: 0.5,
+    };
+    assert_eq!(result.best_move(), TestMove::Right);
+    assert_eq!(result.probability(TestMove::Left), 0.0);
+    assert_eq!(result.probability(TestMove::Right), 1.0);
+
+    let mut rng = SmallRng::seed_from_u64(7);
+    for _ in 0..100 {
+        assert_eq!(result.sample_move(&mut rng), TestMove::Right);
+    }
+}
+
 impl<E: EncodedEvaluator> Mcts<E> {
     fn seed_rng(&mut self, seed: u64) {
         match &mut self.inner {

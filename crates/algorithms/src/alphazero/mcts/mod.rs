@@ -128,33 +128,45 @@ impl MctsConfig {
 /// For PUCT, `policy` is the normalized root visit-count distribution. For
 /// Gumbel AlphaZero, it is the search-improved policy
 /// `softmax(root_logits + transformed_completed_q)` used as the policy target.
-pub struct SearchResult {
+pub struct SearchResult<M> {
     /// Normalized probability mass for legal root actions only.
-    pub policy: Vec<(Action, f32)>,
-    pub selected_action: Action,
+    pub policy: Vec<(M, f32)>,
+    pub selected_move: M,
     pub value: f32,
 }
 
-impl SearchResult {
-    /// The action proposed by the search.
-    pub fn best_action(&self) -> Action {
-        self.selected_action
+impl<M: Copy> SearchResult<M> {
+    /// The move proposed by the search.
+    pub fn best_move(&self) -> M {
+        self.selected_move
     }
 
     /// Samples from the returned policy distribution.
-    pub fn sample_action<R: Rng + ?Sized>(&self, rng: &mut R) -> Action {
+    pub fn sample_move<R: Rng + ?Sized>(&self, rng: &mut R) -> M {
         let index = WeightedIndex::new(self.policy.iter().map(|&(_, probability)| probability))
             .expect("search of a non-terminal position returns a non-empty policy")
             .sample(rng);
         self.policy[index].0
     }
+}
 
-    /// Probability assigned to `action`, or zero when the action is illegal.
-    pub fn probability(&self, action: Action) -> f32 {
+impl<M: Copy + Eq> SearchResult<M> {
+    /// Probability assigned to `move_`, or zero when the move is illegal.
+    pub fn probability(&self, move_: M) -> f32 {
         self.policy
             .iter()
-            .find_map(|&(candidate, probability)| (candidate == action).then_some(probability))
+            .find_map(|&(candidate, probability)| (candidate == move_).then_some(probability))
             .unwrap_or(0.0)
+    }
+}
+
+impl SearchResult<Action> {
+    pub fn best_action(&self) -> Action {
+        self.best_move()
+    }
+
+    pub fn sample_action<R: Rng + ?Sized>(&self, rng: &mut R) -> Action {
+        self.sample_move(rng)
     }
 
     /// Expands the sparse legal-action policy for compatibility consumers.

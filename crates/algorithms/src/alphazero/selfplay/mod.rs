@@ -313,37 +313,37 @@ fn play_game<G: Game>(
 }
 
 fn select_self_play_action<R: Rng + ?Sized>(
-    result: &SearchResult,
+    result: &SearchResult<Action>,
     variant: MctsVariant,
     ply: usize,
     temperature_moves: usize,
     rng: &mut R,
 ) -> Action {
     if matches!(variant, MctsVariant::Gumbel { .. }) || ply >= temperature_moves {
-        result.best_action()
+        result.best_move()
     }
     else {
-        result.sample_action(rng)
+        result.sample_move(rng)
     }
 }
 
 /// Samples `p^(1/T)` without assigning mass to illegal/zero-probability
 /// actions. `None` means deterministic argmax.
 pub fn select_temperature_action<R: Rng + ?Sized>(
-    result: &SearchResult,
+    result: &SearchResult<Action>,
     temperature: Option<f32>,
     rng: &mut R,
 ) -> Action {
     let Some(temperature) = temperature
     else {
-        return result.best_action();
+        return result.best_move();
     };
     assert!(
         temperature.is_finite() && temperature > 0.0,
         "self-play temperature must be finite and positive"
     );
     if temperature == 1.0 {
-        return result.sample_action(rng);
+        return result.sample_move(rng);
     }
 
     let exponent = 1.0_f64 / f64::from(temperature);
