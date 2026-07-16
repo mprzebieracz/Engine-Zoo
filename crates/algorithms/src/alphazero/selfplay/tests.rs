@@ -57,7 +57,7 @@ fn temperature_schedule_transitions_to_argmax() {
 fn temperature_sampling_returns_the_sparse_action_id() {
     let result = SearchResult {
         policy: vec![(42, 1.0)],
-        selected_action: 42,
+        selected_move: 42,
         value: 0.0,
     };
     let mut rng = SmallRng::seed_from_u64(7);

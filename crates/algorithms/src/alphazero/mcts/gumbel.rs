@@ -33,7 +33,7 @@ impl<E: EncodedEvaluator> MctsCore<E, Gumbel> {
         game: &G,
         mode: PolicyMode,
         driver: D,
-    ) -> SearchResult
+    ) -> SearchResult<Action>
     where
         G: Game,
         D: SearchDriver<G>,
@@ -41,7 +41,7 @@ impl<E: EncodedEvaluator> MctsCore<E, Gumbel> {
         if game.is_terminal() {
             return SearchResult {
                 policy: Vec::new(),
-                selected_action: 0,
+                selected_move: 0,
                 value: game.reward(),
             };
         }
@@ -68,12 +68,12 @@ impl<E: EncodedEvaluator> MctsCore<E, Gumbel> {
             0.0
         };
         let winner = self.run_gumbel(game, root_value, gumbel_scale, driver);
-        let selected_action = self.nodes[winner as usize].action_from_parent;
+        let selected_move = self.nodes[winner as usize].action_from_parent;
         let policy = self.root_gumbel_policy(root_value);
 
         SearchResult {
             policy,
-            selected_action,
+            selected_move,
             value: if self.nodes[0].visits > 0 {
                 self.nodes[0].q()
             }

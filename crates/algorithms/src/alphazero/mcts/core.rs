@@ -261,21 +261,29 @@ impl<E: EncodedEvaluator> Mcts<E> {
         }
     }
 
-    pub fn search<G: Game>(&mut self, game: &G) -> SearchResult {
+    pub fn search<G: Game>(&mut self, game: &G) -> SearchResult<Action> {
         self.search_with_mode(game, PolicyMode::Explore)
     }
 
     /// Runs a search with root exploration enabled or disabled according to
     /// `mode`. PUCT uses Dirichlet noise only in `Explore`; Gumbel search uses
     /// Gumbel noise only in `Explore`.
-    pub fn search_with_mode<G: Game>(&mut self, game: &G, mode: PolicyMode) -> SearchResult {
+    pub fn search_with_mode<G: Game>(
+        &mut self,
+        game: &G,
+        mode: PolicyMode,
+    ) -> SearchResult<Action> {
         match &mut self.inner {
             MctsKind::Puct(core) => core.search_inner(game, mode, StandardSearch),
             MctsKind::Gumbel(core) => core.search_inner(game, mode, StandardSearch),
         }
     }
 
-    pub fn search_with_repetitions<G, F>(&mut self, game: &G, root_repetitions: F) -> SearchResult
+    pub fn search_with_repetitions<G, F>(
+        &mut self,
+        game: &G,
+        root_repetitions: F,
+    ) -> SearchResult<Action>
     where
         G: RepetitionGame,
         F: Fn(u64) -> u8 + Copy,
@@ -288,7 +296,7 @@ impl<E: EncodedEvaluator> Mcts<E> {
         game: &G,
         root_repetitions: F,
         mode: PolicyMode,
-    ) -> SearchResult
+    ) -> SearchResult<Action>
     where
         G: RepetitionGame,
         F: Fn(u64) -> u8 + Copy,
