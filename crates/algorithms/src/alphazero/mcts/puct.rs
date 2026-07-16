@@ -7,7 +7,7 @@ use engine_core::game::{Action, Game};
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Puct;
 
-impl<E: EncodedEvaluator> MctsCore<E, Puct> {
+impl<E: EncodedEvaluator> MctsCore<E, Puct, Action, Vec<u64>> {
     pub(super) fn search_inner<G, D>(
         &mut self,
         game: &G,

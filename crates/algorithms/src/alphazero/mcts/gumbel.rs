@@ -20,7 +20,7 @@ impl Gumbel {
     const EXPLORATION_SCALE: f32 = 1.0;
 }
 
-impl<E: EncodedEvaluator> MctsCore<E, Gumbel> {
+impl<E: EncodedEvaluator> MctsCore<E, Gumbel, Action, Vec<u64>> {
     fn clear_tree(&mut self) {
         self.nodes.clear();
         self.variant.root_actions.clear();
