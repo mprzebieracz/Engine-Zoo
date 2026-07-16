@@ -9,7 +9,7 @@ use algorithms::alphazero::{
     SelfPlayConfig, SelfPlayStats, Transition,
 };
 use engine_core::game::Game;
-use games::{ChessAzGame, ChessAzState, ChessGame};
+use games::{ChessAzGame, ChessGame, ChessHistoryState};
 use rand::Rng;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -246,7 +246,7 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
         if should_stop() {
             return None;
         }
-        let mut encoded = vec![0.0; ChessAzState::<HISTORY>::state_size()];
+        let mut encoded = vec![0.0; ChessHistoryState::<HISTORY>::state_size()];
         let search_state = game.search_state();
         search_state.encode_state(&mut encoded);
 

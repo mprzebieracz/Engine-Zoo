@@ -1,14 +1,13 @@
 use super::action::{decode_v1_action, encode_v1_action};
-use super::az::ChessAzState;
+use super::az::{ChessHistoryState, HistoryFrame};
 use super::legacy::{self, ChessLegacyState};
 use super::notation;
 use super::position::{ChessPosition, Status};
-use super::zobrist::ZobristBuildHasher;
+use super::repetition::RepetitionTracker;
 use crate::setup::ChessSetup;
-use chess::{Board, BoardStatus, Color, MoveGen};
+use chess::{Board, BoardStatus, ChessMove, Color, MoveGen};
 use engine_core::game::{Action, Game, TensorDim};
 use engine_core::notation::GameNotation;
-use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -16,7 +15,8 @@ use std::str::FromStr;
 pub struct ChessGame {
     pub(super) pos: ChessPosition,
     /// Zobrist hash occurrence counts since the last irreversible move.
-    pub(super) position_counts: HashMap<u64, u8, ZobristBuildHasher>,
+    pub(super) repetitions: RepetitionTracker,
+    pub(super) history: [Option<HistoryFrame>; 8],
 }
 
 impl ChessGame {
@@ -29,7 +29,7 @@ impl ChessGame {
             let mv = notation::ChessUciNotation
                 .parse_move(&game.pos, mv)
                 .ok_or_else(|| anyhow::anyhow!("illegal chess move {mv}"))?;
-            game.play_native(mv);
+            game.play(mv);
         }
         Ok(game)
     }
@@ -45,15 +45,21 @@ impl ChessGame {
         ChessLegacyState(self.pos)
     }
 
-    /// Starts a v2 AlphaZero state at this game's current position.
-    ///
-    /// `ChessGame` deliberately keeps repetition counts rather than an
-    /// unbounded position list, so a state constructed mid-game has no prior
-    /// feature frames. Self-play should carry `ChessAzState` forward instead.
-    pub fn az_state<const HISTORY: usize>(&self) -> ChessAzState<HISTORY> {
-        let mut state = ChessAzState::new(self.pos);
-        state.set_repetitions_before_current(self.repetitions_before_current(self.pos.hash()));
+    /// Returns the latest real game frames for neural evaluation.
+    pub fn history_state<const HISTORY: usize>(&self) -> ChessHistoryState<HISTORY> {
+        let mut state = ChessHistoryState::new(self.pos);
+        state.frames.copy_from_slice(&self.history[..HISTORY]);
         state
+    }
+
+    pub fn position_state(&self) -> ChessPosition {
+        self.pos
+    }
+    pub fn repetition_context(&self) -> ChessRepetitionContext<'_> {
+        ChessRepetitionContext {
+            tracker: &self.repetitions,
+            root_hash: self.pos.hash(),
+        }
     }
 
     pub fn san_for_action(&self, action: Action) -> String {
@@ -66,13 +72,7 @@ impl ChessGame {
 
     /// Number of occurrences before an explicitly cached search root.
     pub fn repetitions_before_root(&self, hash: u64, root_hash: u64) -> u8 {
-        let count = self.position_counts.get(&hash).copied().unwrap_or(0);
-        if hash == root_hash {
-            count.saturating_sub(1)
-        }
-        else {
-            count
-        }
+        self.repetitions.root_count(hash, root_hash)
     }
 
     pub fn from_fen(fen: &str) -> anyhow::Result<Self> {
@@ -113,40 +113,59 @@ impl ChessGame {
                 status,
                 halfmove_clock,
             },
-            position_counts: HashMap::with_capacity_and_hasher(16, ZobristBuildHasher::default()),
+            repetitions: RepetitionTracker::new(board.get_hash()),
+            history: [None; 8],
         };
-        game.record_position();
+        game.history[0] = Some(HistoryFrame {
+            position: game.pos,
+            repetitions_before: 0,
+        });
         Ok(game)
     }
 
     pub(super) fn record_position(&mut self) {
-        let count = self.position_counts.entry(self.pos.hash()).or_insert(0);
-        *count += 1;
-        if *count >= 3 {
+        let count = self.repetitions.record(self.pos.hash());
+        if count >= 3 {
             self.pos.status = Status::DrawRepetition;
         }
     }
 
     fn after_irreversible_move(&mut self) {
-        self.position_counts.clear();
-        self.record_position();
+        self.repetitions.reset(self.pos.hash());
     }
 
     fn after_reversible_move(&mut self) {
         self.record_position();
     }
 
-    fn play_native(&mut self, mv: chess::ChessMove) {
+    pub fn play(&mut self, mv: ChessMove) {
+        assert!(self.pos.board.legal(mv), "illegal chess move {mv}");
         let effect = self.pos.play_with_effect(mv);
-        if self.pos.is_terminal() {
-            return;
-        }
         if effect.is_irreversible() {
             self.after_irreversible_move();
         }
         else {
             self.after_reversible_move();
         }
+        self.history.rotate_right(1);
+        self.history[0] = Some(HistoryFrame {
+            position: self.pos,
+            repetitions_before: self
+                .repetitions
+                .current_count(self.pos.hash())
+                .saturating_sub(1),
+        });
+    }
+}
+
+pub struct ChessRepetitionContext<'a> {
+    tracker: &'a RepetitionTracker,
+    root_hash: u64,
+}
+
+impl ChessRepetitionContext<'_> {
+    pub fn occurrences_before_root(&self, hash: u64) -> u8 {
+        self.tracker.root_count(hash, self.root_hash)
     }
 }
 
@@ -154,9 +173,13 @@ impl Default for ChessGame {
     fn default() -> Self {
         let mut game = ChessGame {
             pos: ChessPosition::default(),
-            position_counts: HashMap::with_capacity_and_hasher(16, ZobristBuildHasher::default()),
+            repetitions: RepetitionTracker::new(ChessPosition::default().hash()),
+            history: [None; 8],
         };
-        game.record_position();
+        game.history[0] = Some(HistoryFrame {
+            position: game.pos,
+            repetitions_before: 0,
+        });
         game
     }
 }
@@ -171,7 +194,7 @@ impl Game for ChessGame {
     }
 
     fn step(&mut self, action: Action) {
-        self.play_native(decode_v1_action(action));
+        self.play(decode_v1_action(action));
     }
 
     fn is_terminal(&self) -> bool {
