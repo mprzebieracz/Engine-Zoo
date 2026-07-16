@@ -56,6 +56,16 @@ impl<const HISTORY: usize> ChessHistoryState<HISTORY> {
         &self.current().position.board
     }
 
+    pub fn for_each_frame(&self, mut f: impl FnMut(usize, Option<ChessPosition>, u8)) {
+        for (index, frame) in self.frames.iter().enumerate() {
+            f(
+                index,
+                frame.map(|frame| frame.position),
+                frame.map_or(0, |frame| frame.repetitions_before),
+            );
+        }
+    }
+
     pub(super) fn set_repetitions_before_current(&mut self, count: u8) {
         self.frames[0].as_mut().unwrap().repetitions_before = count;
     }

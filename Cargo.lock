@@ -33,6 +33,7 @@ name = "algorithms"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chess",
  "engine_core",
  "games",
  "rand 0.9.4",
