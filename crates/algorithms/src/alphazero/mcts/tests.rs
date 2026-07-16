@@ -33,6 +33,16 @@ fn search_result_supports_native_move_types() {
 }
 
 #[test]
+fn node_storage_accepts_non_legacy_move_types() {
+    let node = super::Node::new(None, TestMove::Left, 0, 0.5, 0.0, false, 0.0);
+    assert_eq!(node.action_from_parent, TestMove::Left);
+    assert_eq!(
+        std::mem::size_of_val(&node.action_from_parent),
+        std::mem::size_of::<TestMove>()
+    );
+}
+
+#[test]
 fn generic_cache_and_policy_keep_native_move_order() {
     let table = EvalTable::new(1);
     table.insert(

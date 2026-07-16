@@ -68,7 +68,7 @@ pub(super) enum MctsKind<E: EncodedEvaluator> {
 pub(super) struct MctsCore<E: EncodedEvaluator, V> {
     pub(super) evaluator: E,
     pub(super) cfg: CoreConfig,
-    pub(super) nodes: Vec<Node>,
+    pub(super) nodes: Vec<Node<Action>>,
     pub(super) batch: EncodedEvalBatch,
     pub(super) policy_buf: Vec<(Action, f32, f32)>,
     pub(super) repetition_path: Vec<u64>,

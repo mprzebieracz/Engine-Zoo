@@ -210,13 +210,13 @@ impl RootQTransform {
 /// contiguously, so a node only needs the range
 /// `first_child .. first_child + num_children`. All nodes live in one `Vec`
 /// arena, indexed by `u32` and cleared (not freed) between searches.
-struct Node {
+struct Node<M> {
     parent: Option<u32>,
     hash: u64,
     repetitions_before_current: u8,
     repetition_cached: bool,
     first_child: u32,
-    action_from_parent: Action,
+    action_from_parent: M,
     visits: u32,
     virtual_loss_count: u32,
     value_sum: f32,
@@ -228,10 +228,10 @@ struct Node {
     terminal: bool,
 }
 
-impl Node {
+impl<M> Node<M> {
     fn new(
         parent: Option<u32>,
-        action_from_parent: Action,
+        action_from_parent: M,
         hash: u64,
         prior: f32,
         logit: f32,
