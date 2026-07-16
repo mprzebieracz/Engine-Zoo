@@ -1,7 +1,25 @@
 //! Standard Algebraic Notation and reusable PGN movetext formatting.
 
 use chess::{Board, BoardStatus, ChessMove, MoveGen, Piece, Square};
+use engine_core::notation::GameNotation;
 use std::fmt::Write;
+use std::str::FromStr;
+
+use super::position::ChessPosition;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChessUciNotation;
+
+impl GameNotation<ChessPosition> for ChessUciNotation {
+    fn parse_move(&self, state: &ChessPosition, text: &str) -> Option<ChessMove> {
+        let mv = ChessMove::from_str(text.trim()).ok()?;
+        state.board.legal(mv).then_some(mv)
+    }
+
+    fn format_move(&self, _state: &ChessPosition, mv: ChessMove) -> String {
+        mv.to_string()
+    }
+}
 
 /// Formats a legal move as SAN. Invalid moves fall back to UCI notation.
 pub fn san(board: &Board, mv: ChessMove) -> String {
@@ -150,6 +168,14 @@ fn rank_char(square: Square) -> char {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    #[test]
+    fn uci_notation_parses_and_formats_legal_moves() {
+        let position = ChessPosition::default();
+        let mv = ChessUciNotation.parse_move(&position, " e2e4 ").unwrap();
+        assert_eq!(ChessUciNotation.format_move(&position, mv), "e2e4");
+        assert_eq!(ChessUciNotation.parse_move(&position, "e2e5"), None);
+    }
 
     fn san_at(fen: &str, mv: &str) -> String {
         let board = Board::from_str(fen).unwrap();

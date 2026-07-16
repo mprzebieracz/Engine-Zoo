@@ -1,5 +1,7 @@
 use crate::setup::Connect4Setup;
+pub mod notation;
 use engine_core::game::{Action, Game, GameState, TensorDim, TerminalValue};
+use engine_core::notation::GameNotation;
 use std::fmt;
 
 const ROWS: usize = 6;
@@ -97,11 +99,14 @@ impl Connect4 {
     pub fn from_moves(moves: &[Action]) -> anyhow::Result<Self> {
         let mut game = Connect4::default();
         for &action in moves {
-            anyhow::ensure!(
-                game.parse_move(&action.to_string()).is_some(),
-                "illegal connect4 move {action}"
-            );
-            game.step(action);
+            let Some(mv) = u8::try_from(action)
+                .ok()
+                .and_then(Connect4Move::new)
+                .filter(|&mv| game.legal_moves().any(|legal| legal == mv))
+            else {
+                anyhow::bail!("illegal connect4 move {action}");
+            };
+            GameState::play(&mut game, mv);
         }
         Ok(game)
     }
@@ -229,13 +234,17 @@ impl Game for Connect4 {
     }
 
     fn parse_move(&self, s: &str) -> Option<Action> {
-        let col: usize = s.trim().parse().ok()?;
-        (col < COLS && self.column_playable(col) && self.status == Status::Ongoing)
-            .then_some(col as Action)
+        notation::Connect4Notation
+            .parse_move(self, s)
+            .map(|mv| mv.column() as Action)
     }
 
     fn format_action(&self, action: Action) -> String {
-        action.to_string()
+        notation::Connect4Notation.format_move(
+            self,
+            Connect4Move::try_from(u8::try_from(action).expect("illegal Connect Four action"))
+                .expect("illegal Connect Four action"),
+        )
     }
 }
 

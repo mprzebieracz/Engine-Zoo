@@ -1,10 +1,11 @@
+use super::notation;
 use super::position::ChessPosition;
 use super::{decode_v1_action, encode_v1_action};
-use chess::{ChessMove, Color, MoveGen, Piece};
+use chess::{Color, MoveGen, Piece};
 use engine_core::game::{Action, Game, TensorDim};
+use engine_core::notation::GameNotation;
 use engine_core::rules::RepetitionGame;
 use std::fmt;
-use std::str::FromStr;
 
 const PIECES: [Piece; 6] = [
     Piece::Pawn,
@@ -88,12 +89,13 @@ impl Game for ChessLegacyState {
     }
 
     fn parse_move(&self, text: &str) -> Option<Action> {
-        let mv = ChessMove::from_str(text.trim()).ok()?;
-        self.0.board.legal(mv).then(|| encode_v1_action(mv))
+        notation::ChessUciNotation
+            .parse_move(&self.0, text)
+            .map(encode_v1_action)
     }
 
     fn format_action(&self, action: Action) -> String {
-        decode_v1_action(action).to_string()
+        notation::ChessUciNotation.format_move(&self.0, decode_v1_action(action))
     }
 }
 

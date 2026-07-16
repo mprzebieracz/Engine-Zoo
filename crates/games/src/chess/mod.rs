@@ -17,6 +17,7 @@ pub use az::ChessAzState;
 pub use az_game::ChessAzGame;
 pub use game::ChessGame;
 pub use legacy::ChessLegacyState;
+pub use notation::ChessUciNotation;
 pub use position::ChessPosition;
 #[cfg(test)]
 use position::Status;

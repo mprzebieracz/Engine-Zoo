@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod game;
+pub mod notation;
 pub mod rules;
 
 pub use agent::{Agent, PolicyMode};

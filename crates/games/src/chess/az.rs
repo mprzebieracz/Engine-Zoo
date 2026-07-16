@@ -1,10 +1,11 @@
 use super::action::{decode_v2_action, encode_v2_action, square_to_az_cell, AZ_ACTION_SIZE};
+use super::notation;
 use super::position::ChessPosition;
 use chess::{Board, ChessMove, Color, MoveGen, Piece};
 use engine_core::game::{Action, Game, GameState, TensorDim, TerminalValue};
+use engine_core::notation::GameNotation;
 use engine_core::rules::RepetitionGame;
 use std::fmt;
-use std::str::FromStr;
 
 const PIECES: [Piece; 6] = [
     Piece::Pawn,
@@ -164,15 +165,14 @@ impl<const HISTORY: usize> Game for ChessAzState<HISTORY> {
     }
 
     fn parse_move(&self, s: &str) -> Option<Action> {
-        let mv = ChessMove::from_str(s.trim()).ok()?;
-        self.board()
-            .legal(mv)
-            .then(|| encode_v2_action(self.board(), mv))
+        notation::ChessUciNotation
+            .parse_move(&self.current().position, s)
+            .map(|mv| encode_v2_action(self.board(), mv))
     }
 
     fn format_action(&self, action: Action) -> String {
         decode_v2_action(self.board(), action)
-            .map(|mv| mv.to_string())
+            .map(|mv| notation::ChessUciNotation.format_move(&self.current().position, mv))
             .unwrap_or_else(|error| error.to_string())
     }
 }

@@ -5,8 +5,9 @@ use super::notation;
 use super::position::{ChessPosition, Status};
 use super::zobrist::ZobristBuildHasher;
 use crate::setup::ChessSetup;
-use chess::{Board, BoardStatus, ChessMove, Color, MoveGen};
+use chess::{Board, BoardStatus, Color, MoveGen};
 use engine_core::game::{Action, Game, TensorDim};
+use engine_core::notation::GameNotation;
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
@@ -25,10 +26,10 @@ impl ChessGame {
             None => Self::default(),
         };
         for mv in &setup.moves {
-            let action = game
-                .parse_move(mv)
+            let mv = notation::ChessUciNotation
+                .parse_move(&game.pos, mv)
                 .ok_or_else(|| anyhow::anyhow!("illegal chess move {mv}"))?;
-            game.step(action);
+            game.play_native(mv);
         }
         Ok(game)
     }
@@ -134,6 +135,19 @@ impl ChessGame {
     fn after_reversible_move(&mut self) {
         self.record_position();
     }
+
+    fn play_native(&mut self, mv: chess::ChessMove) {
+        let effect = self.pos.play_with_effect(mv);
+        if self.pos.is_terminal() {
+            return;
+        }
+        if effect.is_irreversible() {
+            self.after_irreversible_move();
+        }
+        else {
+            self.after_reversible_move();
+        }
+    }
 }
 
 impl Default for ChessGame {
@@ -157,19 +171,7 @@ impl Game for ChessGame {
     }
 
     fn step(&mut self, action: Action) {
-        let irreversible = self
-            .pos
-            .play_with_effect(decode_v1_action(action))
-            .is_irreversible();
-        if self.pos.is_terminal() {
-            return;
-        }
-        if irreversible {
-            self.after_irreversible_move();
-        }
-        else {
-            self.after_reversible_move();
-        }
+        self.play_native(decode_v1_action(action));
     }
 
     fn is_terminal(&self) -> bool {
@@ -185,12 +187,13 @@ impl Game for ChessGame {
     }
 
     fn parse_move(&self, s: &str) -> Option<Action> {
-        let mv = ChessMove::from_str(s.trim()).ok()?;
-        self.pos.board.legal(mv).then(|| encode_v1_action(mv))
+        notation::ChessUciNotation
+            .parse_move(&self.pos, s)
+            .map(encode_v1_action)
     }
 
     fn format_action(&self, action: Action) -> String {
-        decode_v1_action(action).to_string()
+        notation::ChessUciNotation.format_move(&self.pos, decode_v1_action(action))
     }
 }
 
