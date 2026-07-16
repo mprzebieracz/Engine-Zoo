@@ -1,4 +1,4 @@
-use super::evaluator::{EvalBatch, Evaluation, Evaluator};
+use super::evaluator::{EncodedEvalBatch, EncodedEvaluator, Evaluation};
 use super::network::{NetConfig, Network, NetworkConfig};
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
@@ -78,12 +78,12 @@ impl BatcherStats {
 }
 
 struct Task {
-    batch: EvalBatch,
+    batch: EncodedEvalBatch,
     tx: SyncSender<EvalResponse>,
 }
 
 struct EvalResponse {
-    batch: EvalBatch,
+    batch: EncodedEvalBatch,
     evaluations: Vec<Evaluation>,
 }
 
@@ -265,8 +265,8 @@ impl Drop for Batcher {
     }
 }
 
-impl Evaluator for BatcherClient {
-    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation> {
+impl EncodedEvaluator for BatcherClient {
+    fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
         let n = batch.len();
         if n == 0 {
             return Vec::new();

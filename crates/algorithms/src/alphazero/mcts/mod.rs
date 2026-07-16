@@ -8,9 +8,9 @@ mod traversal;
 #[cfg(test)]
 mod tests;
 
-use super::evaluator::Evaluator;
+use super::evaluator::EncodedEvaluator;
 #[cfg(test)]
-use super::evaluator::{EvalBatch, Evaluation};
+use super::evaluator::{EncodedEvalBatch, Evaluation};
 use engine_core::agent::{Agent, PolicyMode};
 use engine_core::game::{Action, Game};
 use rand::distr::weighted::WeightedIndex;
@@ -270,7 +270,7 @@ impl Node {
     }
 }
 
-impl<G: Game, E: Evaluator> Agent<G> for Mcts<E> {
+impl<G: Game, E: EncodedEvaluator> Agent<G> for Mcts<E> {
     fn act_with_mode(&mut self, game: &G, mode: PolicyMode) -> Action {
         let variant = self.config().variant;
         let explore = mode == PolicyMode::Explore;

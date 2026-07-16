@@ -1,4 +1,4 @@
-use super::super::evaluator::Evaluator;
+use super::super::evaluator::EncodedEvaluator;
 use super::core::{LeafBatch, MctsCore, SearchDriver};
 use super::{Node, RootAction, RootQTransform, SearchResult};
 use engine_core::agent::PolicyMode;
@@ -20,7 +20,7 @@ impl Gumbel {
     const EXPLORATION_SCALE: f32 = 1.0;
 }
 
-impl<E: Evaluator> MctsCore<E, Gumbel> {
+impl<E: EncodedEvaluator> MctsCore<E, Gumbel> {
     fn clear_tree(&mut self) {
         self.nodes.clear();
         self.variant.root_actions.clear();

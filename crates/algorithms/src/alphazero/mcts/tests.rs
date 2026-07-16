@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-impl<E: Evaluator> Mcts<E> {
+impl<E: EncodedEvaluator> Mcts<E> {
     fn seed_rng(&mut self, seed: u64) {
         match &mut self.inner {
             MctsKind::Puct(core) => core.rng = SmallRng::seed_from_u64(seed),
@@ -340,8 +340,8 @@ impl Game for TerminalGame {
 /// Uniform policy, zero value: MCTS degenerates to a plain PUCT tree search.
 struct UniformEvaluator;
 
-impl Evaluator for UniformEvaluator {
-    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation> {
+impl EncodedEvaluator for UniformEvaluator {
+    fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
         (0..batch.len())
             .map(|i| {
                 let n = (batch.offsets[i + 1] - batch.offsets[i]) as usize;
@@ -358,8 +358,8 @@ struct CountingEvaluator {
     calls: Arc<AtomicUsize>,
 }
 
-impl Evaluator for CountingEvaluator {
-    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation> {
+impl EncodedEvaluator for CountingEvaluator {
+    fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         UniformEvaluator.evaluate(batch)
     }
@@ -374,8 +374,8 @@ struct FeatureRecordingEvaluator {
     encoded: Arc<Mutex<Vec<f32>>>,
 }
 
-impl Evaluator for FeatureRecordingEvaluator {
-    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation> {
+impl EncodedEvaluator for FeatureRecordingEvaluator {
+    fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
         self.encoded.lock().unwrap().extend(
             batch
                 .states
@@ -402,13 +402,14 @@ impl RecordingEvaluator {
     }
 }
 
-impl Evaluator for RecordingEvaluator {
-    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation> {
+impl EncodedEvaluator for RecordingEvaluator {
+    fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
         self.calls.lock().unwrap().push(batch.len());
         (0..batch.len())
             .map(|i| {
-                let legal = &batch.legal[batch.offsets[i] as usize..batch.offsets[i + 1] as usize];
-                let logits = legal
+                let legal_actions =
+                    &batch.legal_actions[batch.offsets[i] as usize..batch.offsets[i + 1] as usize];
+                let logits = legal_actions
                     .iter()
                     .map(|&a| {
                         if self.favor_action_zero && a == 0 {
@@ -427,16 +428,16 @@ impl Evaluator for RecordingEvaluator {
 
 struct EmptyResultEvaluator;
 
-impl Evaluator for EmptyResultEvaluator {
-    fn evaluate(&mut self, _batch: &mut EvalBatch) -> Vec<Evaluation> {
+impl EncodedEvaluator for EmptyResultEvaluator {
+    fn evaluate(&mut self, _batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
         Vec::new()
     }
 }
 
 struct BadLogitEvaluator;
 
-impl Evaluator for BadLogitEvaluator {
-    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation> {
+impl EncodedEvaluator for BadLogitEvaluator {
+    fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
         (0..batch.len())
             .map(|_| Evaluation {
                 logits: Vec::new(),

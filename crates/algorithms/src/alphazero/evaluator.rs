@@ -5,20 +5,20 @@ use engine_core::game::Action;
 /// they travel with the request rather than being re-derived by the
 /// evaluator; a network evaluator then only returns logits for the actions
 /// that will actually be read.
-pub struct EvalBatch {
+pub struct EncodedEvalBatch {
     /// `n * state_size` floats, states back to back.
     pub states: Vec<f32>,
     /// Legal action ids for all states, flattened.
-    pub legal: Vec<Action>,
-    /// `n + 1` offsets into `legal`.
+    pub legal_actions: Vec<Action>,
+    /// `n + 1` offsets into `legal_actions`.
     pub offsets: Vec<u32>,
 }
 
-impl EvalBatch {
+impl EncodedEvalBatch {
     pub fn new() -> Self {
-        EvalBatch {
+        EncodedEvalBatch {
             states: Vec::new(),
-            legal: Vec::new(),
+            legal_actions: Vec::new(),
             offsets: vec![0],
         }
     }
@@ -33,12 +33,12 @@ impl EvalBatch {
 
     pub fn clear(&mut self) {
         self.states.clear();
-        self.legal.clear();
+        self.legal_actions.clear();
         self.offsets.truncate(1);
     }
 }
 
-impl Default for EvalBatch {
+impl Default for EncodedEvalBatch {
     fn default() -> Self {
         Self::new()
     }
@@ -54,9 +54,9 @@ pub struct Evaluation {
 
 /// Position evaluator used by MCTS: policy logits over legal actions plus a
 /// value in [-1, 1] from the side to move's perspective.
-pub trait Evaluator: Send {
+pub trait EncodedEvaluator: Send {
     /// Evaluates `batch` while allowing implementations to temporarily take
     /// ownership of its backing allocations. Implementations must restore a
     /// reusable batch before returning.
-    fn evaluate(&mut self, batch: &mut EvalBatch) -> Vec<Evaluation>;
+    fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation>;
 }

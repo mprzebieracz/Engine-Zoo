@@ -1,4 +1,4 @@
-use super::super::evaluator::Evaluator;
+use super::super::evaluator::EncodedEvaluator;
 use super::core::{LeafBatch, MctsCore, SearchDriver};
 use super::{Node, SearchResult};
 use engine_core::agent::PolicyMode;
@@ -7,7 +7,7 @@ use engine_core::game::{Action, Game};
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Puct;
 
-impl<E: Evaluator> MctsCore<E, Puct> {
+impl<E: EncodedEvaluator> MctsCore<E, Puct> {
     pub(super) fn search_inner<G, D>(
         &mut self,
         game: &G,

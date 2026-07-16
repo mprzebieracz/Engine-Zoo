@@ -1,4 +1,4 @@
-use super::super::evaluator::Evaluator;
+use super::super::evaluator::EncodedEvaluator;
 use super::core::{LeafBatch, MctsCore, PendingBackup, PendingLeaf, PendingResult, SearchDriver};
 use engine_core::game::Game;
 use engine_core::rules::RepetitionGame;
@@ -9,7 +9,7 @@ fn find_leaf_result(result_by_node: &[(u32, usize)], node: u32) -> Option<usize>
         .find_map(|&(candidate, idx)| (candidate == node).then_some(idx))
 }
 
-impl<E: Evaluator, V> MctsCore<E, V> {
+impl<E: EncodedEvaluator, V> MctsCore<E, V> {
     pub(super) fn descend<G: Game>(&mut self, game: &G, mut node: u32) -> (u32, G) {
         let mut current = game.clone();
 
