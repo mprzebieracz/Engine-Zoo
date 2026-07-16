@@ -72,7 +72,7 @@ pub(super) struct MctsCore<E: EncodedEvaluator, V> {
     pub(super) batch: EncodedEvalBatch,
     pub(super) policy_buf: Vec<(Action, f32, f32)>,
     pub(super) repetition_path: Vec<u64>,
-    pub(super) eval_cache: Option<Arc<EvalTable>>,
+    pub(super) eval_cache: Option<Arc<EvalTable<Action>>>,
     pub(super) rng: SmallRng,
     pub(super) variant: V,
 }
@@ -222,7 +222,7 @@ impl<E: EncodedEvaluator> Mcts<E> {
         Mcts { inner }
     }
 
-    pub fn with_eval_cache(mut self, cache: Arc<EvalTable>) -> Self {
+    pub fn with_eval_cache(mut self, cache: Arc<EvalTable<Action>>) -> Self {
         match &mut self.inner {
             MctsKind::Puct(core) => core.set_eval_cache(cache),
             MctsKind::Gumbel(core) => core.set_eval_cache(cache),
@@ -331,7 +331,7 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V> {
         self.cfg.into_mcts(variant)
     }
 
-    fn set_eval_cache(&mut self, cache: Arc<EvalTable>) {
+    fn set_eval_cache(&mut self, cache: Arc<EvalTable<Action>>) {
         self.eval_cache = Some(cache);
     }
 

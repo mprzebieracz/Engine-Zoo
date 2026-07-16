@@ -32,6 +32,46 @@ fn search_result_supports_native_move_types() {
     }
 }
 
+#[test]
+fn generic_cache_and_policy_keep_native_move_order() {
+    let table = EvalTable::new(1);
+    table.insert(
+        7,
+        CachedEvaluation {
+            legal: vec![TestMove::Right, TestMove::Left],
+            eval: Evaluation {
+                logits: vec![2.0, 1.0],
+                value: 0.0,
+            },
+        },
+    );
+    assert_eq!(
+        table.get(7).unwrap().legal,
+        vec![TestMove::Right, TestMove::Left]
+    );
+    assert_eq!(table.stats().hits, 1);
+
+    let mut policy = Vec::new();
+    let mut rng = SmallRng::seed_from_u64(1);
+    super::evaluation::build_policy(
+        &mut policy,
+        &[TestMove::Right, TestMove::Left],
+        &Evaluation {
+            logits: vec![2.0, 1.0],
+            value: 0.0,
+        },
+        false,
+        0.0,
+        1.0,
+        &mut rng,
+    );
+    assert_eq!(
+        policy.iter().map(|entry| entry.0).collect::<Vec<_>>(),
+        vec![TestMove::Right, TestMove::Left]
+    );
+    assert!((policy.iter().map(|entry| entry.1).sum::<f32>() - 1.0).abs() < 1e-6);
+}
+
 impl<E: EncodedEvaluator> Mcts<E> {
     fn seed_rng(&mut self, seed: u64) {
         match &mut self.inner {

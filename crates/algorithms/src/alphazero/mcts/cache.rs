@@ -1,26 +1,25 @@
 use super::super::evaluator::Evaluation;
-use engine_core::game::Action;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
-pub(crate) struct CachedEvaluation {
-    pub(super) legal: Vec<Action>,
+pub(crate) struct CachedEvaluation<M> {
+    pub(super) legal: Vec<M>,
     pub(super) eval: Evaluation,
 }
 
-struct EvalTableEntry {
+struct EvalTableEntry<M> {
     hash: u64,
-    cached: CachedEvaluation,
+    cached: CachedEvaluation<M>,
 }
 
-pub struct EvalTable {
-    slots: Box<[RwLock<Option<EvalTableEntry>>]>,
+pub struct EvalTable<M> {
+    slots: Box<[RwLock<Option<EvalTableEntry<M>>>]>,
     hits: AtomicU64,
     misses: AtomicU64,
     inserts: AtomicU64,
 }
 
-impl EvalTable {
+impl<M> EvalTable<M> {
     pub fn new(entries: usize) -> Self {
         let slots = (0..entries.max(1)).map(|_| RwLock::new(None)).collect();
         EvalTable {
@@ -31,23 +30,7 @@ impl EvalTable {
         }
     }
 
-    pub(super) fn get(&self, hash: u64) -> Option<CachedEvaluation> {
-        let slot = &self.slots[hash as usize % self.slots.len()];
-        let guard = slot.read().unwrap();
-        let hit = guard
-            .as_ref()
-            .filter(|entry| entry.hash == hash)
-            .map(|entry| entry.cached.clone());
-        if hit.is_some() {
-            self.hits.fetch_add(1, Ordering::Relaxed);
-        }
-        else {
-            self.misses.fetch_add(1, Ordering::Relaxed);
-        }
-        hit
-    }
-
-    pub(super) fn insert(&self, hash: u64, cached: CachedEvaluation) {
+    pub(super) fn insert(&self, hash: u64, cached: CachedEvaluation<M>) {
         let slot = &self.slots[hash as usize % self.slots.len()];
         *slot.write().unwrap() = Some(EvalTableEntry { hash, cached });
         self.inserts.fetch_add(1, Ordering::Relaxed);
@@ -62,6 +45,24 @@ impl EvalTable {
     }
 }
 
+impl<M: Clone> EvalTable<M> {
+    pub(super) fn get(&self, hash: u64) -> Option<CachedEvaluation<M>> {
+        let slot = &self.slots[hash as usize % self.slots.len()];
+        let guard = slot.read().unwrap();
+        let hit = guard
+            .as_ref()
+            .filter(|entry| entry.hash == hash)
+            .map(|entry| entry.cached.clone());
+        if hit.is_some() {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        }
+        else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
+        hit
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EvalTableStats {
     pub hits: u64,
@@ -69,7 +70,7 @@ pub struct EvalTableStats {
     pub inserts: u64,
 }
 
-impl Clone for CachedEvaluation {
+impl<M: Clone> Clone for CachedEvaluation<M> {
     fn clone(&self) -> Self {
         CachedEvaluation {
             legal: self.legal.clone(),
