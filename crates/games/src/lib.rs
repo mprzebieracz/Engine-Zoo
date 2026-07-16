@@ -6,4 +6,4 @@ pub use chess::{
     decode_az_move, encode_az_move, AzActionError, ChessAzGame, ChessAzState, ChessGame,
     ChessLegacyState, AZ_ACTION_SIZE,
 };
-pub use connect4::Connect4;
+pub use connect4::{Connect4, Connect4Move};
