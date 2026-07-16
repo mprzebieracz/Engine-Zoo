@@ -1,4 +1,5 @@
 use super::*;
+use engine_core::game::{GameState, TerminalValue};
 use engine_core::rules::RepetitionGame;
 use std::str::FromStr;
 
@@ -31,6 +32,44 @@ fn from_fen(fen: &str) -> ChessGame {
 fn startpos_has_twenty_moves() {
     let g = ChessGame::default();
     assert_eq!(g.legal_actions().count(), 20);
+}
+
+#[test]
+fn native_chess_states_match_policy_stepping() {
+    let mv = ChessMove::from_str("e2e4").unwrap();
+    let mut position = ChessPosition::initial();
+    let mut az_native = ChessAzState::<4>::initial();
+    let mut az_compat = az_native;
+
+    assert_eq!(position.legal_moves().count(), 20);
+    assert_eq!(az_native.legal_moves().count(), 20);
+    position.play(mv);
+    az_native.play(mv);
+    az_compat.step(encode_v2_action(az_compat.board(), mv));
+
+    assert_eq!(position.hash(), az_native.position().hash());
+    assert_eq!(az_native.position().hash(), az_compat.position().hash());
+    assert_eq!(
+        az_native.position().halfmove_clock(),
+        az_compat.position().halfmove_clock()
+    );
+}
+
+#[test]
+fn native_terminal_values_use_side_to_move_perspective() {
+    let mut checkmate = from_fen("7k/R7/6K1/8/8/8/8/8 w - - 0 1").position();
+    checkmate.play(ChessMove::from_str("a7a8").unwrap());
+    let stalemate = from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1").position();
+    let mut fifty_move = from_fen("k7/8/8/8/8/8/8/K6R w - - 0 1").position();
+    fifty_move.status = Status::DrawFiftyMoveRule;
+    let mut repetition = checkmate;
+    repetition.status = Status::DrawRepetition;
+
+    assert_eq!(checkmate.terminal_value(), Some(TerminalValue::Loss));
+    assert_eq!(stalemate.terminal_value(), Some(TerminalValue::Draw));
+    assert_eq!(fifty_move.terminal_value(), Some(TerminalValue::Draw));
+    assert_eq!(repetition.terminal_value(), Some(TerminalValue::Draw));
+    assert_eq!(ChessPosition::initial().terminal_value(), None);
 }
 
 #[test]

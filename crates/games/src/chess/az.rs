@@ -1,7 +1,7 @@
 use super::action::{decode_v2_action, encode_v2_action, square_to_az_cell, AZ_ACTION_SIZE};
 use super::position::ChessPosition;
 use chess::{Board, ChessMove, Color, MoveGen, Piece};
-use engine_core::game::{Action, Game, TensorDim};
+use engine_core::game::{Action, Game, GameState, TensorDim, TerminalValue};
 use engine_core::rules::RepetitionGame;
 use std::fmt;
 use std::str::FromStr;
@@ -70,6 +70,24 @@ impl<const HISTORY: usize> ChessAzState<HISTORY> {
             .as_mut()
             .expect("current frame always exists")
     }
+
+    fn play_native(&mut self, mv: ChessMove) {
+        assert!(self.board().legal(mv), "illegal chess move {mv}");
+        let mut next = self.current().position;
+        next.play_with_effect(mv);
+        let repetitions_before = self
+            .frames
+            .iter()
+            .flatten()
+            .filter(|frame| frame.position.hash() == next.hash())
+            .count()
+            .min(2) as u8;
+        self.frames.rotate_right(1);
+        self.frames[0] = Some(HistoryFrame {
+            position: next,
+            repetitions_before,
+        });
+    }
 }
 
 fn assert_supported_history<const HISTORY: usize>() {
@@ -97,21 +115,7 @@ impl<const HISTORY: usize> Game for ChessAzState<HISTORY> {
     fn step(&mut self, action: Action) {
         let mv = decode_v2_action(self.board(), action)
             .unwrap_or_else(|error| panic!("invalid v2 chess action: {error}"));
-        assert!(self.board().legal(mv), "illegal v2 chess move {mv}");
-        let mut next = self.current().position;
-        next.play_with_effect(mv);
-        let repetitions_before = self
-            .frames
-            .iter()
-            .flatten()
-            .filter(|frame| frame.position.hash() == next.hash())
-            .count()
-            .min(2) as u8;
-        self.frames.rotate_right(1);
-        self.frames[0] = Some(HistoryFrame {
-            position: next,
-            repetitions_before,
-        });
+        self.play_native(mv);
     }
 
     fn is_terminal(&self) -> bool {
@@ -170,6 +174,26 @@ impl<const HISTORY: usize> Game for ChessAzState<HISTORY> {
         decode_v2_action(self.board(), action)
             .map(|mv| mv.to_string())
             .unwrap_or_else(|error| error.to_string())
+    }
+}
+
+impl<const HISTORY: usize> GameState for ChessAzState<HISTORY> {
+    type Move = ChessMove;
+
+    fn initial() -> Self {
+        Self::default()
+    }
+
+    fn legal_moves(&self) -> impl Iterator<Item = Self::Move> + '_ {
+        MoveGen::new_legal(self.board())
+    }
+
+    fn play(&mut self, mv: Self::Move) {
+        self.play_native(mv);
+    }
+
+    fn terminal_value(&self) -> Option<TerminalValue> {
+        self.current().position.terminal_value()
     }
 }
 
