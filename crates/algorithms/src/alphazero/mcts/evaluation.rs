@@ -1,4 +1,5 @@
 use super::super::evaluator::{EncodedEvaluator, Evaluation};
+use super::super::representation::Action as EncodedAction;
 use super::cache::CachedEvaluation;
 use super::core::MctsCore;
 use super::Node;
@@ -14,7 +15,9 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V> {
         self.batch.states.resize(start + G::state_size(), 0.0);
         game.encode_state(&mut self.batch.states[start..]);
 
-        self.batch.legal_actions.extend(game.legal_actions());
+        self.batch
+            .legal_actions
+            .extend(game.legal_actions().map(EncodedAction::new));
         self.batch
             .offsets
             .push(self.batch.legal_actions.len() as u32);
@@ -47,7 +50,11 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V> {
             expected,
             "evaluator must return one result per input state"
         );
-        legal_per_state.into_iter().zip(results).collect()
+        legal_per_state
+            .into_iter()
+            .map(|actions| actions.into_iter().map(|a| a.as_u32() as Action).collect())
+            .zip(results)
+            .collect()
     }
 
     pub(super) fn evaluate_repetition_position<G: RepetitionGame>(

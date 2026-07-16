@@ -412,7 +412,7 @@ impl EncodedEvaluator for RecordingEvaluator {
                 let logits = legal_actions
                     .iter()
                     .map(|&a| {
-                        if self.favor_action_zero && a == 0 {
+                        if self.favor_action_zero && a.as_u32() == 0 {
                             100.0
                         }
                         else {
