@@ -1,8 +1,10 @@
 use engine_core::GameState;
 
 pub mod chess_v2;
+pub mod compat_v1;
 pub mod connect4;
 pub use chess_v2::ChessAzRepresentation;
+pub use compat_v1::ChessV1Representation;
 pub use connect4::Connect4AzRepresentation;
 
 /// Index into the fixed policy vector of one AlphaZero representation.
