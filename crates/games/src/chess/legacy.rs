@@ -1,5 +1,5 @@
 use super::position::ChessPosition;
-use super::{decode_move, encode_move};
+use super::{decode_v1_action, encode_v1_action};
 use chess::{ChessMove, Color, MoveGen, Piece};
 use engine_core::game::{Action, Game, TensorDim};
 use engine_core::rules::RepetitionGame;
@@ -68,11 +68,11 @@ impl Game for ChessLegacyState {
     const NAME: &'static str = "chess";
 
     fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
-        MoveGen::new_legal(&self.0.board).map(encode_move)
+        MoveGen::new_legal(&self.0.board).map(encode_v1_action)
     }
 
     fn step(&mut self, action: Action) {
-        self.0.step_without_repetition(action);
+        self.0.play_with_effect(decode_v1_action(action));
     }
 
     fn is_terminal(&self) -> bool {
@@ -89,11 +89,11 @@ impl Game for ChessLegacyState {
 
     fn parse_move(&self, text: &str) -> Option<Action> {
         let mv = ChessMove::from_str(text.trim()).ok()?;
-        self.0.board.legal(mv).then(|| encode_move(mv))
+        self.0.board.legal(mv).then(|| encode_v1_action(mv))
     }
 
     fn format_action(&self, action: Action) -> String {
-        decode_move(action).to_string()
+        decode_v1_action(action).to_string()
     }
 }
 

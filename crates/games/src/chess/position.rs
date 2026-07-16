@@ -1,6 +1,4 @@
-use super::action::decode_move;
-use chess::{Board, BoardStatus, Color, File, Piece, Rank, Square};
-use engine_core::game::Action;
+use chess::{Board, BoardStatus, ChessMove, Color, File, Piece, Rank, Square};
 use std::fmt;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -10,6 +8,17 @@ pub(super) enum Status {
     Stalemate,
     DrawRepetition,
     DrawFiftyMoveRule,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct MoveEffect {
+    irreversible: bool,
+}
+
+impl MoveEffect {
+    pub(super) fn is_irreversible(self) -> bool {
+        self.irreversible
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -33,8 +42,7 @@ impl ChessPosition {
         self.status = Status::DrawRepetition;
     }
 
-    pub(super) fn step_without_repetition(&mut self, action: Action) -> bool {
-        let mv = decode_move(action);
+    pub(super) fn play_with_effect(&mut self, mv: ChessMove) -> MoveEffect {
         debug_assert!(self.board.legal(mv), "illegal move {mv} in {}", self.board);
 
         let source = mv.get_source();
@@ -54,23 +62,23 @@ impl ChessPosition {
         self.board = self.board.make_move_new(mv);
         self.ply += 1;
 
-        match self.board.status() {
-            BoardStatus::Checkmate => {
-                self.status = Status::Checkmate;
-                return true;
-            }
-            BoardStatus::Stalemate => {
-                self.status = Status::Stalemate;
-                return true;
-            }
-            BoardStatus::Ongoing => {}
-        }
-
         let castle_rights_changed = castle_rights_before.is_some_and(|(white_cr, black_cr)| {
             self.board.castle_rights(Color::White) != white_cr
                 || self.board.castle_rights(Color::Black) != black_cr
         });
         let irreversible = is_pawn || is_capture || is_en_passant_capture || castle_rights_changed;
+
+        match self.board.status() {
+            BoardStatus::Checkmate => {
+                self.status = Status::Checkmate;
+                return MoveEffect { irreversible };
+            }
+            BoardStatus::Stalemate => {
+                self.status = Status::Stalemate;
+                return MoveEffect { irreversible };
+            }
+            BoardStatus::Ongoing => {}
+        }
 
         if irreversible {
             self.halfmove_clock = 0;
@@ -81,7 +89,7 @@ impl ChessPosition {
                 self.status = Status::DrawFiftyMoveRule;
             }
         }
-        irreversible
+        MoveEffect { irreversible }
     }
 }
 

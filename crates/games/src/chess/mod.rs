@@ -10,7 +10,8 @@ mod position;
 mod zobrist;
 
 pub use action::{
-    decode_az_move, decode_move, encode_az_move, encode_move, AzActionError, AZ_ACTION_SIZE,
+    decode_v1_action, decode_v2_action, encode_v1_action, encode_v2_action, AzActionError,
+    AZ_ACTION_SIZE,
 };
 pub use az::ChessAzState;
 pub use az_game::ChessAzGame;
