@@ -14,7 +14,7 @@ pub(super) fn create_session_inner(
             };
             let (_, cfg) = open_existing_run::<ChessGame>(&state.run_dir)?;
             match cfg.architecture {
-                RunArchitecture::Legacy => LiveSession::Chess(SessionState {
+                RunArchitecture::Legacy => LiveSession::Chess(Box::new(SessionState {
                     id,
                     game: ChessGame::from_setup(&position)?,
                     moves: position.moves.clone(),
@@ -23,7 +23,7 @@ pub(super) fn create_session_inner(
                     human_turn: !req.engine_first,
                     simulations: req.simulations,
                     wait_for_count: req.wait_for_count,
-                }),
+                })),
                 RunArchitecture::ChessAzV2(v2) => {
                     cfg.validate()?;
                     LiveSession::ChessAzV2(Box::new(create_chess_az_v2_session(

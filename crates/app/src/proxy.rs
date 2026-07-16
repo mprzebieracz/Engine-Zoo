@@ -103,7 +103,7 @@ struct AppState {
 }
 
 enum LiveSession {
-    Chess(SessionState<ChessGame>),
+    Chess(Box<SessionState<ChessGame>>),
     ChessAzV2(Box<ChessAzV2Session>),
     Connect4(SessionState<Connect4>),
 }

@@ -1,3 +1,4 @@
+use super::az::HistoryFrame;
 use super::*;
 use engine_core::game::{GameState, TerminalValue};
 use engine_core::rules::RepetitionGame;
@@ -19,12 +20,13 @@ fn from_fen(fen: &str) -> ChessGame {
             status,
             halfmove_clock: 0,
         },
-        position_counts: HashMap::with_capacity_and_hasher(
-            16,
-            zobrist::ZobristBuildHasher::default(),
-        ),
+        repetitions: RepetitionTracker::new(board.get_hash()),
+        history: [None; 8],
     };
-    game.record_position();
+    game.history[0] = Some(HistoryFrame {
+        position: game.pos,
+        repetitions_before: 0,
+    });
     game
 }
 
@@ -38,7 +40,7 @@ fn startpos_has_twenty_moves() {
 fn native_chess_states_match_policy_stepping() {
     let mv = ChessMove::from_str("e2e4").unwrap();
     let mut position = ChessPosition::initial();
-    let mut az_native = ChessAzState::<4>::initial();
+    let mut az_native = ChessHistoryState::<4>::initial();
     let mut az_compat = az_native;
 
     assert_eq!(position.legal_moves().count(), 20);
@@ -173,7 +175,7 @@ fn az_actions_roundtrip_over_random_games_without_collisions() {
 
 #[test]
 fn az_evaluation_cache_key_includes_history_and_clock_features() {
-    let initial = ChessAzState::<4>::default();
+    let initial = ChessHistoryState::<4>::default();
     let mut returned = initial;
     for mv in ["g1f3", "g8f6", "f3g1", "f6g8"] {
         returned.step(returned.parse_move(mv).unwrap());
@@ -235,13 +237,13 @@ fn az_codec_is_color_canonical_and_rejects_invalid_actions() {
 }
 
 #[test]
-fn az_state_shapes_and_history_are_canonical() {
-    assert_eq!(ChessAzState::<1>::STATE_SHAPE, [21, 8, 8]);
-    assert_eq!(ChessAzState::<4>::STATE_SHAPE, [63, 8, 8]);
-    assert_eq!(ChessAzState::<8>::STATE_SHAPE, [119, 8, 8]);
+fn history_state_shapes_and_history_are_canonical() {
+    assert_eq!(ChessHistoryState::<1>::STATE_SHAPE, [21, 8, 8]);
+    assert_eq!(ChessHistoryState::<4>::STATE_SHAPE, [63, 8, 8]);
+    assert_eq!(ChessHistoryState::<8>::STATE_SHAPE, [119, 8, 8]);
 
-    let mut state = ChessGame::default().az_state::<4>();
-    let mut encoded = vec![0.0; ChessAzState::<4>::state_size()];
+    let mut state = ChessGame::default().history_state::<4>();
+    let mut encoded = vec![0.0; ChessHistoryState::<4>::state_size()];
     state.encode_state(&mut encoded);
     assert!(encoded[14 * 64..56 * 64].iter().all(|&value| value == 0.0));
     assert_eq!(encoded[6 * 8], 1.0, "own pawns face north for white");
@@ -254,15 +256,86 @@ fn az_state_shapes_and_history_are_canonical() {
 }
 
 #[test]
-fn az_state_marks_repeated_current_positions() {
-    let mut state = ChessGame::default().az_state::<8>();
+fn history_state_marks_repeated_current_positions() {
+    let mut state = ChessGame::default().history_state::<8>();
     for text in ["b1c3", "b8c6", "c3b1", "c6b8"] {
         state.step(state.parse_move(text).unwrap());
     }
-    let mut encoded = vec![0.0; ChessAzState::<8>::state_size()];
+    let mut encoded = vec![0.0; ChessHistoryState::<8>::state_size()];
     state.encode_state(&mut encoded);
     assert!(encoded[12 * 64..13 * 64].iter().all(|&value| value == 1.0));
     assert!(encoded[13 * 64..14 * 64].iter().all(|&value| value == 0.0));
+}
+
+#[test]
+fn fen_has_only_its_current_real_frame() {
+    let game = ChessGame::from_fen("4k3/8/8/8/8/8/4P3/4K3 w - - 17 42").unwrap();
+    let state = game.history_state::<8>();
+    assert_eq!(state.frames.iter().flatten().count(), 1);
+    assert_eq!(
+        state.frames[0].unwrap().position.hash(),
+        game.position().hash()
+    );
+    assert_eq!(state.frames[0].unwrap().repetitions_before, 0);
+}
+
+#[test]
+fn authoritative_snapshots_support_one_four_and_eight_frames() {
+    let mut game = ChessGame::default();
+    for mv in ["b1c3", "b8c6", "g1f3", "g8f6"] {
+        game.step(game.parse_move(mv).unwrap());
+    }
+
+    let h1 = game.history_state::<1>();
+    let h4 = game.history_state::<4>();
+    let h8 = game.history_state::<8>();
+    assert_eq!(h1.frames.iter().flatten().count(), 1);
+    assert_eq!(h4.frames.iter().flatten().count(), 4);
+    assert_eq!(h8.frames.iter().flatten().count(), 5);
+    assert_eq!(h1.position().hash(), game.position().hash());
+    assert_eq!(h4.position().hash(), game.position().hash());
+    assert_eq!(h8.position().hash(), game.position().hash());
+}
+
+#[test]
+fn irreversible_move_resets_counts_but_retains_real_neural_history() {
+    let mut game = ChessGame::default();
+    game.step(game.parse_move("b1c3").unwrap());
+    let previous_hash = game.position().hash();
+    game.step(game.parse_move("a7a6").unwrap());
+
+    let state = game.history_state::<8>();
+    assert_eq!(state.frames.iter().flatten().count(), 3);
+    assert_eq!(state.frames[1].unwrap().position.hash(), previous_hash);
+    assert_eq!(
+        game.repetition_context()
+            .occurrences_before_root(previous_hash),
+        0
+    );
+    assert_eq!(
+        game.repetition_context()
+            .occurrences_before_root(game.position().hash()),
+        0
+    );
+}
+
+#[test]
+fn authoritative_frames_store_repetition_count_and_terminal_position() {
+    let mut game = ChessGame::default();
+    for mv in [
+        "b1c3", "b8c6", "c3b1", "c6b8", "b1c3", "b8c6", "c3b1", "c6b8",
+    ] {
+        game.step(game.parse_move(mv).unwrap());
+    }
+
+    let state = game.history_state::<8>();
+    assert_eq!(state.frames[0].unwrap().repetitions_before, 2);
+    assert_eq!(state.frames[4].unwrap().repetitions_before, 1);
+    assert_eq!(
+        state.frames[0].unwrap().position.status,
+        Status::DrawRepetition
+    );
+    assert!(game.is_terminal());
 }
 
 #[test]

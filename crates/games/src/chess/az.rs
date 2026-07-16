@@ -25,17 +25,17 @@ const AZ_AUXILIARY_PLANES: usize = 7;
 /// Only 1, 4, and 8 are supported.  The fixed array keeps MCTS child creation
 /// allocation-free; absent positions at the start of a game encode as zero.
 #[derive(Clone, Copy, Debug)]
-pub struct ChessAzState<const HISTORY: usize> {
-    frames: [Option<HistoryFrame>; HISTORY],
+pub struct ChessHistoryState<const HISTORY: usize> {
+    pub(crate) frames: [Option<HistoryFrame>; HISTORY],
 }
 
 #[derive(Clone, Copy, Debug)]
-struct HistoryFrame {
-    position: ChessPosition,
-    repetitions_before: u8,
+pub(crate) struct HistoryFrame {
+    pub(crate) position: ChessPosition,
+    pub(crate) repetitions_before: u8,
 }
 
-impl<const HISTORY: usize> ChessAzState<HISTORY> {
+impl<const HISTORY: usize> ChessHistoryState<HISTORY> {
     pub const INPUT_PLANES: usize = AZ_HISTORY_PLANES * HISTORY + AZ_AUXILIARY_PLANES;
 
     pub fn new(current: ChessPosition) -> Self {
@@ -94,17 +94,17 @@ impl<const HISTORY: usize> ChessAzState<HISTORY> {
 fn assert_supported_history<const HISTORY: usize>() {
     assert!(
         matches!(HISTORY, 1 | 4 | 8),
-        "ChessAzState history must be one of 1, 4, or 8, got {HISTORY}"
+        "ChessHistoryState history must be one of 1, 4, or 8, got {HISTORY}"
     );
 }
 
-impl<const HISTORY: usize> Default for ChessAzState<HISTORY> {
+impl<const HISTORY: usize> Default for ChessHistoryState<HISTORY> {
     fn default() -> Self {
         Self::new(ChessPosition::default())
     }
 }
 
-impl<const HISTORY: usize> Game for ChessAzState<HISTORY> {
+impl<const HISTORY: usize> Game for ChessHistoryState<HISTORY> {
     const ACTION_SIZE: usize = AZ_ACTION_SIZE;
     const STATE_SHAPE: [TensorDim; 3] = [Self::INPUT_PLANES as TensorDim, 8, 8];
     const NAME: &'static str = "chess-az-v2";
@@ -177,7 +177,7 @@ impl<const HISTORY: usize> Game for ChessAzState<HISTORY> {
     }
 }
 
-impl<const HISTORY: usize> GameState for ChessAzState<HISTORY> {
+impl<const HISTORY: usize> GameState for ChessHistoryState<HISTORY> {
     type Move = ChessMove;
 
     fn initial() -> Self {
@@ -197,7 +197,7 @@ impl<const HISTORY: usize> GameState for ChessAzState<HISTORY> {
     }
 }
 
-impl<const HISTORY: usize> RepetitionGame for ChessAzState<HISTORY> {
+impl<const HISTORY: usize> RepetitionGame for ChessHistoryState<HISTORY> {
     fn repetition_hash(&self) -> u64 {
         self.current().position.hash()
     }
@@ -240,7 +240,7 @@ fn mix_cache_key(key: u64, value: u64) -> u64 {
         .wrapping_mul(0x94D0_49BB_1331_11EB)
 }
 
-impl<const HISTORY: usize> fmt::Display for ChessAzState<HISTORY> {
+impl<const HISTORY: usize> fmt::Display for ChessHistoryState<HISTORY> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.current().position.fmt(f)
     }

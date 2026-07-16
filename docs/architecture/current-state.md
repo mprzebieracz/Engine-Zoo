@@ -38,7 +38,7 @@ code stores sparse policy targets.
 - `RepetitionGame` combines repetition bookkeeping with encoded-state cache
   identity.
 - `ChessPosition`/`Connect4` are compact search states, while
-  `ChessAzState<HISTORY>` carries AlphaZero history features. `ChessGame` and
+  `ChessHistoryState<HISTORY>` carries AlphaZero history features. `ChessGame` and
   `ChessAzGame<HISTORY>` both retain authoritative Chess progression state.
 - MCTS is generic over game state but lives under the `algorithms` crate and
   therefore shares a crate dependency on `tch` with neural-network code.

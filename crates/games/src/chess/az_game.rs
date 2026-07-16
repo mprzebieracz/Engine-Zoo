@@ -1,13 +1,12 @@
 use super::action::decode_v2_action;
-use super::az::ChessAzState;
+use super::az::ChessHistoryState;
 use super::game::ChessGame;
 use super::notation;
 use super::position::ChessPosition;
-use super::zobrist::ZobristBuildHasher;
+use super::repetition::RepetitionTracker;
 use chess::Board;
 use engine_core::game::{Action, Game};
 use engine_core::rules::RepetitionGame;
-use std::collections::HashMap;
 
 /// Authoritative full-game state for AlphaZero play.
 ///
@@ -16,16 +15,16 @@ use std::collections::HashMap;
 /// [`search_state`](Self::search_state) into MCTS.
 #[derive(Clone)]
 pub struct ChessAzGame<const HISTORY: usize> {
-    search: ChessAzState<HISTORY>,
-    position_counts: HashMap<u64, u8, ZobristBuildHasher>,
+    search: ChessHistoryState<HISTORY>,
+    repetitions: RepetitionTracker,
 }
 
 impl<const HISTORY: usize> ChessAzGame<HISTORY> {
     pub fn new(position: ChessPosition) -> Self {
         let hash = position.hash();
         Self {
-            search: ChessAzState::new(position),
-            position_counts: HashMap::from_iter([(hash, 1)]),
+            search: ChessHistoryState::new(position),
+            repetitions: RepetitionTracker::new(hash),
         }
     }
 
@@ -34,7 +33,7 @@ impl<const HISTORY: usize> ChessAzGame<HISTORY> {
     /// full repetition table is preserved for MCTS adjudication.
     pub fn from_game(game: &ChessGame) -> Self {
         let mut this = Self::new(game.position());
-        this.position_counts = game.position_counts.clone();
+        this.repetitions = game.repetitions.clone();
         this.search.set_repetitions_before_current(
             game.repetitions_before_current(game.position().hash()),
         );
@@ -45,7 +44,7 @@ impl<const HISTORY: usize> ChessAzGame<HISTORY> {
         Ok(Self::from_game(&ChessGame::from_fen(fen)?))
     }
 
-    pub fn search_state(&self) -> ChessAzState<HISTORY> {
+    pub fn search_state(&self) -> ChessHistoryState<HISTORY> {
         self.search
     }
 
@@ -67,7 +66,7 @@ impl<const HISTORY: usize> ChessAzGame<HISTORY> {
 
     /// Number of occurrences before an explicitly cached search root.
     pub fn repetitions_before_root(&self, hash: u64, root_hash: u64) -> u8 {
-        let count = self.position_counts.get(&hash).copied().unwrap_or(0);
+        let count = self.repetitions.current_count(hash);
         // The table includes the current root only when this is its hash.
         // Every other position occurred strictly before the root and must be
         // passed through unchanged for a descendant MCTS repetition check.
@@ -104,14 +103,16 @@ impl<const HISTORY: usize> ChessAzGame<HISTORY> {
             return;
         }
         let position = self.search.position();
-        if position.halfmove_clock() == 0 {
-            self.position_counts.clear();
+        let count = if position.halfmove_clock() == 0 {
+            self.repetitions.reset(position.hash());
+            1
         }
-        let count = self.position_counts.entry(position.hash()).or_insert(0);
-        *count += 1;
+        else {
+            self.repetitions.record(position.hash())
+        };
         self.search
             .set_repetitions_before_current(count.saturating_sub(1));
-        if *count >= 3 {
+        if count >= 3 {
             self.search.set_repetition_draw();
         }
     }
@@ -206,7 +207,7 @@ mod tests {
         assert_eq!(aggregate.position().hash(), full.position().hash());
         assert_eq!(aggregate.repetitions_before_current(), 1);
         assert_eq!(aggregate.repetitions_before(start), 1);
-        let mut encoded = vec![0.0; ChessAzState::<4>::state_size()];
+        let mut encoded = vec![0.0; ChessHistoryState::<4>::state_size()];
         aggregate.search_state().encode_state(&mut encoded);
         assert!(encoded[12 * 64..13 * 64].iter().all(|&value| value == 1.0));
         assert!(encoded[13 * 64..14 * 64].iter().all(|&value| value == 0.0));
