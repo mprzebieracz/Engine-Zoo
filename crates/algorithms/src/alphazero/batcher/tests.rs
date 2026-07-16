@@ -1,5 +1,6 @@
 use super::*;
 use crate::alphazero::network::{AlphaZeroNet, NetConfig, Network, NetworkConfig};
+use crate::alphazero::representation::Action;
 use std::fs;
 use std::sync::mpsc::sync_channel;
 use tch::{nn, Device, Tensor};
@@ -20,7 +21,7 @@ fn batch(states: &[f32], legal_per_state: &[&[u32]]) -> EncodedEvalBatch {
     let mut offsets = Vec::with_capacity(legal_per_state.len() + 1);
     offsets.push(0);
     for actions in legal_per_state {
-        legal_actions.extend_from_slice(actions);
+        legal_actions.extend(actions.iter().copied().map(Action::new));
         offsets.push(legal_actions.len() as u32);
     }
 
@@ -59,7 +60,7 @@ fn direct_eval(net: &AlphaZeroNet, cfg: &NetConfig, batch: &EncodedEvalBatch) ->
             let end = batch.offsets[row + 1] as usize;
             let logits = batch.legal_actions[begin..end]
                 .iter()
-                .map(|&a| policy_flat[row * action_size + a as usize])
+                .map(|&a| policy_flat[row * action_size + a.index()])
                 .collect();
             Evaluation {
                 logits,

@@ -1,3 +1,4 @@
+use crate::alphazero::representation::Action as EncodedAction;
 use crate::alphazero::{Batcher, EncodedEvalBatch, EncodedEvaluator, Mcts, MctsConfig, NetConfig};
 use anyhow::Result;
 use engine_core::agent::PolicyMode;
@@ -86,7 +87,7 @@ pub fn analyze_game_net<G: Game>(
     game.encode_state(&mut state);
     let mut batch = EncodedEvalBatch {
         states: state,
-        legal_actions: legal.clone(),
+        legal_actions: legal.iter().copied().map(EncodedAction::new).collect(),
         offsets: vec![0, legal.len() as u32],
     };
     let eval = evaluator.evaluate(&mut batch);
