@@ -53,7 +53,7 @@ pub(super) fn build_policy<M: Copy>(
     }
 }
 
-impl<E: EncodedEvaluator, V> MctsCore<E, V> {
+impl<E: EncodedEvaluator, V> MctsCore<E, V, Action, Vec<u64>> {
     /// Encodes `game` and its legal actions as the next entry of `self.batch`.
     fn enqueue_state<G: Game>(&mut self, game: &G) {
         let start = self.batch.states.len();

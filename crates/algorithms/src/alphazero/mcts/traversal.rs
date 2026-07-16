@@ -1,5 +1,6 @@
 use super::super::evaluator::EncodedEvaluator;
 use super::core::{LeafBatch, MctsCore, PendingBackup, PendingLeaf, PendingResult, SearchDriver};
+use engine_core::game::Action;
 use engine_core::game::Game;
 use engine_core::rules::RepetitionGame;
 
@@ -9,7 +10,7 @@ fn find_leaf_result(result_by_node: &[(u32, usize)], node: u32) -> Option<usize>
         .find_map(|&(candidate, idx)| (candidate == node).then_some(idx))
 }
 
-impl<E: EncodedEvaluator, V> MctsCore<E, V> {
+impl<E: EncodedEvaluator, V> MctsCore<E, V, Action, Vec<u64>> {
     pub(super) fn descend<G: Game>(&mut self, game: &G, mut node: u32) -> (u32, G) {
         let mut current = game.clone();
 
@@ -52,12 +53,12 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V> {
         // The callback reports occurrences before the root, so retain the
         // root itself here. Otherwise a simulated return to the root omits
         // one occurrence and fails to recognize a threefold repetition.
-        self.repetition_path.clear();
-        self.repetition_path.push(current.repetition_hash());
+        self.path_state.clear();
+        self.path_state.push(current.repetition_hash());
 
         if node != 0 {
             current.step(self.nodes[node as usize].action_from_parent);
-            self.repetition_path.push(current.repetition_hash());
+            self.path_state.push(current.repetition_hash());
             self.cache_repetition_state(node, &mut current, root_repetitions);
         }
 
@@ -75,7 +76,7 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V> {
             };
             node = best;
             current.step(self.nodes[best as usize].action_from_parent);
-            self.repetition_path.push(current.repetition_hash());
+            self.path_state.push(current.repetition_hash());
             self.cache_repetition_state(best, &mut current, root_repetitions);
         }
 
@@ -96,7 +97,7 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V> {
                 hash,
                 game.halfmove_clock(),
                 root_repetitions,
-                &self.repetition_path,
+                &self.path_state,
             );
             let cached = &mut self.nodes[node as usize];
             cached.hash = hash;

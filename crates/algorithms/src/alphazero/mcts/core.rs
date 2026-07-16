@@ -55,8 +55,8 @@ pub struct Mcts<E: EncodedEvaluator> {
 }
 
 pub(super) enum MctsKind<E: EncodedEvaluator> {
-    Puct(MctsCore<E, Puct>),
-    Gumbel(MctsCore<E, Gumbel>),
+    Puct(MctsCore<E, Puct, Action, Vec<u64>>),
+    Gumbel(MctsCore<E, Gumbel, Action, Vec<u64>>),
 }
 
 /// Shared tree/evaluator state for one concrete root search algorithm.
@@ -65,14 +65,14 @@ pub(super) enum MctsKind<E: EncodedEvaluator> {
 /// loss while the batch is open, and sends the unique non-terminal leaves to
 /// the evaluator together. The shared `Batcher` can still coalesce requests
 /// from many self-play threads into larger GPU batches.
-pub(super) struct MctsCore<E: EncodedEvaluator, V> {
+pub(super) struct MctsCore<E: EncodedEvaluator, V, M = Action, Path = Vec<u64>> {
     pub(super) evaluator: E,
     pub(super) cfg: CoreConfig,
-    pub(super) nodes: Vec<Node<Action>>,
+    pub(super) nodes: Vec<Node<M>>,
     pub(super) batch: EncodedEvalBatch,
-    pub(super) policy_buf: Vec<(Action, f32, f32)>,
-    pub(super) repetition_path: Vec<u64>,
-    pub(super) eval_cache: Option<Arc<EvalTable<Action>>>,
+    pub(super) policy_buf: Vec<(M, f32, f32)>,
+    pub(super) path_state: Path,
+    pub(super) eval_cache: Option<Arc<EvalTable<M>>>,
     pub(super) rng: SmallRng,
     pub(super) variant: V,
 }
@@ -312,7 +312,7 @@ impl<E: EncodedEvaluator> Mcts<E> {
     }
 }
 
-impl<E: EncodedEvaluator, V> MctsCore<E, V> {
+impl<E: EncodedEvaluator, V> MctsCore<E, V, Action, Vec<u64>> {
     fn new(evaluator: E, cfg: CoreConfig, variant: V) -> Self {
         MctsCore {
             evaluator,
@@ -320,7 +320,7 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V> {
             nodes: Vec::new(),
             batch: EncodedEvalBatch::new(),
             policy_buf: Vec::new(),
-            repetition_path: Vec::with_capacity(128),
+            path_state: Vec::with_capacity(128),
             eval_cache: None,
             rng: SmallRng::from_os_rng(),
             variant,
