@@ -1,14 +1,5 @@
 use crate::game::Game;
 
-/// Constructs a game from its typed setup representation.
-pub trait PositionCodec: Game {
-    type Position;
-
-    fn from_position(position: &Self::Position) -> anyhow::Result<Self>
-    where
-        Self: Sized;
-}
-
 /// Game capability for repetition-aware search.
 ///
 /// This intentionally lives in `core` so games can expose the capability

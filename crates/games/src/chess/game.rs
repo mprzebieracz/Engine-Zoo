@@ -4,6 +4,7 @@ use super::legacy::{self, ChessLegacyState};
 use super::notation;
 use super::position::{ChessPosition, Status};
 use super::zobrist::ZobristBuildHasher;
+use crate::setup::ChessSetup;
 use chess::{Board, BoardStatus, ChessMove, Color, MoveGen};
 use engine_core::game::{Action, Game, TensorDim};
 use std::collections::HashMap;
@@ -18,6 +19,19 @@ pub struct ChessGame {
 }
 
 impl ChessGame {
+    pub fn from_setup(setup: &ChessSetup) -> anyhow::Result<Self> {
+        let mut game = match &setup.fen {
+            Some(fen) => Self::from_fen(fen)?,
+            None => Self::default(),
+        };
+        for mv in &setup.moves {
+            let action = game
+                .parse_move(mv)
+                .ok_or_else(|| anyhow::anyhow!("illegal chess move {mv}"))?;
+            game.step(action);
+        }
+        Ok(game)
+    }
     pub fn board(&self) -> &Board {
         &self.pos.board
     }

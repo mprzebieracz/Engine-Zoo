@@ -1,7 +1,6 @@
 use crate::proxy::{game_name, GameKind};
 use algorithms::analysis::Analysis;
-use engine_core::rules::PositionCodec;
-use games::position::PositionSpec;
+use games::setup::GameSetup;
 use games::ChessGame;
 
 mod assets;
@@ -19,7 +18,7 @@ pub struct BenchReport<'a> {
 pub struct BenchReportRow {
     pub name: Option<String>,
     pub category: Option<String>,
-    pub position: PositionSpec,
+    pub position: GameSetup,
     pub board: String,
     pub expected: Vec<String>,
     pub best_move: Option<String>,
@@ -239,10 +238,10 @@ pub fn render_bench_report(report: &BenchReport<'_>) -> String {
     )
 }
 
-pub fn chess_board_for_position(position: &PositionSpec) -> anyhow::Result<String> {
+pub fn chess_board_for_position(position: &GameSetup) -> anyhow::Result<String> {
     match position {
-        PositionSpec::Chess(position) => Ok(ChessGame::from_position(position)?.to_string()),
-        PositionSpec::Connect4(_) => anyhow::bail!("HTML board rendering is chess-only for now"),
+        GameSetup::Chess(position) => Ok(ChessGame::from_setup(position)?.to_string()),
+        GameSetup::Connect4(_) => anyhow::bail!("HTML board rendering is chess-only for now"),
     }
 }
 

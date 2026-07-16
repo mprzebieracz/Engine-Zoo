@@ -2,8 +2,8 @@ use algorithms::alphazero::{
     Batcher, InferencePrecision, Mcts, MctsConfig, MctsVariant, RunArchitecture, RunConfig, RunDir,
 };
 use algorithms::analysis::{
-    analyze_game_mcts_with_repetitions, analyze_game_net, analyze_position, Analysis,
-    AnalyzeConfig, AnalyzeMode,
+    analyze_game, analyze_game_mcts_with_repetitions, analyze_game_net, Analysis, AnalyzeConfig,
+    AnalyzeMode,
 };
 use anyhow::Result;
 use axum::extract::State;
@@ -14,9 +14,8 @@ use axum::{Json, Router};
 use clap::ValueEnum;
 use engine_core::agent::PolicyMode;
 use engine_core::game::Game;
-use engine_core::rules::PositionCodec;
 use games::chess::notation;
-use games::position::{ChessPosition, Connect4Position, PositionSpec};
+use games::setup::{ChessSetup, Connect4Setup, GameSetup};
 use games::{ChessAzGame, ChessGame, Connect4};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -63,7 +62,7 @@ pub struct ServeConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnalyzeRequest {
-    pub position: PositionSpec,
+    pub position: GameSetup,
     #[serde(default = "default_model")]
     pub model: String,
     #[serde(default)]
@@ -77,7 +76,7 @@ pub struct AnalyzeRequest {
 #[derive(Clone, Debug, Deserialize)]
 struct CreateSessionRequest {
     #[serde(default)]
-    position: Option<PositionSpec>,
+    position: Option<GameSetup>,
     #[serde(default = "default_model")]
     model: String,
     #[serde(default)]
@@ -286,7 +285,7 @@ mod tests {
 
     #[test]
     fn v2_analysis_state_replays_request_history_for_all_supported_lengths() {
-        let position = ChessPosition {
+        let position = ChessSetup {
             fen: None,
             moves: vec!["e2e4".into(), "e7e5".into(), "g1f3".into(), "b8c6".into()],
         };
@@ -301,7 +300,7 @@ mod tests {
 
     #[test]
     fn v2_analysis_state_accepts_a_fen_without_history() {
-        let position = ChessPosition {
+        let position = ChessSetup {
             fen: Some("8/8/8/8/8/8/8/K6k b - - 0 1".into()),
             moves: Vec::new(),
         };
@@ -311,7 +310,7 @@ mod tests {
 
     #[test]
     fn v2_session_replays_and_steps_for_all_supported_histories() {
-        let position = ChessPosition {
+        let position = ChessSetup {
             fen: None,
             moves: vec!["e2e4".into(), "e7e5".into(), "g1f3".into()],
         };

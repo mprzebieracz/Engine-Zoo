@@ -1,3 +1,4 @@
+use crate::setup::Connect4Setup;
 use engine_core::game::{Action, Game, GameState, TensorDim, TerminalValue};
 use std::fmt;
 
@@ -90,6 +91,9 @@ pub struct Connect4 {
 }
 
 impl Connect4 {
+    pub fn from_setup(setup: &Connect4Setup) -> anyhow::Result<Self> {
+        Self::from_moves(&setup.moves)
+    }
     pub fn from_moves(moves: &[Action]) -> anyhow::Result<Self> {
         let mut game = Connect4::default();
         for &action in moves {

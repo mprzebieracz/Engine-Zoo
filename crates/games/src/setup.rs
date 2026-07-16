@@ -1,11 +1,8 @@
-use crate::{ChessGame, Connect4};
-use anyhow::Result;
-use engine_core::game::{Action, Game};
-use engine_core::rules::PositionCodec;
+use engine_core::game::Action;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ChessPosition {
+pub struct ChessSetup {
     /// If omitted, the standard start position is used.
     pub fen: Option<String>,
     /// Legal moves, in UCI form, applied after `fen` or the start position.
@@ -14,7 +11,7 @@ pub struct ChessPosition {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct Connect4Position {
+pub struct Connect4Setup {
     /// Columns played from the empty board.
     #[serde(default)]
     pub moves: Vec<Action>,
@@ -22,51 +19,27 @@ pub struct Connect4Position {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "game", content = "position", rename_all = "lowercase")]
-pub enum PositionSpec {
-    Chess(ChessPosition),
-    Connect4(Connect4Position),
-}
-
-impl PositionCodec for ChessGame {
-    type Position = ChessPosition;
-
-    fn from_position(position: &Self::Position) -> Result<Self> {
-        let mut game = match &position.fen {
-            Some(fen) => ChessGame::from_fen(fen)?,
-            None => ChessGame::default(),
-        };
-        for mv in &position.moves {
-            let action = game
-                .parse_move(mv)
-                .ok_or_else(|| anyhow::anyhow!("illegal chess move {mv}"))?;
-            game.step(action);
-        }
-        Ok(game)
-    }
-}
-
-impl PositionCodec for Connect4 {
-    type Position = Connect4Position;
-
-    fn from_position(position: &Self::Position) -> Result<Self> {
-        Connect4::from_moves(&position.moves)
-    }
+pub enum GameSetup {
+    Chess(ChessSetup),
+    Connect4(Connect4Setup),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ChessGame, Connect4};
+    use engine_core::game::Game;
 
     #[test]
     fn loads_chess_and_connect4_positions() {
-        let chess = ChessGame::from_position(&ChessPosition {
+        let chess = ChessGame::from_setup(&ChessSetup {
             fen: None,
             moves: vec!["e2e4".into(), "e7e5".into()],
         })
         .unwrap();
         assert!(!chess.is_terminal());
 
-        let connect4 = Connect4::from_position(&Connect4Position {
+        let connect4 = Connect4::from_setup(&Connect4Setup {
             moves: vec![3, 3, 2],
         })
         .unwrap();
@@ -75,7 +48,7 @@ mod tests {
 
     #[test]
     fn chess_position_applies_moves_after_fen_and_preserves_clocks() {
-        let game = ChessGame::from_position(&ChessPosition {
+        let game = ChessGame::from_setup(&ChessSetup {
             fen: Some("8/8/8/8/8/8/P7/K6k w - - 17 23".into()),
             moves: vec!["a2a3".into(), "h1g1".into()],
         })
@@ -87,20 +60,20 @@ mod tests {
 
     #[test]
     fn position_loading_reports_bad_setups_and_illegal_replays() {
-        assert!(ChessGame::from_position(&ChessPosition {
+        assert!(ChessGame::from_setup(&ChessSetup {
             fen: Some("not a fen".into()),
             moves: vec![],
         })
         .is_err());
-        assert!(ChessGame::from_position(&ChessPosition {
+        assert!(ChessGame::from_setup(&ChessSetup {
             fen: None,
             moves: vec!["e2e5".into()],
         })
         .is_err());
-        assert!(Connect4::from_position(&Connect4Position {
+        assert!(Connect4::from_setup(&Connect4Setup {
             moves: vec![0, 0, 0, 0, 0, 0, 0],
         })
         .is_err());
-        assert!(Connect4::from_position(&Connect4Position { moves: vec![7] }).is_err());
+        assert!(Connect4::from_setup(&Connect4Setup { moves: vec![7] }).is_err());
     }
 }
