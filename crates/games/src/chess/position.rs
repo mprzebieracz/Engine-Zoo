@@ -1,4 +1,5 @@
 use chess::{Board, BoardStatus, ChessMove, Color, File, Piece, Rank, Square};
+use engine_core::game::{GameState, TerminalValue};
 use std::fmt;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -30,6 +31,28 @@ pub struct ChessPosition {
 }
 
 impl ChessPosition {
+    pub fn initial() -> Self {
+        Self::default()
+    }
+
+    pub fn legal_moves(&self) -> impl Iterator<Item = ChessMove> + '_ {
+        chess::MoveGen::new_legal(&self.board)
+    }
+
+    pub fn play(&mut self, mv: ChessMove) {
+        self.play_with_effect(mv);
+    }
+
+    pub fn terminal_value(&self) -> Option<TerminalValue> {
+        match self.status {
+            Status::Ongoing => None,
+            Status::Checkmate => Some(TerminalValue::Loss),
+            Status::Stalemate | Status::DrawRepetition | Status::DrawFiftyMoveRule => {
+                Some(TerminalValue::Draw)
+            }
+        }
+    }
+
     pub fn hash(&self) -> u64 {
         self.board.get_hash()
     }
@@ -90,6 +113,26 @@ impl ChessPosition {
             }
         }
         MoveEffect { irreversible }
+    }
+}
+
+impl GameState for ChessPosition {
+    type Move = ChessMove;
+
+    fn initial() -> Self {
+        Self::default()
+    }
+
+    fn legal_moves(&self) -> impl Iterator<Item = Self::Move> + '_ {
+        self.legal_moves()
+    }
+
+    fn play(&mut self, mv: Self::Move) {
+        self.play_with_effect(mv);
+    }
+
+    fn terminal_value(&self) -> Option<TerminalValue> {
+        self.terminal_value()
     }
 }
 
