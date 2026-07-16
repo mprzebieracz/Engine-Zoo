@@ -6,6 +6,7 @@ mod evaluator;
 mod mcts;
 mod network;
 mod replay;
+pub mod representation;
 mod selfplay;
 mod trainer;
 
@@ -21,6 +22,7 @@ pub use network::{
     Network, NetworkConfig, NetworkOutput,
 };
 pub use replay::{ReplayBatch, ReplayBuffer, SparsePolicyBatch, Transition};
+pub use representation::{Action, AlphaZeroRepresentation};
 pub use selfplay::{
     select_temperature_action, self_play, ChessV2GumbelProfiles, SelfPlayConfig, SelfPlayStats,
     SelfPlayTemperature,
