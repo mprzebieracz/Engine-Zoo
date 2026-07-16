@@ -1,4 +1,6 @@
 use super::*;
+use engine_core::game::{GameState, TerminalValue};
+use std::mem::size_of;
 
 /// Straightforward array-based implementation used as an oracle for randomized
 /// cross-checking of the bitboard version.
@@ -7,6 +9,29 @@ struct Naive {
     board: [[i8; COLS]; ROWS],
     current: i8,
     status: Status,
+}
+
+#[test]
+fn move_is_checked_and_compact() {
+    assert_eq!(Connect4Move::new(3).unwrap().column(), 3);
+    assert!(Connect4Move::new(7).is_none());
+    assert_eq!(size_of::<Connect4Move>(), 1);
+    // A private u8 has no invalid bit pattern for Option to use as a niche.
+    assert_eq!(size_of::<Option<Connect4Move>>(), 2);
+}
+
+#[test]
+fn native_move_flow_and_terminal_values() {
+    let mut game = Connect4::initial();
+    assert_eq!(game.legal_moves().count(), COLS);
+    game.play(Connect4Move::new(0).unwrap());
+    assert_eq!(game.legal_moves().next().unwrap().column(), 0);
+    assert_eq!(game.terminal_value(), None);
+
+    for column in [1, 0, 1, 0, 1, 0] {
+        game.play(Connect4Move::new(column).unwrap());
+    }
+    assert_eq!(game.terminal_value(), Some(TerminalValue::Loss));
 }
 
 impl Naive {
@@ -101,11 +126,11 @@ fn loads_position_from_move_list() {
 fn vertical_win_reward_convention() {
     let mut g = Connect4::default();
     for a in [0u32, 1, 0, 1, 0, 1, 0] {
-        assert!(!g.is_terminal());
+        assert!(!engine_core::Game::is_terminal(&g));
         g.step(a);
     }
     // X just completed four-in-a-row in column 0; O to move has lost.
-    assert!(g.is_terminal());
+    assert!(engine_core::Game::is_terminal(&g));
     assert_eq!(g.status, Status::Loss);
     assert_eq!(g.reward(), -1.0);
     assert_eq!(g.current_player(), -1);
@@ -117,7 +142,7 @@ fn horizontal_win_is_a_loss() {
     for a in [0u32, 0, 1, 1, 2, 2, 3] {
         g.step(a);
     }
-    assert!(g.is_terminal());
+    assert!(engine_core::Game::is_terminal(&g));
     assert_eq!(g.status, Status::Loss);
     assert_eq!(g.reward(), -1.0);
 }
@@ -131,7 +156,7 @@ fn detects_both_diagonal_win_directions() {
         let game = Connect4::from_moves(&moves).unwrap();
         assert_eq!(game.status, Status::Loss);
         assert_eq!(game.reward(), -1.0);
-        assert!(game.is_terminal());
+        assert!(engine_core::Game::is_terminal(&game));
     }
 }
 
@@ -191,7 +216,7 @@ fn terminal_position_has_no_legal_actions() {
         g.step(action);
     }
 
-    assert!(g.is_terminal());
+    assert!(engine_core::Game::is_terminal(&g));
     assert_eq!(g.legal_actions().count(), 0);
 }
 
@@ -249,7 +274,7 @@ fn matches_naive_oracle_on_random_games() {
     for _ in 0..300 {
         let mut fast = Connect4::default();
         let mut naive = Naive::new();
-        while !fast.is_terminal() {
+        while !engine_core::Game::is_terminal(&fast) {
             let legal: Vec<u32> = fast.legal_actions().collect();
             assert_eq!(legal, naive.legal());
             assert_eq!(fast.current_player(), naive.current);

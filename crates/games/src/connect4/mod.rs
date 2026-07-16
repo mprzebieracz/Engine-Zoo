@@ -1,8 +1,35 @@
-use engine_core::game::{Action, Game, TensorDim};
+use engine_core::game::{Action, Game, GameState, TensorDim, TerminalValue};
 use std::fmt;
 
 const ROWS: usize = 6;
 const COLS: usize = 7;
+
+/// A checked Connect Four column.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Connect4Move(u8);
+
+impl Connect4Move {
+    pub const fn new(column: u8) -> Option<Self> {
+        if column < COLS as u8 {
+            Some(Self(column))
+        }
+        else {
+            None
+        }
+    }
+
+    pub const fn column(self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for Connect4Move {
+    type Error = u8;
+
+    fn try_from(column: u8) -> Result<Self, Self::Error> {
+        Self::new(column).ok_or(column)
+    }
+}
 
 /// Bit index of (col, row-from-bottom): each column occupies 7 bits (6 cells +
 /// 1 sentinel) so that `mask + bottom_bit(col)` carries into the lowest empty
@@ -97,24 +124,12 @@ impl Connect4 {
     fn column_playable(&self, col: usize) -> bool {
         self.mask & bit(col, ROWS - 1) == 0
     }
-}
 
-impl Game for Connect4 {
-    const ACTION_SIZE: usize = COLS;
-    const STATE_SHAPE: [TensorDim; 3] = [1, ROWS as TensorDim, COLS as TensorDim];
-    const NAME: &'static str = "connect4";
-
-    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
-        (0..COLS)
-            .filter(|&c| self.status == Status::Ongoing && self.column_playable(c))
-            .map(|c| c as Action)
-    }
-
-    fn step(&mut self, action: Action) {
-        let col = action as usize;
+    fn play_move(&mut self, mv: Connect4Move) {
+        let col = mv.column() as usize;
         assert!(
-            self.status == Status::Ongoing && col < COLS && self.column_playable(col),
-            "illegal Connect Four action {action}"
+            self.status == Status::Ongoing && self.column_playable(col),
+            "illegal Connect Four move {col}"
         );
 
         let move_bit = (self.mask + bottom_bit(col)) & column_mask(col);
@@ -130,6 +145,50 @@ impl Game for Connect4 {
         else if self.mask == FULL_MASK {
             self.status = Status::Draw;
         }
+    }
+}
+
+impl GameState for Connect4 {
+    type Move = Connect4Move;
+
+    fn initial() -> Self {
+        Self::default()
+    }
+
+    fn legal_moves(&self) -> impl Iterator<Item = Self::Move> + '_ {
+        (0..COLS)
+            .filter(|&col| self.status == Status::Ongoing && self.column_playable(col))
+            .map(|col| Connect4Move::new(col as u8).unwrap())
+    }
+
+    fn play(&mut self, mv: Self::Move) {
+        self.play_move(mv);
+    }
+
+    fn terminal_value(&self) -> Option<TerminalValue> {
+        match self.status {
+            Status::Ongoing => None,
+            Status::Loss => Some(TerminalValue::Loss),
+            Status::Draw => Some(TerminalValue::Draw),
+        }
+    }
+}
+
+impl Game for Connect4 {
+    const ACTION_SIZE: usize = COLS;
+    const STATE_SHAPE: [TensorDim; 3] = [1, ROWS as TensorDim, COLS as TensorDim];
+    const NAME: &'static str = "connect4";
+
+    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
+        (0..COLS)
+            .filter(|&c| self.status == Status::Ongoing && self.column_playable(c))
+            .map(|c| c as Action)
+    }
+
+    fn step(&mut self, action: Action) {
+        let mv = Connect4Move::try_from(u8::try_from(action).expect("illegal Connect Four action"))
+            .expect("illegal Connect Four action");
+        self.play_move(mv);
     }
 
     fn is_terminal(&self) -> bool {
