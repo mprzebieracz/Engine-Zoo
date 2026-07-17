@@ -1,7 +1,11 @@
 use super::batcher::{Batcher, BatcherClient};
 use super::mcts::{GumbelSearchProfile, Mcts, MctsConfig, MctsVariant, SearchResult};
 use super::replay::{ReplayBuffer, Transition};
-use engine_core::game::{Action, Game};
+use super::representation::AlphaZeroRepresentation;
+use super::RepresentedEvaluator;
+use crate::search::NoExtraRules;
+use engine_core::agent::PolicyMode;
+use engine_core::game::{GameState, TerminalValue};
 use rand::distr::Distribution;
 use rand::Rng;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -207,11 +211,15 @@ impl SelfPlayConfig {
 
 /// Plays `cfg.num_games` games of self-play across `cfg.threads` threads, all
 /// sharing `batcher` for network evaluation, appending trajectories to `replay`.
-pub fn self_play<G: Game>(
+pub fn self_play<G, Rep>(
     batcher: &Batcher,
     replay: &ReplayBuffer,
     cfg: &SelfPlayConfig,
-) -> SelfPlayStats {
+) -> SelfPlayStats
+where
+    G: GameState + Clone + Default,
+    Rep: AlphaZeroRepresentation<G> + Default,
+{
     let finished = AtomicUsize::new(0);
     let started = Instant::now();
     let stats = Arc::new(Mutex::new(SelfPlayStats::default()));
@@ -221,11 +229,14 @@ pub fn self_play<G: Game>(
             let stats = Arc::clone(&stats);
             let finished = &finished;
             scope.spawn(move || {
-                let mut mcts = Mcts::new(batcher.client(), cfg.mcts);
+                let representation = Rep::default();
+                let evaluator = RepresentedEvaluator::new(representation.clone(), batcher.client());
+                let mut mcts = Mcts::new(evaluator, cfg.mcts, NoExtraRules);
                 while finished.load(Ordering::Relaxed) < cfg.num_games {
-                    let Some(completed) = play_game::<G>(&mut mcts, cfg, || {
-                        finished.load(Ordering::Relaxed) >= cfg.num_games
-                    })
+                    let Some(completed) =
+                        play_game::<G, Rep>(&mut mcts, &representation, cfg, || {
+                            finished.load(Ordering::Relaxed) >= cfg.num_games
+                        })
                     else {
                         break;
                     };
@@ -271,11 +282,16 @@ fn maybe_print_progress(
     );
 }
 
-fn play_game<G: Game>(
-    mcts: &mut Mcts<BatcherClient>,
+fn play_game<G, Rep>(
+    mcts: &mut Mcts<G, RepresentedEvaluator<G, Rep, BatcherClient>, NoExtraRules>,
+    representation: &Rep,
     cfg: &SelfPlayConfig,
     should_stop: impl Fn() -> bool,
-) -> Option<CompletedGame> {
+) -> Option<CompletedGame>
+where
+    G: GameState + Clone + Default,
+    Rep: AlphaZeroRepresentation<G>,
+{
     let mut game = G::default();
     let mut trajectory = Vec::with_capacity(cfg.max_moves.min(256));
     let mut rng = rand::rng();
@@ -284,10 +300,10 @@ fn play_game<G: Game>(
         if should_stop() {
             return None;
         }
-        let mut state = vec![0.0f32; G::state_size()];
-        game.encode_state(&mut state);
+        let mut state = vec![0.0f32; Rep::state_size()];
+        representation.encode_state(&game, &mut state);
 
-        let result = mcts.search(&game);
+        let result = mcts.search(&game, (), PolicyMode::Explore);
         let action = select_self_play_action(
             &result,
             mcts.config().variant,
@@ -295,15 +311,31 @@ fn play_game<G: Game>(
             cfg.temperature_moves,
             &mut rng,
         );
+        let policy = result
+            .policy
+            .iter()
+            .map(|&(mv, probability)| {
+                (
+                    representation.move_to_action(&game, mv).as_u32(),
+                    probability,
+                )
+            })
+            .collect();
         trajectory.push(Transition {
             state,
-            policy: result.policy,
+            policy,
             reward: 0.0,
         });
-        game.step(action);
+        game.play(action);
     }
 
-    assign_trajectory_rewards(&mut trajectory, -game.reward());
+    let reward = if !game.is_terminal() {
+        TerminalValue::Draw.as_f32()
+    }
+    else {
+        game.terminal_value().map_or(0.0, TerminalValue::as_f32)
+    };
+    assign_trajectory_rewards(&mut trajectory, reward);
     let stats = SelfPlayStats {
         games: 1,
         moves: trajectory.len(),
@@ -312,13 +344,13 @@ fn play_game<G: Game>(
     Some(CompletedGame { stats, trajectory })
 }
 
-fn select_self_play_action<R: Rng + ?Sized>(
-    result: &SearchResult<Action>,
+fn select_self_play_action<M: Copy, R: Rng + ?Sized>(
+    result: &SearchResult<M>,
     variant: MctsVariant,
     ply: usize,
     temperature_moves: usize,
     rng: &mut R,
-) -> Action {
+) -> M {
     if matches!(variant, MctsVariant::Gumbel { .. }) || ply >= temperature_moves {
         result.best_move()
     }
@@ -329,11 +361,11 @@ fn select_self_play_action<R: Rng + ?Sized>(
 
 /// Samples `p^(1/T)` without assigning mass to illegal/zero-probability
 /// actions. `None` means deterministic argmax.
-pub fn select_temperature_action<R: Rng + ?Sized>(
-    result: &SearchResult<Action>,
+pub fn select_temperature_action<M: Copy, R: Rng + ?Sized>(
+    result: &SearchResult<M>,
     temperature: Option<f32>,
     rng: &mut R,
-) -> Action {
+) -> M {
     let Some(temperature) = temperature
     else {
         return result.best_move();

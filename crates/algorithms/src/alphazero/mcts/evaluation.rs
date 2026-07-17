@@ -1,233 +1,153 @@
-use super::super::evaluator::{EncodedEvaluator, Evaluation};
-use super::super::representation::Action as EncodedAction;
 use super::cache::CachedEvaluation;
 use super::core::MctsCore;
-use super::Node;
-use engine_core::game::{Action, Game};
-use engine_core::rules::RepetitionGame;
+use crate::search::Evaluation;
+use engine_core::GameState;
 use rand::prelude::*;
+use rand::rngs::SmallRng;
 use rand_distr::Gamma;
 
 pub(super) fn build_policy<M: Copy>(
-    policy_buf: &mut Vec<(M, f32, f32)>,
+    buf: &mut Vec<(M, f32, f32)>,
     legal: &[M],
-    res: &Evaluation,
-    root_noise: bool,
+    eval: &Evaluation,
+    noise: bool,
     eps: f32,
     alpha: f32,
     rng: &mut SmallRng,
 ) {
-    debug_assert_eq!(legal.len(), res.logits.len());
-    debug_assert!(res.logits.iter().all(|logit| logit.is_finite()));
-    policy_buf.clear();
-    let max_logit = res.logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    buf.clear();
+    let max = eval
+        .logits
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0;
-    for (&action, &logit) in legal.iter().zip(&res.logits) {
-        let prior = (logit - max_logit).exp();
-        policy_buf.push((action, prior, logit));
+    for (&m, &logit) in legal.iter().zip(&eval.logits) {
+        let prior = (logit - max).exp();
         sum += prior;
+        buf.push((m, prior, logit));
     }
     if sum.is_finite() && sum > 0.0 {
-        for (_, prior, _) in policy_buf.iter_mut() {
-            *prior /= sum;
+        for (_, p, _) in &mut *buf {
+            *p /= sum;
         }
     }
-    else if !policy_buf.is_empty() {
-        let uniform = 1.0 / policy_buf.len() as f32;
-        for (_, prior, _) in policy_buf.iter_mut() {
-            *prior = uniform;
+    else if !buf.is_empty() {
+        let p = 1.0 / buf.len() as f32;
+        for (_, prior, _) in &mut *buf {
+            *prior = p;
         }
     }
-    if root_noise && eps > 0.0 && !policy_buf.is_empty() {
+    if noise && eps > 0.0 && !buf.is_empty() {
         let gamma = Gamma::new(alpha, 1.0).expect("alpha > 0");
-        let mut noise: Vec<f32> = (0..policy_buf.len()).map(|_| gamma.sample(rng)).collect();
-        let noise_sum: f32 = noise.iter().sum();
-        if noise_sum > 0.0 {
-            for x in &mut noise {
-                *x /= noise_sum;
+        let mut samples: Vec<f32> = (0..buf.len()).map(|_| gamma.sample(rng)).collect();
+        let total: f32 = samples.iter().sum();
+        if total > 0.0 {
+            for sample in &mut samples {
+                *sample /= total;
             }
         }
-        for ((_, prior, _), noise) in policy_buf.iter_mut().zip(&noise) {
-            *prior = (1.0 - eps) * *prior + eps * noise;
+        for ((_, prior, _), sample) in buf.iter_mut().zip(samples) {
+            *prior = (1.0 - eps) * *prior + eps * sample;
         }
     }
 }
 
-impl<E: EncodedEvaluator, V> MctsCore<E, V, Action, Vec<u64>> {
-    /// Encodes `game` and its legal actions as the next entry of `self.batch`.
-    fn enqueue_state<G: Game>(&mut self, game: &G) {
-        let start = self.batch.states.len();
-        self.batch.states.resize(start + G::state_size(), 0.0);
-        game.encode_state(&mut self.batch.states[start..]);
-
-        self.batch
-            .legal_actions
-            .extend(game.legal_actions().map(EncodedAction::new));
-        self.batch
-            .offsets
-            .push(self.batch.legal_actions.len() as u32);
-    }
-
-    pub(super) fn evaluate_position<G: Game>(&mut self, game: &G) -> (Vec<Action>, Evaluation) {
-        self.evaluate_positions(std::slice::from_ref(game))
+impl<G, E, R, V> MctsCore<G, E, R, V>
+where
+    G: GameState + Clone,
+    E: crate::search::PolicyValueEvaluator<G>,
+    R: crate::search::SearchRules<G>,
+    V: 'static,
+{
+    pub(super) fn evaluate_position(&mut self, state: &G) -> (Vec<G::Move>, Evaluation) {
+        self.evaluate_positions(std::slice::from_ref(state))
             .pop()
-            .expect("single game evaluation")
+            .unwrap()
     }
-
-    pub(super) fn evaluate_positions<G: Game>(
-        &mut self,
-        games: &[G],
-    ) -> Vec<(Vec<Action>, Evaluation)> {
-        if games.is_empty() {
-            return Vec::new();
-        }
-        self.batch.clear();
-        let expected = games.len();
-        let mut legal_per_state = Vec::with_capacity(games.len());
-        for game in games {
-            let begin = self.batch.legal_actions.len();
-            self.enqueue_state(game);
-            legal_per_state.push(self.batch.legal_actions[begin..].to_vec());
-        }
-        let results = self.evaluator.evaluate(&mut self.batch);
-        debug_assert_eq!(
-            results.len(),
-            expected,
-            "evaluator must return one result per input state"
-        );
-        legal_per_state
-            .into_iter()
-            .map(|actions| actions.into_iter().map(|a| a.as_u32() as Action).collect())
-            .zip(results)
-            .collect()
-    }
-
-    pub(super) fn evaluate_repetition_position<G: RepetitionGame>(
-        &mut self,
-        game: &G,
-    ) -> (Vec<Action>, Evaluation) {
-        let key = game.evaluation_cache_key();
-        if let Some(cache) = &self.eval_cache {
-            if let Some(cached) = cache.get(key) {
-                return (cached.legal, cached.eval);
-            }
-        }
-
-        let (legal, eval) = self.evaluate_position(game);
-        if let Some(cache) = &self.eval_cache {
-            cache.insert(
-                key,
-                CachedEvaluation {
-                    legal: legal.clone(),
-                    eval: eval.clone(),
-                },
-            );
-        }
-        (legal, eval)
-    }
-
-    pub(super) fn evaluate_repetition_positions<G: RepetitionGame>(
-        &mut self,
-        games: &[G],
-    ) -> Vec<(Vec<Action>, Evaluation)> {
-        if games.is_empty() {
-            return Vec::new();
-        }
-
-        let Some(cache) = self.eval_cache.clone()
-        else {
-            return self.evaluate_positions(games);
-        };
-        let mut out = vec![None; games.len()];
-        let mut miss_destinations = Vec::new();
-        let mut miss_keys = Vec::new();
-        let mut miss_games = Vec::new();
-
-        for (i, game) in games.iter().enumerate() {
-            let key = game.evaluation_cache_key();
-            // Distinct tree nodes can transpose to the same encoded state in
-            // one leaf batch. The shared table cannot contain the first miss
-            // until inference completes, so deduplicate those misses locally.
-            if let Some(unique) = miss_keys.iter().position(|&candidate| candidate == key) {
-                miss_destinations.push((i, unique));
-                continue;
-            }
-            if let Some(cached) = cache.get(key) {
-                out[i] = Some((cached.legal, cached.eval));
-                continue;
-            }
-            let unique = miss_games.len();
-            miss_destinations.push((i, unique));
-            miss_keys.push(key);
-            miss_games.push(*game);
-        }
-
-        let miss_results = self.evaluate_positions(&miss_games);
-        for (&key, (legal, eval)) in miss_keys.iter().zip(&miss_results) {
-            cache.insert(
-                key,
-                CachedEvaluation {
-                    legal: legal.clone(),
-                    eval: eval.clone(),
-                },
-            );
-        }
-        for (i, unique) in miss_destinations {
-            out[i] = Some(miss_results[unique].clone());
-        }
-
-        out.into_iter()
-            .map(|value| value.expect("all repetition eval slots filled"))
-            .collect()
-    }
-
-    /// Softmax over legal-action logits (optionally mixed with root Dirichlet
-    /// noise) into `self.policy_buf`. Raw logits are retained for Gumbel search.
-    pub(super) fn build_policy_from(
-        &mut self,
-        legal: &[Action],
-        res: &Evaluation,
-        root_noise: bool,
-    ) {
-        debug_assert_eq!(
-            legal.len(),
-            res.logits.len(),
-            "evaluator logits must match the legal actions for each state"
-        );
-        debug_assert!(
-            res.logits.iter().all(|logit| logit.is_finite()),
-            "evaluator must return finite logits for legal actions"
-        );
-
+    pub(super) fn build_policy_from(&mut self, legal: &[G::Move], eval: &Evaluation, noise: bool) {
         build_policy(
             &mut self.policy_buf,
             legal,
-            res,
-            root_noise,
+            eval,
+            noise,
             self.cfg.eps,
             self.cfg.alpha,
             &mut self.rng,
         );
     }
-
-    /// Creates all legal children of `node`, contiguous in the arena.
     pub(super) fn expand(&mut self, node: u32) {
-        debug_assert!(self.policy_buf.len() <= u16::MAX as usize);
-        let first_child = self.nodes.len() as u32;
-        for &(action, prior, logit) in &self.policy_buf {
-            self.nodes.push(Node::new(
-                Some(node),
-                Some(action),
-                0,
-                prior,
-                logit,
-                false,
-                0.0,
-            ));
+        let first = self.nodes.len() as u32;
+        for &(m, p, l) in &self.policy_buf {
+            self.nodes
+                .push(super::Node::new(Some(node), Some(m), p, l, false, 0.0));
         }
         let n = &mut self.nodes[node as usize];
-        n.first_child = first_child;
+        n.first_child = first;
         n.num_children = self.policy_buf.len() as u16;
         n.expanded = true;
+    }
+    pub(super) fn evaluate_positions(&mut self, states: &[G]) -> Vec<(Vec<G::Move>, Evaluation)> {
+        if states.is_empty() {
+            return Vec::new();
+        }
+        let mut out: Vec<Option<(Vec<G::Move>, Evaluation)>> = vec![None; states.len()];
+        let mut misses = Vec::new();
+        let mut keys: Vec<Option<u64>> = Vec::new();
+        let mut destinations = Vec::new();
+        for (i, state) in states.iter().enumerate() {
+            let Some(key) = self.evaluator.evaluation_key(state)
+            else {
+                let j = misses.len();
+                misses.push(state.clone());
+                keys.push(None);
+                destinations.push((i, Some(j)));
+                continue;
+            };
+            if let Some(cache) = &self.eval_cache {
+                if let Some(value) = cache.get(key) {
+                    out[i] = Some((value.legal, value.eval));
+                    continue;
+                }
+            }
+            if let Some(j) = keys.iter().position(|&k| k == Some(key)) {
+                destinations.push((i, Some(j)));
+            }
+            else {
+                keys.push(Some(key));
+                destinations.push((i, Some(misses.len())));
+                misses.push(state.clone());
+            }
+        }
+        self.legal_moves.clear();
+        self.offsets.clear();
+        self.offsets.push(0);
+        for state in &misses {
+            self.legal_moves.extend(state.legal_moves());
+            self.offsets.push(self.legal_moves.len() as u32);
+        }
+        let evaluations = self
+            .evaluator
+            .evaluate(&misses, &self.legal_moves, &self.offsets);
+        let mut unique = Vec::with_capacity(misses.len());
+        for (i, eval) in evaluations.into_iter().enumerate() {
+            let begin = self.offsets[i] as usize;
+            let end = self.offsets[i + 1] as usize;
+            let value = (self.legal_moves[begin..end].to_vec(), eval);
+            if let (Some(cache), Some(key)) = (&self.eval_cache, keys[i]) {
+                cache.insert(
+                    key,
+                    CachedEvaluation {
+                        legal: value.0.clone(),
+                        eval: value.1.clone(),
+                    },
+                );
+            }
+            unique.push(value);
+        }
+        for (i, destination) in destinations {
+            out[i] = Some(unique[destination.unwrap()].clone());
+        }
+        out.into_iter().map(Option::unwrap).collect()
     }
 }

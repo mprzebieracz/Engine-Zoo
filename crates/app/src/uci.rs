@@ -1,9 +1,13 @@
-use algorithms::alphazero::{Batcher, Mcts, MctsConfig, MctsVariant, RunArchitecture, RunDir};
+use algorithms::alphazero::representation::{ChessAzRepresentation, ChessV1Representation};
+use algorithms::alphazero::{
+    Batcher, Mcts, MctsConfig, MctsVariant, RepresentedEvaluator, RunArchitecture, RunDir,
+};
+use algorithms::search::ChessRepetitionRules;
 use anyhow::{Context, Result};
 use engine_core::agent::PolicyMode;
 use engine_core::game::Game;
 use engine_core::notation::GameNotation;
-use games::{decode_v2_action, ChessGame};
+use games::{ChessGame, ChessPosition};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tch::Device;
@@ -122,42 +126,43 @@ impl ChessUciEngine {
         let evaluator = self.batcher.as_ref().expect("model loaded").client();
         match &self.loaded.as_ref().expect("model loaded").architecture {
             RunArchitecture::Legacy => {
-                let result = Mcts::new(
-                    evaluator,
+                let mut mcts = Mcts::<ChessPosition, _, _>::new(
+                    RepresentedEvaluator::new(ChessV1Representation, evaluator),
                     MctsConfig {
                         simulations,
                         eps: 0.0,
                         ..Default::default()
                     },
-                )
-                .search_with_mode(
-                    &self.game,
-                    if self.position_moves.len() < self.settings.opening_plies {
+                    ChessRepetitionRules,
+                );
+                let sampled = self.position_moves.len() < self.settings.opening_plies;
+                let result = mcts.search(
+                    &self.game.position_state(),
+                    self.game.repetition_context(),
+                    if sampled {
                         PolicyMode::Explore
                     }
                     else {
                         PolicyMode::Deterministic
                     },
                 );
-                let action = if self.position_moves.len() < self.settings.opening_plies {
-                    result.sample_action(&mut rand::rng())
+                let mv = if sampled {
+                    result.sample_move(&mut rand::rng())
                 }
                 else {
-                    result.best_action()
+                    result.best_move()
                 };
-                Ok(self.game.format_action(action))
+                Ok(games::chess::ChessUciNotation.format_move(&self.game.position(), mv))
             }
             RunArchitecture::ChessAzV2(v2) => {
                 let sampled = self.position_moves.len() < self.settings.opening_plies;
-                let action = match v2.history {
+                let bestmove = match v2.history {
                     1 => v2_action::<1>(evaluator, &self.game, simulations, sampled),
                     4 => v2_action::<4>(evaluator, &self.game, simulations, sampled),
                     8 => v2_action::<8>(evaluator, &self.game, simulations, sampled),
                     history => anyhow::bail!("unsupported chess history {history}"),
                 }?;
-                let mv = decode_v2_action(self.game.board(), action)
-                    .context("decoding v2 UCI bestmove")?;
-                Ok(games::chess::ChessUciNotation.format_move(&self.game.position(), mv))
+                Ok(bestmove)
             }
         }
     }
@@ -168,21 +173,20 @@ fn v2_action<const HISTORY: usize>(
     game: &ChessGame,
     simulations: usize,
     sampled: bool,
-) -> Result<engine_core::game::Action> {
-    let state = game.history_state::<HISTORY>();
-    let context = game.repetition_context();
-    let result = Mcts::new(
-        evaluator,
+) -> Result<String> {
+    let mut mcts = Mcts::<_, _, _>::new(
+        RepresentedEvaluator::new(ChessAzRepresentation::<HISTORY>, evaluator),
         MctsConfig {
             simulations,
             variant: MctsVariant::Puct,
             eps: 0.0,
             ..Default::default()
         },
-    )
-    .search_with_repetitions_mode(
-        &state,
-        |hash| context.occurrences_before_root(hash),
+        ChessRepetitionRules,
+    );
+    let result = mcts.search(
+        &game.history_state::<HISTORY>(),
+        game.repetition_context(),
         if sampled {
             PolicyMode::Explore
         }
@@ -190,12 +194,13 @@ fn v2_action<const HISTORY: usize>(
             PolicyMode::Deterministic
         },
     );
-    Ok(if sampled {
-        result.sample_action(&mut rand::rng())
+    let mv = if sampled {
+        result.sample_move(&mut rand::rng())
     }
     else {
-        result.best_action()
-    })
+        result.best_move()
+    };
+    Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
 }
 
 fn load_config_and_model(

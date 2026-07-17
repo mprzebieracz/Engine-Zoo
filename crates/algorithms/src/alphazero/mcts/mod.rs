@@ -8,11 +8,7 @@ mod traversal;
 #[cfg(test)]
 mod tests;
 
-use super::evaluator::EncodedEvaluator;
-#[cfg(test)]
-use super::evaluator::{EncodedEvalBatch, Evaluation};
-use engine_core::agent::{Agent, PolicyMode};
-use engine_core::game::{Action, Game};
+use engine_core::game::Action;
 use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 
@@ -210,11 +206,9 @@ impl RootQTransform {
 /// contiguously, so a node only needs the range
 /// `first_child .. first_child + num_children`. All nodes live in one `Vec`
 /// arena, indexed by `u32` and cleared (not freed) between searches.
-struct Node<M> {
+pub(super) struct Node<M, Meta = ()> {
     parent: Option<u32>,
-    hash: u64,
-    repetitions_before_current: u8,
-    repetition_cached: bool,
+    meta: Meta,
     first_child: u32,
     move_from_parent: Option<M>,
     visits: u32,
@@ -228,11 +222,10 @@ struct Node<M> {
     terminal: bool,
 }
 
-impl<M> Node<M> {
+impl<M, Meta: Default> Node<M, Meta> {
     fn new(
         parent: Option<u32>,
         move_from_parent: Option<M>,
-        hash: u64,
         prior: f32,
         logit: f32,
         terminal: bool,
@@ -240,9 +233,7 @@ impl<M> Node<M> {
     ) -> Self {
         Node {
             parent,
-            hash,
-            repetitions_before_current: 0,
-            repetition_cached: false,
+            meta: Meta::default(),
             first_child: 0,
             move_from_parent,
             visits: 0,
@@ -278,22 +269,6 @@ impl<M> Node<M> {
         }
         else {
             (self.value_sum + self.virtual_loss_count as f32) / visits as f32
-        }
-    }
-}
-
-impl<G: Game, E: EncodedEvaluator> Agent<G> for Mcts<E> {
-    fn act_with_mode(&mut self, game: &G, mode: PolicyMode) -> Action {
-        let variant = self.config().variant;
-        let explore = mode == PolicyMode::Explore;
-        let result = self.search_with_mode(game, mode);
-        if matches!(variant, MctsVariant::Puct) && explore {
-            let mut rng = rand::rng();
-            result.sample_action(&mut rng)
-        }
-        else {
-            // Gumbel exploration is already supplied by the root Gumbel sample.
-            result.best_action()
         }
     }
 }

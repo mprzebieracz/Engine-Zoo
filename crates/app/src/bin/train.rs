@@ -1,6 +1,7 @@
+use algorithms::alphazero::representation::Connect4AzRepresentation;
 use algorithms::alphazero::{
     self_play, train, train_chess_az_v2, AlphaZeroNet, Batcher, ChessAzV2Config, ChessAzV2Net,
-    ChessV2GumbelProfiles, GumbelSearchProfile, InferencePrecision, Mcts, MctsConfig, MctsVariant,
+    ChessV2GumbelProfiles, GumbelSearchProfile, InferencePrecision, MctsConfig, MctsVariant,
     NetConfig, NetworkConfig, ReplayBuffer, RunArchitecture, RunConfig, RunDir, SelfPlayConfig,
     SelfPlayStats, TrainConfig,
 };
@@ -226,7 +227,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
     redirect_stderr(&args)?;
     match args.game {
-        GameKind::Connect4 => run::<Connect4>(args, 5, 64, self_play::<Connect4>),
+        GameKind::Connect4 => {
+            run::<Connect4>(args, 5, 64, self_play::<Connect4, Connect4AzRepresentation>)
+        }
         GameKind::Chess => run_chess(args),
     }
 }

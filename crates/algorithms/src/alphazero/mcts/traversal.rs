@@ -1,8 +1,6 @@
-use super::super::evaluator::EncodedEvaluator;
-use super::core::{LeafBatch, MctsCore, PendingBackup, PendingLeaf, PendingResult, SearchDriver};
-use engine_core::game::Action;
-use engine_core::game::Game;
-use engine_core::rules::RepetitionGame;
+use super::core::{LeafBatch, MctsCore, PendingBackup, PendingLeaf, PendingResult};
+use crate::search::{RuleResult, SearchRules};
+use engine_core::game::{GameState, TerminalValue};
 
 fn find_leaf_result(result_by_node: &[(u32, usize)], node: u32) -> Option<usize> {
     result_by_node
@@ -10,184 +8,94 @@ fn find_leaf_result(result_by_node: &[(u32, usize)], node: u32) -> Option<usize>
         .find_map(|&(candidate, idx)| (candidate == node).then_some(idx))
 }
 
-impl<E: EncodedEvaluator, V> MctsCore<E, V, Action, Vec<u64>> {
-    pub(super) fn descend<G: Game>(&mut self, game: &G, mut node: u32) -> (u32, G) {
-        let mut current = game.clone();
-
-        if node != 0 {
-            current.step(
-                self.nodes[node as usize]
-                    .move_from_parent
-                    .expect("non-root node must store a move"),
-            );
-            self.cache_terminal(node, &current);
-        }
-
-        loop {
-            let n = &self.nodes[node as usize];
-            if !n.expanded || n.terminal {
-                break;
-            }
-            let c_init = self.cfg.c_init;
-            let c_base = self.cfg.c_base;
-            let c_puct = ((1.0 + n.effective_visits() as f32 + c_base) / c_base).ln() + c_init;
-            let Some(best) = self.select_child(node, c_puct)
-            else {
-                break;
-            };
-            node = best;
-            current.step(
-                self.nodes[best as usize]
-                    .move_from_parent
-                    .expect("selected child must store a move"),
-            );
-            self.cache_terminal(best, &current);
-        }
-
-        (node, current)
-    }
-
-    pub(super) fn descend_repetition<G, F>(
+impl<G, E, R, V> MctsCore<G, E, R, V>
+where
+    G: GameState + Clone,
+    E: crate::search::PolicyValueEvaluator<G>,
+    R: SearchRules<G>,
+    V: 'static,
+{
+    pub(super) fn descend<'a>(
         &mut self,
         game: &G,
         mut node: u32,
-        root_repetitions: F,
+        context: R::Context<'a>,
     ) -> (u32, G)
     where
-        G: RepetitionGame,
-        F: Fn(u64) -> u8 + Copy,
+        G: 'a,
     {
-        let mut current = *game;
-        // The callback reports occurrences before the root, so retain the
-        // root itself here. Otherwise a simulated return to the root omits
-        // one occurrence and fails to recognize a threefold repetition.
-        self.path_state.clear();
-        self.path_state.push(current.repetition_hash());
-
+        let mut current = game.clone();
+        self.rules.reset_path(context, game, &mut self.path_state);
         if node != 0 {
-            current.step(
+            current.play(
                 self.nodes[node as usize]
                     .move_from_parent
                     .expect("non-root node must store a move"),
             );
-            self.path_state.push(current.repetition_hash());
-            self.cache_repetition_state(node, &mut current, root_repetitions);
         }
-
         loop {
-            let n = &self.nodes[node as usize];
-            if !n.expanded || n.terminal {
+            let rule = {
+                let n = &mut self.nodes[node as usize];
+                self.rules
+                    .enter_state(context, &mut current, &mut self.path_state, &mut n.meta)
+            };
+            self.cache_terminal(node, &current, rule);
+            if !self.nodes[node as usize].expanded || self.nodes[node as usize].terminal {
                 break;
             }
-            let c_init = self.cfg.c_init;
-            let c_base = self.cfg.c_base;
-            let c_puct = ((1.0 + n.effective_visits() as f32 + c_base) / c_base).ln() + c_init;
+            let n = &self.nodes[node as usize];
+            let c_puct = ((1.0 + n.effective_visits() as f32 + self.cfg.c_base) / self.cfg.c_base)
+                .ln()
+                + self.cfg.c_init;
             let Some(best) = self.select_child(node, c_puct)
             else {
                 break;
             };
             node = best;
-            current.step(
-                self.nodes[best as usize]
+            current.play(
+                self.nodes[node as usize]
                     .move_from_parent
                     .expect("selected child must store a move"),
             );
-            self.path_state.push(current.repetition_hash());
-            self.cache_repetition_state(best, &mut current, root_repetitions);
         }
-
         (node, current)
     }
 
-    fn cache_repetition_state<G, F>(&mut self, node: u32, game: &mut G, root_repetitions: F)
-    where
-        G: RepetitionGame,
-        F: Fn(u64) -> u8 + Copy,
-    {
-        let repetitions_before = if self.nodes[node as usize].repetition_cached {
-            self.nodes[node as usize].repetitions_before_current
-        }
-        else {
-            let hash = game.repetition_hash();
-            let repetitions_before = self.repetitions_before_current(
-                hash,
-                game.halfmove_clock(),
-                root_repetitions,
-                &self.path_state,
-            );
-            let cached = &mut self.nodes[node as usize];
-            cached.hash = hash;
-            cached.repetitions_before_current = repetitions_before;
-            cached.repetition_cached = true;
-            repetitions_before
+    fn cache_terminal(&mut self, node: u32, game: &G, rule: RuleResult) {
+        let reward = match rule {
+            RuleResult::Terminal(v) => Some(v.as_f32()),
+            RuleResult::Continue => game.terminal_value().map(TerminalValue::as_f32),
         };
-        // History-aware search states cannot reconstruct occurrences older
-        // than their retained frames. Restore the authoritative tree count
-        // on every traversal, including revisits of an expanded node.
-        game.set_repetitions_before_current(repetitions_before);
-        if !game.is_terminal() && repetitions_before >= 2 {
-            game.set_repetition_draw();
-        }
-        self.cache_terminal(node, game);
-    }
-
-    fn repetitions_before_current<F>(
-        &self,
-        hash: u64,
-        halfmove_clock: usize,
-        root_repetitions: F,
-        history_stack: &[u64],
-    ) -> u8
-    where
-        F: Fn(u64) -> u8 + Copy,
-    {
-        let mut count = root_repetitions(hash);
-
-        for seen in history_stack.iter().rev().skip(1).take(halfmove_clock) {
-            if *seen == hash {
-                count = count.saturating_add(1);
+        if self.nodes[node as usize].visits == 0 {
+            if let Some(reward) = reward {
+                self.nodes[node as usize].terminal = true;
+                self.nodes[node as usize].reward = reward;
             }
         }
-        count
     }
 
-    fn cache_terminal<G: Game>(&mut self, node: u32, game: &G) {
-        if self.nodes[node as usize].visits == 0 && game.is_terminal() {
-            self.nodes[node as usize].terminal = true;
-            self.nodes[node as usize].reward = game.reward();
-        }
-    }
-
-    pub(super) fn collect_leaf_batch<G, D>(
+    pub(super) fn collect_leaf_batch(
         &mut self,
         game: &G,
         budget: usize,
-        driver: D,
+        context: R::Context<'_>,
         leaves: &mut Vec<PendingLeaf<G>>,
-    ) -> usize
-    where
-        G: Game,
-        D: SearchDriver<G>,
-    {
+    ) -> usize {
         let target = budget.min(self.leaf_batch_size());
         leaves.clear();
         for _ in 0..target {
-            leaves.push(self.collect_leaf(game, None, driver));
+            leaves.push(self.collect_leaf(game, None, context));
         }
         target
     }
 
-    pub(super) fn collect_leaf<G, D>(
+    pub(super) fn collect_leaf(
         &mut self,
         game: &G,
         child: Option<u32>,
-        driver: D,
-    ) -> PendingLeaf<G>
-    where
-        G: Game,
-        D: SearchDriver<G>,
-    {
-        let (node, current) = driver.descend(self, game, child);
+        context: R::Context<'_>,
+    ) -> PendingLeaf<G> {
+        let (node, current) = self.descend(game, child.unwrap_or(0), context);
         self.add_virtual_loss(node);
         PendingLeaf {
             node,
@@ -195,11 +103,7 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V, Action, Vec<u64>> {
         }
     }
 
-    pub(super) fn finish_leaf_batch<G, D>(&mut self, batch: &mut LeafBatch<G>, driver: D)
-    where
-        G: Game,
-        D: SearchDriver<G>,
-    {
+    pub(super) fn finish_leaf_batch(&mut self, batch: &mut LeafBatch<G>) {
         if batch.leaves.is_empty() {
             return;
         }
@@ -231,7 +135,7 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V, Action, Vec<u64>> {
             });
         }
 
-        let evaluations = driver.evaluate_many(self, &batch.unique_games);
+        let evaluations = self.evaluate_positions(&batch.unique_games);
         debug_assert_eq!(
             evaluations.len(),
             batch.unique_games.len(),

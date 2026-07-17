@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn run<G: Game>(
+pub(super) fn run<G: engine_app::players::InteractiveGame>(
     args: Args,
     default_blocks: i64,
     default_filters: i64,
@@ -257,28 +257,24 @@ pub(super) fn run<G: Game>(
                     max_moves: args.max_moves,
                     ..Default::default()
                 };
-                let mcts_cfg = MctsConfig {
-                    simulations: args.gate_simulations,
-                    leaf_batch_size: args.mcts_leaf_batch_size.max(1),
-                    eps: 0.0, // no exploration noise in evaluation play
-                    variant: MctsVariant::Puct,
-                    ..Default::default()
-                };
                 let wait_for = 1;
-                let candidate = Batcher::new(
+                let mut candidate = engine_app::players::AlphaZeroAgent::<G>::new(
                     &cfg.net,
                     &run.candidate_path(),
                     device,
+                    args.gate_simulations,
                     wait_for,
                     BATCH_TIMEOUT,
                 )?;
-                let baseline =
-                    Batcher::new(&cfg.net, &run.best_path(), device, wait_for, BATCH_TIMEOUT)?;
-                let arena_result = arena::evaluate::<G>(
-                    &mut Mcts::new(candidate.client(), mcts_cfg),
-                    &mut Mcts::new(baseline.client(), mcts_cfg),
-                    &arena_cfg,
+                let mut baseline = engine_app::players::AlphaZeroAgent::<G>::new(
+                    &cfg.net,
+                    &run.best_path(),
+                    device,
+                    args.gate_simulations,
+                    wait_for,
+                    BATCH_TIMEOUT,
                 )?;
+                let arena_result = arena::evaluate::<G>(&mut candidate, &mut baseline, &arena_cfg)?;
                 let winrate = arena_result.score();
 
                 let promoted = winrate >= args.gate_threshold;

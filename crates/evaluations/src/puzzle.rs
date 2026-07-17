@@ -1,9 +1,10 @@
-use algorithms::alphazero::{Batcher, Mcts, MctsConfig, RunArchitecture};
+use algorithms::alphazero::representation::{ChessAzRepresentation, ChessV1Representation};
+use algorithms::alphazero::{Batcher, Mcts, MctsConfig, RepresentedEvaluator, RunArchitecture};
+use algorithms::search::{ChessRepetitionRules, NoExtraRules};
 use anyhow::{Context, Result};
-use engine_core::agent::PolicyMode;
 use engine_core::game::Game;
 use engine_core::notation::GameNotation;
-use games::{decode_v2_action, ChessGame};
+use games::ChessGame;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -203,13 +204,18 @@ fn evaluate_legacy_puzzles(
     evaluator: algorithms::alphazero::BatcherClient,
     mcts_config: MctsConfig,
 ) -> Result<(Vec<PuzzleResult>, PuzzleSummary)> {
-    let mut mcts = Mcts::new(evaluator, mcts_config);
+    let mut mcts = Mcts::new(
+        RepresentedEvaluator::new(ChessV1Representation, evaluator),
+        mcts_config,
+        NoExtraRules,
+    );
     evaluate_moves(puzzles, |puzzle| {
         let game = ChessGame::from_fen(&puzzle.fen)?;
-        let action = mcts
-            .search_with_mode(&game, PolicyMode::Deterministic)
-            .best_action();
-        Ok(game.format_action(action))
+        let state = game.position();
+        let mv = mcts
+            .search(&state, (), engine_core::agent::PolicyMode::Deterministic)
+            .best_move();
+        Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
     })
 }
 
@@ -218,19 +224,22 @@ fn evaluate_v2_puzzles<const HISTORY: usize>(
     evaluator: algorithms::alphazero::BatcherClient,
     mcts_config: MctsConfig,
 ) -> Result<(Vec<PuzzleResult>, PuzzleSummary)> {
-    let mut mcts = Mcts::new(evaluator, mcts_config);
+    let mut mcts = Mcts::new(
+        RepresentedEvaluator::new(ChessAzRepresentation::<HISTORY>, evaluator),
+        mcts_config,
+        ChessRepetitionRules,
+    );
     evaluate_moves(puzzles, |puzzle| {
         let game = ChessGame::from_fen(&puzzle.fen)?;
         let state = game.history_state::<HISTORY>();
         let repetition_context = game.repetition_context();
-        let action = mcts
-            .search_with_repetitions_mode(
+        let mv = mcts
+            .search(
                 &state,
-                |hash| repetition_context.occurrences_before_root(hash),
-                PolicyMode::Deterministic,
+                repetition_context,
+                engine_core::agent::PolicyMode::Deterministic,
             )
-            .best_action();
-        let mv = decode_v2_action(game.board(), action).context("decoding puzzle v2 action")?;
+            .best_move();
         Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
     })
 }

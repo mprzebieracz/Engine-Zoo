@@ -1,4 +1,29 @@
 use super::*;
+use algorithms::alphazero::representation::{
+    ChessAzRepresentation, ChessV1Representation, Connect4AzRepresentation,
+};
+use algorithms::search::{ChessRepetitionRules, NoExtraRules};
+use engine_core::notation::GameNotation;
+
+struct ChessHistoryNotation;
+
+impl<const HISTORY: usize> GameNotation<ChessHistoryState<HISTORY>> for ChessHistoryNotation {
+    fn parse_move(
+        &self,
+        state: &ChessHistoryState<HISTORY>,
+        text: &str,
+    ) -> Option<<ChessHistoryState<HISTORY> as engine_core::game::GameState>::Move> {
+        notation::ChessUciNotation.parse_move(&state.position(), text)
+    }
+
+    fn format_move(
+        &self,
+        state: &ChessHistoryState<HISTORY>,
+        mv: <ChessHistoryState<HISTORY> as engine_core::game::GameState>::Move,
+    ) -> String {
+        notation::ChessUciNotation.format_move(&state.position(), mv)
+    }
+}
 
 pub fn analyze_request(
     game: GameKind,
@@ -22,10 +47,10 @@ pub fn analyze_request(
             let (_, run_cfg) = open_existing_run::<ChessGame>(&run_dir)?;
             let weights = resolve_model(&run_dir, &req.model);
             match run_cfg.architecture {
-                RunArchitecture::Legacy => analyze_game(
-                    ChessGame::from_setup(&position)?,
-                    &run_cfg.net,
+                RunArchitecture::Legacy => analyze_chess_legacy(
+                    &run_cfg,
                     &weights,
+                    &ChessGame::from_setup(&position)?,
                     device,
                     &cfg,
                 ),
@@ -40,10 +65,10 @@ pub fn analyze_request(
         (GameKind::Connect4, GameSetup::Connect4(position)) => {
             let (_, run_cfg) = open_existing_run::<Connect4>(&run_dir)?;
             let weights = resolve_model(&run_dir, &req.model);
-            analyze_game(
-                Connect4::from_setup(&position)?,
-                &run_cfg.net,
+            analyze_connect4(
+                &run_cfg,
                 &weights,
+                &Connect4::from_setup(&position)?,
                 device,
                 &cfg,
             )
@@ -54,6 +79,86 @@ pub fn analyze_request(
             other
         ),
     }
+}
+
+fn analyze_chess_legacy(
+    run_cfg: &RunConfig,
+    weights: &Path,
+    game: &ChessGame,
+    device: Device,
+    cfg: &AnalyzeConfig,
+) -> Result<Analysis> {
+    let batcher = Batcher::new(
+        &run_cfg.net,
+        weights,
+        device,
+        cfg.wait_for_count,
+        cfg.timeout,
+    )?;
+    let position = game.position_state();
+    let network = analyze_game_net(
+        position,
+        batcher.client(),
+        &ChessV1Representation,
+        &notation::ChessUciNotation,
+    )?;
+    if cfg.mode == AnalyzeMode::Net {
+        return Ok(network);
+    }
+    let mut mcts = Mcts::new(
+        algorithms::alphazero::RepresentedEvaluator::new(ChessV1Representation, batcher.client()),
+        cfg.mcts,
+        ChessRepetitionRules,
+    );
+    analyze_game_mcts(
+        position,
+        &mut mcts,
+        game.repetition_context(),
+        network,
+        &ChessV1Representation,
+        &notation::ChessUciNotation,
+    )
+}
+
+fn analyze_connect4(
+    run_cfg: &RunConfig,
+    weights: &Path,
+    game: &Connect4,
+    device: Device,
+    cfg: &AnalyzeConfig,
+) -> Result<Analysis> {
+    let batcher = Batcher::new(
+        &run_cfg.net,
+        weights,
+        device,
+        cfg.wait_for_count,
+        cfg.timeout,
+    )?;
+    let network = analyze_game_net(
+        *game,
+        batcher.client(),
+        &Connect4AzRepresentation,
+        &games::connect4::notation::Connect4Notation,
+    )?;
+    if cfg.mode == AnalyzeMode::Net {
+        return Ok(network);
+    }
+    let mut mcts = Mcts::new(
+        algorithms::alphazero::RepresentedEvaluator::new(
+            Connect4AzRepresentation,
+            batcher.client(),
+        ),
+        cfg.mcts,
+        NoExtraRules,
+    );
+    analyze_game_mcts(
+        *game,
+        &mut mcts,
+        (),
+        network,
+        &Connect4AzRepresentation,
+        &games::connect4::notation::Connect4Notation,
+    )
 }
 
 /// Replays a request from its setup. A FEN with no accompanying moves has no
@@ -103,7 +208,12 @@ fn analyze_chess_az_v2<const HISTORY: usize>(
         cfg.timeout,
         inference_precision(device),
     )?;
-    let network = analyze_game_net(state, batcher.client())?;
+    let network = analyze_game_net(
+        state,
+        batcher.client(),
+        &ChessAzRepresentation::<HISTORY>,
+        &ChessHistoryNotation,
+    )?;
     if cfg.mode == AnalyzeMode::Net {
         return Ok(network);
     }
@@ -112,9 +222,21 @@ fn analyze_chess_az_v2<const HISTORY: usize>(
     // Training uses Gumbel self-play, but served models are evaluated with
     // deterministic PUCT for stable, comparable browser results.
     mcts_cfg.variant = MctsVariant::Puct;
-    let mut mcts = Mcts::new(batcher.client(), mcts_cfg);
+    let mut mcts = Mcts::new(
+        algorithms::alphazero::RepresentedEvaluator::new(
+            ChessAzRepresentation::<HISTORY>,
+            batcher.client(),
+        ),
+        mcts_cfg,
+        ChessRepetitionRules,
+    );
     let repetition_context = game.repetition_context();
-    analyze_game_mcts_with_repetitions(state, &mut mcts, network, |hash| {
-        repetition_context.occurrences_before_root(hash)
-    })
+    analyze_game_mcts(
+        state,
+        &mut mcts,
+        repetition_context,
+        network,
+        &ChessAzRepresentation::<HISTORY>,
+        &ChessHistoryNotation,
+    )
 }

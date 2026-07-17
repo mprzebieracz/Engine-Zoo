@@ -4,12 +4,17 @@
 //! chess rules needed for repetition tracking, resignation, and the shared
 //! evaluation cache.
 
+use algorithms::alphazero::representation::{
+    AlphaZeroRepresentation, ChessAzRepresentation, ChessV1Representation,
+};
 use algorithms::alphazero::{
     select_temperature_action, Batcher, BatcherClient, EvalTable, Mcts, MctsVariant, ReplayBuffer,
-    SelfPlayConfig, SelfPlayStats, Transition,
+    RepresentedEvaluator, SelfPlayConfig, SelfPlayStats, Transition,
 };
+use algorithms::search::ChessRepetitionRules;
+use engine_core::agent::PolicyMode;
 use engine_core::game::Game;
-use games::{decode_v2_action, ChessGame, ChessHistoryState};
+use games::{ChessGame, ChessHistoryState, ChessPosition};
 use rand::Rng;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,7 +45,8 @@ pub fn self_play_chess(
             let stats = Arc::clone(&stats);
             let finished = &finished;
             scope.spawn(move || {
-                let mut mcts = Mcts::new(batcher.client(), cfg.mcts);
+                let evaluator = RepresentedEvaluator::new(ChessV1Representation, batcher.client());
+                let mut mcts = Mcts::new(evaluator, cfg.mcts, ChessRepetitionRules);
                 if let Some(cache) = eval_cache {
                     mcts = mcts.with_eval_cache(cache);
                 }
@@ -92,7 +98,9 @@ pub fn self_play_chess_az_v2<const HISTORY: usize>(
             let stats = Arc::clone(&stats);
             let finished = &finished;
             scope.spawn(move || {
-                let mut mcts = Mcts::new(batcher.client(), cfg.mcts);
+                let evaluator =
+                    RepresentedEvaluator::new(ChessAzRepresentation::<HISTORY>, batcher.client());
+                let mut mcts = Mcts::new(evaluator, cfg.mcts, ChessRepetitionRules);
                 if let Some(cache) = eval_cache {
                     mcts = mcts.with_eval_cache(cache);
                 }
@@ -126,7 +134,11 @@ pub fn self_play_chess_az_v2<const HISTORY: usize>(
 }
 
 fn play_chess_game(
-    mcts: &mut Mcts<BatcherClient>,
+    mcts: &mut Mcts<
+        ChessPosition,
+        RepresentedEvaluator<ChessPosition, ChessV1Representation, BatcherClient>,
+        ChessRepetitionRules,
+    >,
     cfg: &SelfPlayConfig,
     should_stop: impl Fn() -> bool,
 ) -> Option<CompletedGame> {
@@ -173,26 +185,39 @@ fn play_chess_game(
             mcts.set_simulations(simulations);
         }
 
-        let search_state = game.legacy_state();
-        let root_hash = game.position().hash();
-        let result = mcts.search_with_repetitions(&search_state, |hash| {
-            game.repetitions_before_root(hash, root_hash)
-        });
+        let search_state = game.position_state();
+        let result = mcts.search(
+            &search_state,
+            game.repetition_context(),
+            PolicyMode::Explore,
+        );
         let action = if let Some(temperature) = cfg.chess_v2_temperature {
             select_temperature_action(&result, temperature.at_ply(trajectory.len()), &mut rng)
         }
         else if matches!(mcts.config().variant, MctsVariant::Gumbel { .. })
             || trajectory.len() >= cfg.temperature_moves
         {
-            result.best_action()
+            result.best_move()
         }
         else {
-            result.sample_action(&mut rng)
+            result.sample_move(&mut rng)
         };
         let search_value = result.value;
+        let policy = result
+            .policy
+            .iter()
+            .map(|&(mv, probability)| {
+                (
+                    ChessV1Representation
+                        .move_to_action(&search_state, mv)
+                        .as_u32(),
+                    probability,
+                )
+            })
+            .collect();
         trajectory.push(Transition {
             state,
-            policy: result.policy,
+            policy,
             reward: 0.0,
         });
 
@@ -211,7 +236,7 @@ fn play_chess_game(
             stats.resignations += 1;
             break;
         }
-        game.step(action);
+        game.play(action);
     }
 
     let mut value = resigned_value.unwrap_or_else(|| -game.reward());
@@ -224,7 +249,15 @@ fn play_chess_game(
 }
 
 fn play_chess_az_v2_game<const HISTORY: usize>(
-    mcts: &mut Mcts<BatcherClient>,
+    mcts: &mut Mcts<
+        ChessHistoryState<HISTORY>,
+        RepresentedEvaluator<
+            ChessHistoryState<HISTORY>,
+            ChessAzRepresentation<HISTORY>,
+            BatcherClient,
+        >,
+        ChessRepetitionRules,
+    >,
     cfg: &SelfPlayConfig,
     should_stop: impl Fn() -> bool,
 ) -> Option<CompletedGame> {
@@ -273,9 +306,7 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
         }
 
         let repetition_context = game.repetition_context();
-        let result = mcts.search_with_repetitions(&search_state, |hash| {
-            repetition_context.occurrences_before_root(hash)
-        });
+        let result = mcts.search(&search_state, repetition_context, PolicyMode::Explore);
         let action = select_temperature_action(
             &result,
             cfg.chess_v2_temperature
@@ -284,9 +315,21 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
             &mut rng,
         );
         let search_value = result.value;
+        let policy = result
+            .policy
+            .iter()
+            .map(|&(mv, probability)| {
+                (
+                    ChessAzRepresentation::<HISTORY>
+                        .move_to_action(&search_state, mv)
+                        .as_u32(),
+                    probability,
+                )
+            })
+            .collect();
         trajectory.push(Transition {
             state: encoded,
-            policy: result.policy,
+            policy,
             reward: 0.0,
         });
 
@@ -305,9 +348,7 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
             stats.resignations += 1;
             break;
         }
-        let mv = decode_v2_action(game.board(), action)
-            .expect("MCTS returned an invalid chess AZ v2 action");
-        game.play(mv);
+        game.play(action);
     }
 
     let mut value = resigned_value.unwrap_or_else(|| -game.reward());
