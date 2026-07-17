@@ -1,5 +1,5 @@
 use super::*;
-use algorithms::alphazero::representation::AlphaZeroRepresentation;
+use alphazero::representation::AlphaZeroRepresentation;
 
 pub(super) fn run<G: engine_app::players::InteractiveGame>(
     args: Args,
@@ -26,25 +26,18 @@ pub(super) fn run<G: engine_app::players::InteractiveGame>(
     let threads = args.threads.unwrap_or_else(|| {
         if device.is_cuda() {
             128
-        }
-        else {
+        } else {
             default_cpu_threads()
         }
     });
-    let wait_for = args.wait_for.unwrap_or_else(|| {
-        if device.is_cuda() {
-            threads.min(24)
-        }
-        else {
-            1
-        }
-    });
+    let wait_for = args
+        .wait_for
+        .unwrap_or_else(|| if device.is_cuda() { threads.min(24) } else { 1 });
     let self_play_precision = match args.inference_precision {
         InferencePrecisionKind::Auto => {
             if device.is_cuda() {
                 InferencePrecision::Fp16
-            }
-            else {
+            } else {
                 InferencePrecision::Fp32
             }
         }
@@ -57,28 +50,32 @@ pub(super) fn run<G: engine_app::players::InteractiveGame>(
         .clone()
         .unwrap_or_else(|| PathBuf::from("runs").join(G::NAME));
     let (run, cfg) = RunDir::open_or_create(&root, || RunConfig {
-        game: G::NAME.into(),
-        net: NetConfig::for_representation::<G::SearchState, G::Representation>(
-            args.blocks.unwrap_or(default_blocks),
-            args.filters.unwrap_or(default_filters),
-        ),
-        architecture: RunArchitecture::Legacy,
+        format_version: RUN_CONFIG_FORMAT_VERSION,
+        model: match G::NAME {
+            "connect4" => ModelConfig::Connect4ScalarAz(Connect4ScalarAzConfig {
+                num_res_blocks: args.blocks.unwrap_or(default_blocks),
+                num_filters: args.filters.unwrap_or(default_filters),
+            }),
+            "chess" => ModelConfig::ChessScalarAzV1(ChessScalarAzV1Config {
+                num_res_blocks: args.blocks.unwrap_or(default_blocks),
+                num_filters: args.filters.unwrap_or(default_filters),
+            }),
+            _ => unreachable!("unsupported scalar AlphaZero game"),
+        },
     })?;
     anyhow::ensure!(
-        matches!(cfg.architecture, RunArchitecture::Legacy),
-        "run {} uses chess-az-v2; use --game chess without --architecture legacy",
-        root.display()
-    );
-    anyhow::ensure!(
-        cfg.game == G::NAME,
-        "run dir {} holds a {} run, not {}",
+        cfg.model.game_name() == G::NAME && !matches!(&cfg.model, ModelConfig::ChessAzV2(_)),
+        "run {} does not use scalar AlphaZero for {}",
         root.display(),
-        cfg.game,
         G::NAME
     );
+    let network_cfg = cfg.network_config();
+    let NetworkConfig::Legacy(net_cfg) = &network_cfg else {
+        unreachable!("validated scalar model")
+    };
 
     let mut vs = nn::VarStore::new(device);
-    let net = AlphaZeroNet::new(&vs.root(), &cfg.net);
+    let net = AlphaZeroNet::new(&vs.root(), net_cfg);
     let mut next_ckpt = run.latest_checkpoint().map_or(1, |(idx, _)| idx + 1);
     match run.training_checkpoint() {
         Some(path) => {
@@ -106,7 +103,7 @@ pub(super) fn run<G: engine_app::players::InteractiveGame>(
         lr: args.lr,
         weight_decay: args.weight_decay,
     };
-    let mut opt = algorithms::alphazero::build_optimizer(&vs, &train_cfg)?;
+    let mut opt = alphazero::build_optimizer(&vs, &train_cfg)?;
     let sp_cfg = SelfPlayConfig {
         num_games: args.games,
         threads,
@@ -140,8 +137,8 @@ pub(super) fn run<G: engine_app::players::InteractiveGame>(
     let archive_interval = (args.archive_checkpoint_minutes > 0)
         .then(|| Duration::from_secs(args.archive_checkpoint_minutes * 60));
     let mut last_archive = Instant::now();
-    let self_play_batcher = Batcher::new_with_precision(
-        &cfg.net,
+    let self_play_batcher = Batcher::new_with_network_precision(
+        &network_cfg,
         &run.best_path(),
         device,
         wait_for,
@@ -161,8 +158,7 @@ pub(super) fn run<G: engine_app::players::InteractiveGame>(
         let tt_queries = self_play_stats.tt_hits + self_play_stats.tt_misses;
         let tt_hit_rate = if tt_queries == 0 {
             0.0
-        }
-        else {
+        } else {
             self_play_stats.tt_hits as f64 / tt_queries as f64
         };
         println!(
@@ -189,7 +185,7 @@ pub(super) fn run<G: engine_app::players::InteractiveGame>(
         );
 
         let train_started = Instant::now();
-        let metrics = train(&net, &mut opt, &replay, device, &cfg.net, &train_cfg);
+        let metrics = train(&net, &mut opt, &replay, device, net_cfg, &train_cfg);
         let train_secs = train_started.elapsed().as_secs_f64();
         println!("train: {train_secs:.1}s");
 
@@ -264,7 +260,7 @@ pub(super) fn run<G: engine_app::players::InteractiveGame>(
                 };
                 let wait_for = 1;
                 let mut candidate = engine_app::players::AlphaZeroAgent::<G>::new(
-                    &cfg.net,
+                    &network_cfg,
                     &run.candidate_path(),
                     device,
                     args.gate_simulations,
@@ -272,7 +268,7 @@ pub(super) fn run<G: engine_app::players::InteractiveGame>(
                     BATCH_TIMEOUT,
                 )?;
                 let mut baseline = engine_app::players::AlphaZeroAgent::<G>::new(
-                    &cfg.net,
+                    &network_cfg,
                     &run.best_path(),
                     device,
                     args.gate_simulations,
@@ -305,8 +301,7 @@ pub(super) fn run<G: engine_app::players::InteractiveGame>(
                         .as_ref()
                         .map(|path| path.display().to_string())
                         .into();
-                }
-                else {
+                } else {
                     println!(
                         "candidate rejected: {:.1}% < {:.1}%; self-play keeps the old best",
                         100.0 * winrate,
@@ -347,7 +342,7 @@ fn restore_best_after_rejection(
     vs.load(run.best_path())?;
     // Adam moments belong to the rejected weights too. Keeping them after a
     // rollback would bias the next candidate away from the accepted baseline.
-    *optimizer = algorithms::alphazero::build_optimizer(vs, cfg)?;
+    *optimizer = alphazero::build_optimizer(vs, cfg)?;
     Ok(())
 }
 
@@ -368,6 +363,7 @@ pub(super) fn save_numbered_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alphazero::NetConfig;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_root() -> PathBuf {
@@ -385,9 +381,11 @@ mod tests {
         let root = test_root();
         let cfg = NetConfig::for_representation::<Connect4, Connect4AzRepresentation>(0, 2);
         let (run, _) = RunDir::open_or_create(&root, || RunConfig {
-            game: Connect4::NAME.into(),
-            net: cfg.clone(),
-            architecture: RunArchitecture::Legacy,
+            format_version: RUN_CONFIG_FORMAT_VERSION,
+            model: ModelConfig::Connect4ScalarAz(Connect4ScalarAzConfig {
+                num_res_blocks: cfg.num_res_blocks,
+                num_filters: cfg.num_filters,
+            }),
         })
         .unwrap();
         let train_cfg = TrainConfig {
@@ -401,7 +399,7 @@ mod tests {
         let mut vs = nn::VarStore::new(Device::Cpu);
         let _net = AlphaZeroNet::new(&vs.root(), &cfg);
         vs.save(run.best_path()).unwrap();
-        let mut optimizer = algorithms::alphazero::build_optimizer(&vs, &train_cfg).unwrap();
+        let mut optimizer = alphazero::build_optimizer(&vs, &train_cfg).unwrap();
 
         tch::no_grad(|| {
             for mut tensor in vs.variables().into_values() {

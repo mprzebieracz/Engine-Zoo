@@ -1,8 +1,9 @@
 use super::*;
-use algorithms::alphazero::representation::{
+use alphazero::representation::{
     ChessAzRepresentation, ChessV1Representation, Connect4AzRepresentation,
 };
-use algorithms::search::{ChessRepetitionRules, NoExtraRules};
+use alphazero::ChessRepetitionRules;
+use search::NoExtraRules;
 use engine_core::game::{GameState, TerminalValue};
 use engine_core::notation::GameNotation;
 
@@ -47,27 +48,52 @@ pub fn analyze_request(
         (GameKind::Chess, GameSetup::Chess(position)) => {
             let (_, run_cfg) = open_existing_run(&run_dir, "chess")?;
             let weights = resolve_model(&run_dir, &req.model);
-            match run_cfg.architecture {
-                RunArchitecture::Legacy => analyze_chess_legacy(
-                    &run_cfg,
+            match &run_cfg.model {
+                ModelConfig::ChessScalarAzV1(_) => analyze_chess_legacy(
+                    &run_cfg.network_config(),
                     &weights,
                     &ChessGame::from_setup(&position)?,
                     device,
                     &cfg,
                 ),
-                RunArchitecture::ChessAzV2(v2) => match v2.history {
-                    1 => analyze_chess_az_v2::<1>(&run_cfg, &weights, &position, device, &cfg),
-                    4 => analyze_chess_az_v2::<4>(&run_cfg, &weights, &position, device, &cfg),
-                    8 => analyze_chess_az_v2::<8>(&run_cfg, &weights, &position, device, &cfg),
+                ModelConfig::ChessAzV2(v2) => match v2.history {
+                    1 => analyze_chess_az_v2::<1>(
+                        &run_cfg.network_config(),
+                        &weights,
+                        &position,
+                        device,
+                        &cfg,
+                    ),
+                    4 => analyze_chess_az_v2::<4>(
+                        &run_cfg.network_config(),
+                        &weights,
+                        &position,
+                        device,
+                        &cfg,
+                    ),
+                    8 => analyze_chess_az_v2::<8>(
+                        &run_cfg.network_config(),
+                        &weights,
+                        &position,
+                        device,
+                        &cfg,
+                    ),
                     history => anyhow::bail!("unsupported chess az v2 history {history}"),
                 },
+                ModelConfig::Connect4ScalarAz(_) => {
+                    anyhow::bail!("run config is not a chess model")
+                }
             }
         }
         (GameKind::Connect4, GameSetup::Connect4(position)) => {
             let (_, run_cfg) = open_existing_run(&run_dir, "connect4")?;
             let weights = resolve_model(&run_dir, &req.model);
+            anyhow::ensure!(
+                matches!(&run_cfg.model, ModelConfig::Connect4ScalarAz(_)),
+                "run config is not a Connect4 scalar AlphaZero model"
+            );
             analyze_connect4(
-                &run_cfg,
+                &run_cfg.network_config(),
                 &weights,
                 &Connect4::from_setup(&position)?,
                 device,
@@ -83,14 +109,14 @@ pub fn analyze_request(
 }
 
 fn analyze_chess_legacy(
-    run_cfg: &RunConfig,
+    network_cfg: &NetworkConfig,
     weights: &Path,
     game: &ChessGame,
     device: Device,
     cfg: &AnalyzeConfig,
 ) -> Result<Analysis> {
-    let batcher = Batcher::new(
-        &run_cfg.net,
+    let batcher = Batcher::new_with_network(
+        network_cfg,
         weights,
         device,
         cfg.wait_for_count,
@@ -107,7 +133,7 @@ fn analyze_chess_legacy(
         return Ok(network);
     }
     let mut mcts = Mcts::new(
-        algorithms::alphazero::RepresentedEvaluator::new(ChessV1Representation, batcher.client()),
+        alphazero::RepresentedEvaluator::new(ChessV1Representation, batcher.client()),
         cfg.mcts,
         ChessRepetitionRules,
     );
@@ -122,14 +148,14 @@ fn analyze_chess_legacy(
 }
 
 fn analyze_connect4(
-    run_cfg: &RunConfig,
+    network_cfg: &NetworkConfig,
     weights: &Path,
     game: &Connect4,
     device: Device,
     cfg: &AnalyzeConfig,
 ) -> Result<Analysis> {
-    let batcher = Batcher::new(
-        &run_cfg.net,
+    let batcher = Batcher::new_with_network(
+        network_cfg,
         weights,
         device,
         cfg.wait_for_count,
@@ -145,7 +171,7 @@ fn analyze_connect4(
         return Ok(network);
     }
     let mut mcts = Mcts::new(
-        algorithms::alphazero::RepresentedEvaluator::new(
+        alphazero::RepresentedEvaluator::new(
             Connect4AzRepresentation,
             batcher.client(),
         ),
@@ -175,14 +201,13 @@ fn chess_az_state_snapshot<const HISTORY: usize>(
 fn inference_precision(device: Device) -> InferencePrecision {
     if device.is_cuda() {
         InferencePrecision::Fp16
-    }
-    else {
+    } else {
         InferencePrecision::Fp32
     }
 }
 
 fn analyze_chess_az_v2<const HISTORY: usize>(
-    run_cfg: &RunConfig,
+    network_cfg: &NetworkConfig,
     weights: &Path,
     position: &ChessSetup,
     device: Device,
@@ -202,7 +227,7 @@ fn analyze_chess_az_v2<const HISTORY: usize>(
         });
     }
     let batcher = Batcher::new_with_network_precision(
-        &run_cfg.network_config(),
+        network_cfg,
         weights,
         device,
         cfg.wait_for_count,
@@ -224,7 +249,7 @@ fn analyze_chess_az_v2<const HISTORY: usize>(
     // deterministic PUCT for stable, comparable browser results.
     mcts_cfg.variant = MctsVariant::Puct;
     let mut mcts = Mcts::new(
-        algorithms::alphazero::RepresentedEvaluator::new(
+        alphazero::RepresentedEvaluator::new(
             ChessAzRepresentation::<HISTORY>,
             batcher.client(),
         ),

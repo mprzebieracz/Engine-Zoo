@@ -70,15 +70,17 @@ enum Architecture {
 }
 
 fn architecture_for_run(run_dir: &Path) -> Result<Architecture> {
-    let config: algorithms::alphazero::RunConfig =
-        serde_json::from_str(&std::fs::read_to_string(run_dir.join("config.json"))?)?;
+    let config = alphazero::RunConfig::parse_json(&std::fs::read_to_string(
+        run_dir.join("config.json"),
+    )?)?;
     Ok(architecture_from_config(&config))
 }
 
-fn architecture_from_config(config: &algorithms::alphazero::RunConfig) -> Architecture {
-    match &config.architecture {
-        algorithms::alphazero::RunArchitecture::Legacy => Architecture::Legacy,
-        algorithms::alphazero::RunArchitecture::ChessAzV2(_) => Architecture::ChessAzV2,
+fn architecture_from_config(config: &alphazero::RunConfig) -> Architecture {
+    match &config.model {
+        alphazero::ModelConfig::ChessScalarAzV1(_) => Architecture::Legacy,
+        alphazero::ModelConfig::ChessAzV2(_) => Architecture::ChessAzV2,
+        alphazero::ModelConfig::Connect4ScalarAz(_) => Architecture::Legacy,
     }
 }
 
@@ -204,33 +206,32 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use algorithms::alphazero::{ChessAzV2Config, NetConfig, RunArchitecture, RunConfig};
+    use alphazero::{
+        ChessAzV2Config, ChessScalarAzV1Config, ModelConfig, RunConfig, RUN_CONFIG_FORMAT_VERSION,
+    };
 
-    fn config(architecture: RunArchitecture) -> RunConfig {
+    fn config(model: ModelConfig) -> RunConfig {
         RunConfig {
-            game: "chess".into(),
-            net: NetConfig {
-                input_channels: 1,
-                height: 1,
-                width: 1,
-                num_res_blocks: 1,
-                num_filters: 1,
-                action_size: 1,
-            },
-            architecture,
+            format_version: RUN_CONFIG_FORMAT_VERSION,
+            model,
         }
+    }
+
+    fn scalar() -> ModelConfig {
+        ModelConfig::ChessScalarAzV1(ChessScalarAzV1Config {
+            num_res_blocks: 1,
+            num_filters: 1,
+        })
     }
 
     #[test]
     fn detects_checkpoint_architecture_from_its_run_config() {
         assert_eq!(
-            architecture_from_config(&config(RunArchitecture::Legacy)),
+            architecture_from_config(&config(scalar())),
             Architecture::Legacy
         );
         assert_eq!(
-            architecture_from_config(&config(RunArchitecture::ChessAzV2(
-                ChessAzV2Config::default()
-            ))),
+            architecture_from_config(&config(ModelConfig::ChessAzV2(ChessAzV2Config::default()))),
             Architecture::ChessAzV2
         );
     }

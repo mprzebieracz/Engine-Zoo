@@ -3,16 +3,20 @@
 A Rust workspace for board-game engines and agents.
 
 Current games:
+
 - Chess
 - Connect4
 
 Current algorithms:
+
 - AlphaZero
 
 Layout:
+
 - `crates/core/` - shared game and agent traits.
 - `crates/games/` - concrete game implementations and position specs.
-- `crates/algorithms/` - AlphaZero, search, training, and analysis code.
+- `crates/search/` - generic MCTS, evaluator contracts, rules, and evaluation cache.
+- `crates/alphazero/` - neural evaluation, representations, batching, replay, training, checkpoints, and analysis.
 - `crates/app/` - CLI binaries and Axum API server.
 - `web/` - SvelteKit TypeScript frontend.
 - `scripts/` - training/evaluation helpers.

@@ -1,8 +1,9 @@
 use super::*;
-use algorithms::alphazero::representation::{
+use alphazero::representation::{
     ChessAzRepresentation, ChessV1Representation, Connect4AzRepresentation,
 };
-use algorithms::search::{ChessRepetitionRules, NoExtraRules};
+use alphazero::ChessRepetitionRules;
+use search::NoExtraRules;
 use anyhow::Context;
 use engine_core::notation::GameNotation;
 
@@ -19,11 +20,10 @@ pub(super) fn create_session_inner(
                 None => ChessSetup::default(),
             };
             let (_, cfg) = open_existing_run(&state.run_dir, "chess")?;
-            let v2_history = if let RunArchitecture::ChessAzV2(v2) = cfg.architecture {
+            let v2_history = if let ModelConfig::ChessAzV2(v2) = cfg.model {
                 v2.validate()?;
                 Some(v2.history)
-            }
-            else {
+            } else {
                 None
             };
             LiveSession::Chess(Box::new(SessionState {
@@ -144,8 +144,7 @@ pub(super) fn play_chess_engine_turn(
     }
     let (_, cfg) = open_existing_run(run_dir, "chess")?;
     if let Some(history) = session.v2_history {
-        let RunArchitecture::ChessAzV2(v2) = &cfg.architecture
-        else {
+        let ModelConfig::ChessAzV2(v2) = &cfg.model else {
             anyhow::bail!("session architecture no longer matches its run");
         };
         anyhow::ensure!(
@@ -161,8 +160,7 @@ pub(super) fn play_chess_engine_turn(
             Duration::from_millis(1),
             if device.is_cuda() {
                 InferencePrecision::Fp16
-            }
-            else {
+            } else {
                 InferencePrecision::Fp32
             },
         )?;
@@ -183,18 +181,19 @@ pub(super) fn play_chess_engine_turn(
         return Ok(());
     }
     anyhow::ensure!(
-        matches!(&cfg.architecture, RunArchitecture::Legacy),
-        "session architecture no longer matches its run"
+        matches!(&cfg.model, ModelConfig::ChessScalarAzV1(_)),
+        "session model no longer matches its run"
     );
-    let batcher = Batcher::new(
-        &cfg.net,
+    let network_cfg = cfg.network_config();
+    let batcher = Batcher::new_with_network(
+        &network_cfg,
         &resolve_model(run_dir, &session.model),
         device,
         session.wait_for_count.max(1),
         Duration::from_millis(1),
     )?;
     let mut mcts = Mcts::new(
-        algorithms::alphazero::RepresentedEvaluator::new(ChessV1Representation, batcher.client()),
+        alphazero::RepresentedEvaluator::new(ChessV1Representation, batcher.client()),
         MctsConfig {
             simulations: session.simulations,
             eps: 0.0,
@@ -228,15 +227,20 @@ pub(super) fn play_engine_turn_for(
         return Ok(());
     }
     let (_, cfg) = open_existing_run(run_dir, "connect4")?;
-    let batcher = Batcher::new(
-        &cfg.net,
+    anyhow::ensure!(
+        matches!(&cfg.model, ModelConfig::Connect4ScalarAz(_)),
+        "run model is not Connect4 scalar AlphaZero"
+    );
+    let network_cfg = cfg.network_config();
+    let batcher = Batcher::new_with_network(
+        &network_cfg,
         &resolve_model(run_dir, &session.model),
         device,
         session.wait_for_count.max(1),
         Duration::from_millis(1),
     )?;
     let mut mcts = Mcts::new(
-        algorithms::alphazero::RepresentedEvaluator::new(
+        alphazero::RepresentedEvaluator::new(
             Connect4AzRepresentation,
             batcher.client(),
         ),
@@ -258,14 +262,14 @@ pub(super) fn play_engine_turn_for(
 }
 
 fn v2_best_action_for<const HISTORY: usize>(
-    evaluator: algorithms::alphazero::BatcherClient,
+    evaluator: alphazero::BatcherClient,
     game: &ChessGame,
     simulations: usize,
 ) -> Result<u32> {
     let state = game.history_state::<HISTORY>();
     let context = game.repetition_context();
     let mv = Mcts::new(
-        algorithms::alphazero::RepresentedEvaluator::new(
+        alphazero::RepresentedEvaluator::new(
             ChessAzRepresentation::<HISTORY>,
             evaluator,
         ),

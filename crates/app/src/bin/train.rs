@@ -1,15 +1,15 @@
-use algorithms::alphazero::representation::{ChessV1Representation, Connect4AzRepresentation};
-use algorithms::alphazero::{
+use alphazero::representation::Connect4AzRepresentation;
+use alphazero::{
     self_play, train, train_chess_az_v2, AlphaZeroNet, Batcher, ChessAzV2Config, ChessAzV2Net,
-    ChessV2GumbelProfiles, GumbelSearchProfile, InferencePrecision, MctsConfig, MctsVariant,
-    NetConfig, NetworkConfig, ReplayBuffer, RunArchitecture, RunConfig, RunDir, SelfPlayConfig,
-    SelfPlayStats, TrainConfig,
+    ChessScalarAzV1Config, ChessV2GumbelProfiles, Connect4ScalarAzConfig, GumbelSearchProfile,
+    InferencePrecision, MctsConfig, MctsVariant, ModelConfig, NetworkConfig, ReplayBuffer,
+    RunConfig, RunDir, SelfPlayConfig, SelfPlayStats, TrainConfig, RUN_CONFIG_FORMAT_VERSION,
 };
 use anyhow::Result;
 use checkpoint_eval::arena::{self, ArenaConfig};
 use clap::{Parser, ValueEnum};
 use engine_app::chess_selfplay::{self_play_chess, self_play_chess_az_v2};
-use games::{ChessGame, ChessPosition, Connect4};
+use games::{ChessGame, Connect4};
 use serde_json::json;
 use std::fs::{self, OpenOptions};
 use std::os::fd::AsRawFd;
@@ -273,42 +273,42 @@ fn run_chess(mut args: Args) -> Result<()> {
     let requested_architecture = args.architecture;
     let requested_history = args.history;
     let (run_dir, cfg) = RunDir::open_or_create(&root, || {
-        let architecture = match requested_architecture.unwrap_or(ArchitectureKind::ChessAzV2) {
-            ArchitectureKind::Legacy => RunArchitecture::Legacy,
-            ArchitectureKind::ChessAzV2 => RunArchitecture::ChessAzV2(ChessAzV2Config {
+        let model = match requested_architecture.unwrap_or(ArchitectureKind::ChessAzV2) {
+            ArchitectureKind::Legacy => ModelConfig::ChessScalarAzV1(ChessScalarAzV1Config {
+                num_res_blocks: args.blocks.unwrap_or(10),
+                num_filters: args.filters.unwrap_or(64),
+            }),
+            ArchitectureKind::ChessAzV2 => ModelConfig::ChessAzV2(ChessAzV2Config {
                 history: requested_history.unwrap_or(4),
             }),
         };
         RunConfig {
-            game: "chess".into(),
-            net: NetConfig::for_representation::<ChessPosition, ChessV1Representation>(
-                args.blocks.unwrap_or(10),
-                args.filters.unwrap_or(64),
-            ),
-            architecture,
+            format_version: RUN_CONFIG_FORMAT_VERSION,
+            model,
         }
     })?;
     anyhow::ensure!(
-        cfg.game == "chess",
+        cfg.model.game_name() == "chess",
         "run {} is not a chess run",
         root.display()
     );
     if let Some(requested) = requested_architecture {
-        let actual = match cfg.architecture {
-            RunArchitecture::Legacy => ArchitectureKind::Legacy,
-            RunArchitecture::ChessAzV2(_) => ArchitectureKind::ChessAzV2,
+        let actual = match cfg.model {
+            ModelConfig::ChessScalarAzV1(_) => ArchitectureKind::Legacy,
+            ModelConfig::ChessAzV2(_) => ArchitectureKind::ChessAzV2,
+            ModelConfig::Connect4ScalarAz(_) => unreachable!("validated chess run"),
         };
         anyhow::ensure!(
             requested == actual,
             "--architecture contradicts saved run config"
         );
     }
-    match cfg.architecture {
-        RunArchitecture::Legacy => {
+    match cfg.model.clone() {
+        ModelConfig::ChessScalarAzV1(_) => {
             args.run_dir = Some(root);
             run::<ChessGame>(args, 10, 64, self_play_chess)
         }
-        RunArchitecture::ChessAzV2(v2) => {
+        ModelConfig::ChessAzV2(v2) => {
             if let Some(history) = requested_history {
                 anyhow::ensure!(
                     history == v2.history,
@@ -317,5 +317,6 @@ fn run_chess(mut args: Args) -> Result<()> {
             }
             run_chess_az_v2(args, run_dir, cfg, v2)
         }
+        ModelConfig::Connect4ScalarAz(_) => unreachable!("validated chess run"),
     }
 }

@@ -1,13 +1,12 @@
 use chess::{Board, ChessMove, Color, File, Piece, Rank, Square};
-use engine_core::game::Action;
 use std::fmt;
 
 pub const AZ_ACTION_SIZE: usize = 8 * 8 * 73;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AzActionError {
-    OutOfRange(Action),
-    OffBoard { action: Action },
+    OutOfRange(u32),
+    OffBoard { action: u32 },
 }
 
 impl fmt::Display for AzActionError {
@@ -48,8 +47,7 @@ pub(super) fn square_to_az_cell(side_to_move: Color, square: Square) -> (i32, i3
     let rank = square.get_rank().to_index() as i32;
     let row = if side_to_move == Color::White {
         7 - rank
-    }
-    else {
+    } else {
         rank
     };
     (row, file)
@@ -61,8 +59,7 @@ fn az_cell_to_square(side_to_move: Color, row: i32, col: i32) -> Option<Square> 
     }
     let rank = if side_to_move == Color::White {
         7 - row
-    }
-    else {
+    } else {
         row
     };
     Some(Square::make_square(
@@ -112,13 +109,13 @@ fn az_plane_for_move(side_to_move: Color, mv: ChessMove) -> u32 {
     panic!("chess move has unsupported AlphaZero geometry: {mv}");
 }
 
-pub fn encode_v2_action(board: &Board, mv: ChessMove) -> Action {
+pub fn encode_v2_action(board: &Board, mv: ChessMove) -> u32 {
     let side_to_move = board.side_to_move();
     let (row, col) = square_to_az_cell(side_to_move, mv.get_source());
     az_plane_for_move(side_to_move, mv) * 64 + row as u32 * 8 + col as u32
 }
 
-pub fn decode_v2_action(board: &Board, action: Action) -> Result<ChessMove, AzActionError> {
+pub fn decode_v2_action(board: &Board, action: u32) -> Result<ChessMove, AzActionError> {
     if action as usize >= AZ_ACTION_SIZE {
         return Err(AzActionError::OutOfRange(action));
     }
@@ -183,7 +180,7 @@ fn action_cell_to_square(row: u32, column: u32) -> Square {
     )
 }
 
-pub fn encode_v1_action(mv: ChessMove) -> Action {
+pub fn encode_v1_action(mv: ChessMove) -> u32 {
     let from = square_to_action_cell(mv.get_source());
     let to = square_to_action_cell(mv.get_dest());
     let promotion = match mv.get_promotion() {
@@ -197,7 +194,7 @@ pub fn encode_v1_action(mv: ChessMove) -> Action {
     (from * 64 + to) * 5 + promotion
 }
 
-pub fn decode_v1_action(action: Action) -> ChessMove {
+pub fn decode_v1_action(action: u32) -> ChessMove {
     let promotion = match action % 5 {
         0 => None,
         1 => Some(Piece::Queen),

@@ -82,16 +82,13 @@ pub fn resolve_model(run_dir: &Path, model: &str) -> PathBuf {
                 run_dir
                     .join("checkpoints")
                     .join(format!("ckpt_{idx:04}.safetensors"))
-            }
-            else {
+            } else {
                 let path = PathBuf::from(other);
                 if path.is_absolute() {
                     path
-                }
-                else if other.starts_with("ckpt_") {
+                } else if other.starts_with("ckpt_") {
                     run_dir.join("checkpoints").join(path)
-                }
-                else {
+                } else {
                     run_dir.join(path)
                 }
             }
@@ -112,10 +109,10 @@ pub fn open_existing_run(root: &Path, expected_game: &str) -> Result<(RunDir, Ru
         )
     })?;
     anyhow::ensure!(
-        cfg.game == expected_game,
+        cfg.model.game_name() == expected_game,
         "run dir {} holds a {} run, not {}",
         root.display(),
-        cfg.game,
+        cfg.model.game_name(),
         expected_game
     );
     Ok((run, cfg))
@@ -238,8 +235,7 @@ pub(super) async fn get_session(
     axum::extract::Path(id): axum::extract::Path<u64>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let sessions = state.sessions.lock().unwrap();
-    let Some(session) = sessions.iter().find(|s| session_id(s) == id)
-    else {
+    let Some(session) = sessions.iter().find(|s| session_id(s) == id) else {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "unknown session" })),

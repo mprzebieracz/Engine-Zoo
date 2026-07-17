@@ -1,0 +1,13 @@
+[package]
+name = "search"
+version.workspace = true
+edition.workspace = true
+description = "Generic game-tree search for engine-zoo"
+
+[dependencies]
+engine_core = { path = "../core" }
+rand.workspace = true
+rand_distr.workspace = true
+
+[dev-dependencies]
+games = { path = "../games" }

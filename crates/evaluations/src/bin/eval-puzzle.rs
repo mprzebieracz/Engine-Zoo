@@ -49,7 +49,7 @@ fn main() -> Result<()> {
         &args.run_dir,
         &args.checkpoint,
         device(&args.device)?,
-        algorithms::alphazero::MctsConfig {
+        alphazero::MctsConfig {
             simulations: args.simulations,
             leaf_batch_size: args.leaf_batch_size,
             eps: 0.0,

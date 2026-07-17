@@ -1,8 +1,8 @@
-use algorithms::alphazero::representation::{ChessAzRepresentation, ChessV1Representation};
-use algorithms::alphazero::{
-    Batcher, Mcts, MctsConfig, MctsVariant, RepresentedEvaluator, RunArchitecture, RunDir,
+use alphazero::representation::{ChessAzRepresentation, ChessV1Representation};
+use alphazero::{
+    Batcher, Mcts, MctsConfig, MctsVariant, ModelConfig, RepresentedEvaluator, RunDir,
 };
-use algorithms::search::ChessRepetitionRules;
+use alphazero::ChessRepetitionRules;
 use anyhow::{Context, Result};
 use engine_core::agent::PolicyMode;
 use engine_core::game::GameState;
@@ -50,7 +50,7 @@ pub struct ChessUciEngine {
 }
 
 struct LoadedModel {
-    architecture: RunArchitecture,
+    model: ModelConfig,
 }
 
 impl Default for ChessUciEngine {
@@ -111,9 +111,7 @@ impl ChessUciEngine {
             Duration::from_millis(1),
         )?;
         self.batcher = Some(batcher);
-        self.loaded = Some(LoadedModel {
-            architecture: cfg.architecture,
-        });
+        self.loaded = Some(LoadedModel { model: cfg.model });
         Ok(())
     }
 
@@ -124,8 +122,8 @@ impl ChessUciEngine {
         self.ensure_model()?;
         let simulations = simulations.unwrap_or(self.settings.simulations).max(1);
         let evaluator = self.batcher.as_ref().expect("model loaded").client();
-        match &self.loaded.as_ref().expect("model loaded").architecture {
-            RunArchitecture::Legacy => {
+        match &self.loaded.as_ref().expect("model loaded").model {
+            ModelConfig::ChessScalarAzV1(_) => {
                 let mut mcts = Mcts::<ChessPosition, _, _>::new(
                     RepresentedEvaluator::new(ChessV1Representation, evaluator),
                     MctsConfig {
@@ -141,20 +139,18 @@ impl ChessUciEngine {
                     self.game.repetition_context(),
                     if sampled {
                         PolicyMode::Explore
-                    }
-                    else {
+                    } else {
                         PolicyMode::Deterministic
                     },
                 );
                 let mv = if sampled {
                     result.sample_move(&mut rand::rng())
-                }
-                else {
+                } else {
                     result.best_move()
                 };
                 Ok(games::chess::ChessUciNotation.format_move(&self.game.position(), mv))
             }
-            RunArchitecture::ChessAzV2(v2) => {
+            ModelConfig::ChessAzV2(v2) => {
                 let sampled = self.position_moves.len() < self.settings.opening_plies;
                 let bestmove = match v2.history {
                     1 => v2_action::<1>(evaluator, &self.game, simulations, sampled),
@@ -164,12 +160,13 @@ impl ChessUciEngine {
                 }?;
                 Ok(bestmove)
             }
+            ModelConfig::Connect4ScalarAz(_) => anyhow::bail!("run is not a chess model"),
         }
     }
 }
 
 fn v2_action<const HISTORY: usize>(
-    evaluator: algorithms::alphazero::BatcherClient,
+    evaluator: alphazero::BatcherClient,
     game: &ChessGame,
     simulations: usize,
     sampled: bool,
@@ -189,15 +186,13 @@ fn v2_action<const HISTORY: usize>(
         game.repetition_context(),
         if sampled {
             PolicyMode::Explore
-        }
-        else {
+        } else {
             PolicyMode::Deterministic
         },
     );
     let mv = if sampled {
         result.sample_move(&mut rand::rng())
-    }
-    else {
+    } else {
         result.best_move()
     };
     Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
@@ -206,23 +201,23 @@ fn v2_action<const HISTORY: usize>(
 fn load_config_and_model(
     run_dir: &Path,
     model: &str,
-) -> Result<(PathBuf, algorithms::alphazero::RunConfig)> {
+) -> Result<(PathBuf, alphazero::RunConfig)> {
     let config_path = run_dir.join("config.json");
-    let config: algorithms::alphazero::RunConfig = serde_json::from_str(
+    let config = alphazero::RunConfig::parse_json(
         &std::fs::read_to_string(&config_path)
             .with_context(|| format!("reading {}", config_path.display()))?,
     )
     .with_context(|| format!("parsing {}", config_path.display()))?;
+    config.validate()?;
     anyhow::ensure!(
-        config.game == "chess",
+        config.model.game_name() == "chess",
         "run is for {}, not chess",
-        config.game
+        config.model.game_name()
     );
     let path = PathBuf::from(model);
     let weights = if path.exists() {
         path
-    }
-    else {
+    } else {
         match model {
             "best" => run_dir.join("best.safetensors"),
             "candidate" => run_dir.join("candidate.safetensors"),

@@ -2,7 +2,8 @@
 members = [
     "crates/core",
     "crates/games",
-    "crates/algorithms",
+    "crates/search",
+    "crates/alphazero",
     "crates/app",
     "crates/evaluations",
 ]

@@ -1,9 +1,9 @@
 mod support;
 
 use self::support::{apply_opening, Stockfish};
-use algorithms::alphazero::representation::ChessV1Representation;
-use algorithms::alphazero::{Batcher, Mcts, MctsConfig, RepresentedEvaluator, RunConfig};
-use algorithms::search::ChessRepetitionRules;
+use alphazero::representation::ChessV1Representation;
+use alphazero::{Batcher, Mcts, MctsConfig, RepresentedEvaluator, RunConfig};
+use alphazero::ChessRepetitionRules;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use engine_core::game::GameState;
@@ -90,15 +90,18 @@ pub fn run() -> Result<()> {
         "auto" => Device::cuda_if_available(),
         other => bail!("unknown --device {other}; use cpu, cuda, or auto"),
     };
-    let config: RunConfig =
-        serde_json::from_str(&fs::read_to_string(args.run_dir.join("config.json"))?)?;
+    let config = RunConfig::parse_json(&fs::read_to_string(args.run_dir.join("config.json"))?)?;
     anyhow::ensure!(
-        config.game == "chess",
-        "{} is not a chess run",
+        matches!(
+            &config.model,
+            alphazero::ModelConfig::ChessScalarAzV1(_)
+        ),
+        "{} is not a Chess scalar AlphaZero v1 run",
         args.run_dir.display()
     );
-    let batcher = Batcher::new(
-        &config.net,
+    let network = config.network_config();
+    let batcher = Batcher::new_with_network(
+        &network,
         &args.checkpoint,
         device,
         1,
@@ -155,8 +158,7 @@ pub fn run() -> Result<()> {
                         engine_core::agent::PolicyMode::Deterministic,
                     )
                     .best_move()
-            }
-            else {
+            } else {
                 let mv = stockfish.best_move(&uci_moves, args.stockfish_movetime_ms)?;
                 ChessUciNotation
                     .parse_move(&state, &mv)
@@ -173,22 +175,18 @@ pub fn run() -> Result<()> {
             if !GameState::is_terminal(&game) || game.terminal_value().unwrap().as_f32() == 0.0 {
                 draws += 1;
                 "1/2-1/2"
-            }
-            else if (ply - 1).is_multiple_of(2) == model_white {
+            } else if (ply - 1).is_multiple_of(2) == model_white {
                 wins += 1;
                 if model_white {
                     "1-0"
-                }
-                else {
+                } else {
                     "0-1"
                 }
-            }
-            else {
+            } else {
                 losses += 1;
                 if model_white {
                     "0-1"
-                }
-                else {
+                } else {
                     "1-0"
                 }
             };
@@ -218,7 +216,7 @@ pub fn run() -> Result<()> {
             "--baseline-games must be a positive even number"
         );
         let baseline_batcher =
-            Batcher::new(&config.net, path, device, 1, Duration::from_millis(2))?;
+            Batcher::new_with_network(&network, path, device, 1, Duration::from_millis(2))?;
         let mut baseline = Mcts::<ChessPosition, _, _>::new(
             RepresentedEvaluator::new(ChessV1Representation, baseline_batcher.client()),
             MctsConfig {
@@ -243,8 +241,7 @@ pub fn run() -> Result<()> {
                             engine_core::agent::PolicyMode::Deterministic,
                         )
                         .best_move()
-                }
-                else {
+                } else {
                     baseline
                         .search(
                             &state,
@@ -259,11 +256,9 @@ pub fn run() -> Result<()> {
             }
             if !GameState::is_terminal(&game) || game.terminal_value().unwrap().as_f32() == 0.0 {
                 baseline_draws += 1;
-            }
-            else if (ply - 1).is_multiple_of(2) == model_white {
+            } else if (ply - 1).is_multiple_of(2) == model_white {
                 baseline_wins += 1;
-            }
-            else {
+            } else {
                 baseline_losses += 1;
             }
         }
@@ -277,8 +272,7 @@ pub fn run() -> Result<()> {
             baseline_score * 100.0 / args.baseline_games as f64,
             400.0 * (baseline_smoothed / (1.0 - baseline_smoothed)).log10(),
         ))
-    }
-    else {
+    } else {
         None
     };
     let record = ResultRecord {

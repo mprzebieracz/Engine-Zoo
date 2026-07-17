@@ -1,7 +1,8 @@
-use algorithms::alphazero::{
-    Batcher, InferencePrecision, Mcts, MctsConfig, MctsVariant, RunArchitecture, RunConfig, RunDir,
+use alphazero::{
+    Batcher, InferencePrecision, Mcts, MctsConfig, MctsVariant, ModelConfig, NetworkConfig,
+    RunConfig, RunDir,
 };
-use algorithms::analysis::{
+use alphazero::{
     analyze_game_mcts, analyze_game_net, Analysis, AnalyzeConfig, AnalyzeMode,
 };
 use anyhow::Result;

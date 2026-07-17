@@ -2,7 +2,7 @@ use crate::proxy::{analyze_request, run_dir, AnalyzeRequest, GameKind};
 use crate::visualization::{
     chess_board_for_position, render_bench_report, BenchReport, BenchReportRow,
 };
-use algorithms::analysis::{Analysis, AnalyzeMode};
+use alphazero::{Analysis, AnalyzeMode};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use games::setup::{ChessSetup, Connect4Setup, GameSetup};

@@ -1,6 +1,7 @@
-use algorithms::alphazero::representation::{ChessAzRepresentation, ChessV1Representation};
-use algorithms::alphazero::{Batcher, Mcts, MctsConfig, RepresentedEvaluator, RunArchitecture};
-use algorithms::search::{ChessRepetitionRules, NoExtraRules};
+use alphazero::representation::{ChessAzRepresentation, ChessV1Representation};
+use alphazero::{Batcher, Mcts, MctsConfig, ModelConfig, RepresentedEvaluator};
+use alphazero::ChessRepetitionRules;
+use search::NoExtraRules;
 use anyhow::{Context, Result};
 use engine_core::notation::GameNotation;
 use games::chess::ChessUciNotation;
@@ -151,8 +152,7 @@ pub fn evaluate_moves(
     }
     summary.accuracy = if summary.total == 0 {
         0.0
-    }
-    else {
+    } else {
         summary.correct as f64 / summary.total as f64
     };
     Ok((results, summary))
@@ -179,33 +179,36 @@ pub fn evaluate_checkpoint(
     device: Device,
     mcts_config: MctsConfig,
 ) -> Result<(Vec<PuzzleResult>, PuzzleSummary)> {
-    let config: algorithms::alphazero::RunConfig = serde_json::from_str(
+    let config = alphazero::RunConfig::parse_json(
         &std::fs::read_to_string(run_dir.join("config.json"))
             .with_context(|| format!("reading {}", run_dir.join("config.json").display()))?,
     )
     .with_context(|| format!("parsing {}/config.json", run_dir.display()))?;
     anyhow::ensure!(
-        config.game == "chess",
+        config.model.game_name() == "chess",
         "{} is not a chess run",
         run_dir.display()
     );
     let network = config.network_config();
     let batcher =
         Batcher::new_with_network(&network, checkpoint, device, 1, Duration::from_millis(2))?;
-    match config.architecture {
-        RunArchitecture::Legacy => evaluate_legacy_puzzles(puzzles, batcher.client(), mcts_config),
-        RunArchitecture::ChessAzV2(v2) => match v2.history {
+    match config.model {
+        ModelConfig::ChessScalarAzV1(_) => {
+            evaluate_legacy_puzzles(puzzles, batcher.client(), mcts_config)
+        }
+        ModelConfig::ChessAzV2(v2) => match v2.history {
             1 => evaluate_v2_puzzles::<1>(puzzles, batcher.client(), mcts_config),
             4 => evaluate_v2_puzzles::<4>(puzzles, batcher.client(), mcts_config),
             8 => evaluate_v2_puzzles::<8>(puzzles, batcher.client(), mcts_config),
             history => anyhow::bail!("unsupported chess-az-v2 history length {history}"),
         },
+        ModelConfig::Connect4ScalarAz(_) => unreachable!("validated chess run"),
     }
 }
 
 fn evaluate_legacy_puzzles(
     puzzles: &[Puzzle],
-    evaluator: algorithms::alphazero::BatcherClient,
+    evaluator: alphazero::BatcherClient,
     mcts_config: MctsConfig,
 ) -> Result<(Vec<PuzzleResult>, PuzzleSummary)> {
     let mut mcts = Mcts::new(
@@ -225,7 +228,7 @@ fn evaluate_legacy_puzzles(
 
 fn evaluate_v2_puzzles<const HISTORY: usize>(
     puzzles: &[Puzzle],
-    evaluator: algorithms::alphazero::BatcherClient,
+    evaluator: alphazero::BatcherClient,
     mcts_config: MctsConfig,
 ) -> Result<(Vec<PuzzleResult>, PuzzleSummary)> {
     let mut mcts = Mcts::new(
@@ -333,29 +336,26 @@ mod tests {
 
     #[test]
     fn v2_runs_select_the_explicit_v2_network_format() {
-        let legacy = algorithms::alphazero::RunConfig {
-            game: "chess".into(),
-            net: algorithms::alphazero::NetConfig {
-                input_channels: 1,
-                height: 1,
-                width: 1,
-                num_res_blocks: 1,
-                num_filters: 1,
-                action_size: 1,
-            },
-            architecture: RunArchitecture::Legacy,
+        let legacy = alphazero::RunConfig {
+            format_version: alphazero::RUN_CONFIG_FORMAT_VERSION,
+            model: alphazero::ModelConfig::ChessScalarAzV1(
+                alphazero::ChessScalarAzV1Config {
+                    num_res_blocks: 1,
+                    num_filters: 1,
+                },
+            ),
         };
         assert!(matches!(
             legacy.network_config(),
-            algorithms::alphazero::NetworkConfig::Legacy(_)
+            alphazero::NetworkConfig::Legacy(_)
         ));
-        let v2 = algorithms::alphazero::RunConfig {
-            architecture: RunArchitecture::ChessAzV2(Default::default()),
-            ..legacy
+        let v2 = alphazero::RunConfig {
+            format_version: alphazero::RUN_CONFIG_FORMAT_VERSION,
+            model: alphazero::ModelConfig::ChessAzV2(Default::default()),
         };
         assert!(matches!(
             v2.network_config(),
-            algorithms::alphazero::NetworkConfig::ChessAzV2(_)
+            alphazero::NetworkConfig::ChessAzV2(_)
         ));
     }
 }

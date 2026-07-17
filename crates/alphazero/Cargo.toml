@@ -1,0 +1,17 @@
+[package]
+name = "alphazero"
+version.workspace = true
+edition.workspace = true
+description = "Neural AlphaZero training and inference for engine-zoo"
+build = "build.rs"
+
+[dependencies]
+anyhow.workspace = true
+chess.workspace = true
+engine_core = { path = "../core" }
+games = { path = "../games" }
+rand.workspace = true
+search = { path = "../search" }
+serde.workspace = true
+serde_json.workspace = true
+tch.workspace = true
