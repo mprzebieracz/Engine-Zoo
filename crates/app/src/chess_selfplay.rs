@@ -13,7 +13,10 @@ use algorithms::alphazero::{
 };
 use algorithms::search::ChessRepetitionRules;
 use engine_core::agent::PolicyMode;
-use engine_core::game::Game;
+use engine_core::{
+    game::{GameState, TerminalValue},
+    Game,
+};
 use games::{ChessGame, ChessHistoryState, ChessPosition};
 use rand::Rng;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -154,12 +157,12 @@ fn play_chess_game(
         ..Default::default()
     };
 
-    while !game.is_terminal() && trajectory.len() < cfg.max_moves {
+    while !Game::is_terminal(&game) && trajectory.len() < cfg.max_moves {
         if should_stop() {
             return None;
         }
         let mut state = vec![0.0; ChessGame::state_size()];
-        game.encode_state(&mut state);
+        ChessV1Representation.encode_state(&game.position_state(), &mut state);
 
         let full_search = rng.random_bool(cfg.full_simulation_probability.clamp(0.0, 1.0) as f64);
         if let Some(profiles) = cfg.chess_v2_gumbel_profiles {
@@ -239,7 +242,8 @@ fn play_chess_game(
         game.play(action);
     }
 
-    let mut value = resigned_value.unwrap_or_else(|| -game.reward());
+    let mut value =
+        resigned_value.unwrap_or_else(|| -game.terminal_value().map_or(0.0, TerminalValue::as_f32));
     for transition in trajectory.iter_mut().rev() {
         transition.reward = value;
         value = -value;
@@ -273,7 +277,7 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
         ..Default::default()
     };
 
-    while !game.is_terminal() && trajectory.len() < cfg.max_moves {
+    while !Game::is_terminal(&game) && trajectory.len() < cfg.max_moves {
         if should_stop() {
             return None;
         }
@@ -351,7 +355,8 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
         game.play(action);
     }
 
-    let mut value = resigned_value.unwrap_or_else(|| -game.reward());
+    let mut value =
+        resigned_value.unwrap_or_else(|| -game.terminal_value().map_or(0.0, TerminalValue::as_f32));
     for transition in trajectory.iter_mut().rev() {
         transition.reward = value;
         value = -value;

@@ -5,7 +5,7 @@ use algorithms::alphazero::{
 use algorithms::search::ChessRepetitionRules;
 use anyhow::{Context, Result};
 use engine_core::agent::PolicyMode;
-use engine_core::game::Game;
+use engine_core::game::GameState;
 use engine_core::notation::GameNotation;
 use games::{ChessGame, ChessPosition};
 use std::path::{Path, PathBuf};
@@ -75,10 +75,10 @@ impl ChessUciEngine {
             Some(fen) => ChessGame::from_fen(fen)?,
             None => ChessGame::default(),
         };
-        for mv in moves {
+        for text in moves {
             let mv = games::chess::ChessUciNotation
-                .parse_move(&game.position(), mv)
-                .ok_or_else(|| anyhow::anyhow!("illegal chess move {mv}"))?;
+                .parse_move(&game.position(), text)
+                .ok_or_else(|| anyhow::anyhow!("illegal chess move {text}"))?;
             game.play(mv);
         }
         self.game = game;
@@ -214,7 +214,7 @@ fn load_config_and_model(
     )
     .with_context(|| format!("parsing {}", config_path.display()))?;
     anyhow::ensure!(
-        config.game == ChessGame::NAME,
+        config.game == "chess",
         "run is for {}, not chess",
         config.game
     );
@@ -278,7 +278,9 @@ mod tests {
         engine
             .set_position(Some("8/8/8/8/8/8/4K3/7k w - - 0 1"), &["e2f3".into()])
             .unwrap();
-        assert!(engine.game.parse_move("h1g1").is_some());
+        assert!(games::chess::ChessUciNotation
+            .parse_move(&engine.game.position(), "h1g1")
+            .is_some());
 
         let before = engine.game.to_string();
         assert!(engine.set_position(Some("not a fen"), &[]).is_err());

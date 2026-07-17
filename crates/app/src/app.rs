@@ -3,7 +3,6 @@ use crate::proxy::{open_existing_run, resolve_model, run_dir, serve, GameKind, S
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use engine_core::agent::{Agent, PolicyMode};
-use engine_core::game::GameState;
 use games::{ChessGame, Connect4};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -150,7 +149,7 @@ fn build_agent<G: crate::players::InteractiveGame>(
     match spec {
         AgentSpec::User => Ok(PlayerAgent::Human(HumanAgent)),
         AgentSpec::AlphaZero { model } => {
-            let (_, cfg) = open_existing_run::<G>(run_dir)?;
+            let (_, cfg) = open_existing_run(run_dir, interactive_game_name::<G>())?;
             let weights = resolve_model(run_dir, model);
             Ok(PlayerAgent::AlphaZero(Box::new(AlphaZeroAgent::<G>::new(
                 &cfg.net,
@@ -161,6 +160,15 @@ fn build_agent<G: crate::players::InteractiveGame>(
                 Duration::from_millis(1),
             )?)))
         }
+    }
+}
+
+fn interactive_game_name<G: crate::players::InteractiveGame>() -> &'static str {
+    if std::any::TypeId::of::<G>() == std::any::TypeId::of::<ChessGame>() {
+        "chess"
+    }
+    else {
+        "connect4"
     }
 }
 

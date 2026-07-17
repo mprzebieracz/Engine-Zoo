@@ -1,4 +1,6 @@
 use super::*;
+use engine_core::game::{Game, GameState, TerminalValue};
+use engine_core::notation::GameNotation;
 
 pub(super) fn session_id(session: &LiveSession) -> u64 {
     match session {
@@ -16,15 +18,15 @@ pub(super) fn session_human_turn(session: &LiveSession) -> bool {
 
 pub(super) fn session_terminal(session: &LiveSession) -> bool {
     match session {
-        LiveSession::Chess(s) => s.game.is_terminal(),
-        LiveSession::Connect4(s) => s.game.is_terminal(),
+        LiveSession::Chess(s) => s.game.terminal_value().is_some(),
+        LiveSession::Connect4(s) => s.game.terminal_value().is_some(),
     }
 }
 
 pub(super) fn session_view(session: &LiveSession) -> serde_json::Value {
     match session {
         LiveSession::Chess(s) => session_view_chess(s),
-        LiveSession::Connect4(s) => session_view_for(s),
+        LiveSession::Connect4(s) => session_view_connect4(s),
     }
 }
 
@@ -36,9 +38,9 @@ pub(super) fn session_view_chess(session: &SessionState<ChessGame>) -> serde_jso
             8 => v2_legal_moves::<8>(&session.game),
             _ => unreachable!("validated v2 history length"),
         };
-        return session_view_with_legal(session, legal_moves);
+        return session_view_chess_with_legal(session, legal_moves);
     }
-    session_view_for(session)
+    session_view_chess_for(session)
 }
 
 fn v2_legal_moves<const HISTORY: usize>(game: &ChessGame) -> Vec<serde_json::Value> {
@@ -49,8 +51,8 @@ fn v2_legal_moves<const HISTORY: usize>(game: &ChessGame) -> Vec<serde_json::Val
         .collect()
 }
 
-fn session_view_with_legal<G: Game>(
-    session: &SessionState<G>,
+fn session_view_chess_with_legal(
+    session: &SessionState<ChessGame>,
     legal_moves: Vec<serde_json::Value>,
 ) -> serde_json::Value {
     json!({
@@ -60,20 +62,21 @@ fn session_view_with_legal<G: Game>(
         "san_moves": session.san_moves,
         "pgn": notation::movetext(&session.san_moves, 0, ""),
         "human_turn": session.human_turn,
-        "terminal": session.game.is_terminal(),
-        "reward": session.game.reward(),
+        "terminal": session.game.terminal_value().is_some(),
+        "reward": session.game.terminal_value().map_or(0.0, TerminalValue::as_f32),
         "legal_moves": legal_moves,
     })
 }
 
-pub(super) fn session_view_for<G: Game>(session: &SessionState<G>) -> serde_json::Value {
+pub(super) fn session_view_chess_for(session: &SessionState<ChessGame>) -> serde_json::Value {
     let legal_moves: Vec<_> = session
         .game
-        .legal_actions()
-        .map(|action| {
+        .legal_moves()
+        .map(|mv| {
+            let action = games::encode_v1_action(mv);
             json!({
                 "action": action,
-                "move": session.game.format_action(action),
+                "move": games::chess::ChessUciNotation.format_move(&session.game.position(), mv),
             })
         })
         .collect();
@@ -84,8 +87,21 @@ pub(super) fn session_view_for<G: Game>(session: &SessionState<G>) -> serde_json
         "san_moves": session.san_moves,
         "pgn": notation::movetext(&session.san_moves, 0, ""),
         "human_turn": session.human_turn,
-        "terminal": session.game.is_terminal(),
-        "reward": session.game.reward(),
+        "terminal": session.game.terminal_value().is_some(),
+        "reward": session.game.terminal_value().map_or(0.0, TerminalValue::as_f32),
         "legal_moves": legal_moves,
+    })
+}
+
+pub(super) fn session_view_connect4(session: &SessionState<Connect4>) -> serde_json::Value {
+    let legal_moves: Vec<_> = session.game.legal_moves().map(|mv| {
+        let action = mv.column() as u32;
+        json!({ "action": action, "move": games::connect4::notation::Connect4Notation.format_move(&session.game, mv) })
+    }).collect();
+    json!({
+        "id": session.id, "board": session.game.to_string(), "moves": session.moves,
+        "san_moves": session.san_moves, "pgn": notation::movetext(&session.san_moves, 0, ""),
+        "human_turn": session.human_turn, "terminal": session.game.terminal_value().is_some(),
+        "reward": session.game.terminal_value().map_or(0.0, TerminalValue::as_f32), "legal_moves": legal_moves,
     })
 }

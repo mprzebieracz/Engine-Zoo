@@ -4,6 +4,7 @@ use algorithms::alphazero::representation::{
 };
 use algorithms::search::{ChessRepetitionRules, NoExtraRules};
 use engine_core::notation::GameNotation;
+use engine_core::Game;
 
 struct ChessHistoryNotation;
 
@@ -44,7 +45,7 @@ pub fn analyze_request(
     };
     match (game, req.position) {
         (GameKind::Chess, GameSetup::Chess(position)) => {
-            let (_, run_cfg) = open_existing_run::<ChessGame>(&run_dir)?;
+            let (_, run_cfg) = open_existing_run(&run_dir, "chess")?;
             let weights = resolve_model(&run_dir, &req.model);
             match run_cfg.architecture {
                 RunArchitecture::Legacy => analyze_chess_legacy(
@@ -63,7 +64,7 @@ pub fn analyze_request(
             }
         }
         (GameKind::Connect4, GameSetup::Connect4(position)) => {
-            let (_, run_cfg) = open_existing_run::<Connect4>(&run_dir)?;
+            let (_, run_cfg) = open_existing_run(&run_dir, "connect4")?;
             let weights = resolve_model(&run_dir, &req.model);
             analyze_connect4(
                 &run_cfg,
@@ -188,7 +189,7 @@ fn analyze_chess_az_v2<const HISTORY: usize>(
     cfg: &AnalyzeConfig,
 ) -> Result<Analysis> {
     let (game, state) = chess_az_state_snapshot::<HISTORY>(position)?;
-    if state.is_terminal() {
+    if Game::is_terminal(&state) {
         return Ok(Analysis {
             value: state.reward(),
             network_value: state.reward(),
