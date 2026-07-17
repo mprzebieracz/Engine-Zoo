@@ -48,7 +48,7 @@ impl<E: EncodedEvaluator> MctsCore<E, Gumbel, Action, Vec<u64>> {
         self.clear_tree();
         self.nodes.push(Node::new(
             None,
-            0,
+            None,
             driver.root_hash(game),
             0.0,
             0.0,
@@ -68,7 +68,9 @@ impl<E: EncodedEvaluator> MctsCore<E, Gumbel, Action, Vec<u64>> {
             0.0
         };
         let winner = self.run_gumbel(game, root_value, gumbel_scale, driver);
-        let selected_move = self.nodes[winner as usize].action_from_parent;
+        let selected_move = self.nodes[winner as usize]
+            .move_from_parent
+            .expect("Gumbel winner must be a root child");
         let policy = self.root_gumbel_policy(root_value);
 
         SearchResult {
@@ -100,7 +102,12 @@ impl<E: EncodedEvaluator> MctsCore<E, Gumbel, Action, Vec<u64>> {
             let child = &self.nodes[c as usize];
             let q = self.completed_root_child_q(c, transform);
             let p = (child.logit + transform.apply(q) - max_search_logit).exp();
-            policy.push((child.action_from_parent, p));
+            policy.push((
+                child
+                    .move_from_parent
+                    .expect("root child must store a move"),
+                p,
+            ));
             sum += p;
         }
 

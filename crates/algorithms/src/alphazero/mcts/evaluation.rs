@@ -215,8 +215,15 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V, Action, Vec<u64>> {
         debug_assert!(self.policy_buf.len() <= u16::MAX as usize);
         let first_child = self.nodes.len() as u32;
         for &(action, prior, logit) in &self.policy_buf {
-            self.nodes
-                .push(Node::new(Some(node), action, 0, prior, logit, false, 0.0));
+            self.nodes.push(Node::new(
+                Some(node),
+                Some(action),
+                0,
+                prior,
+                logit,
+                false,
+                0.0,
+            ));
         }
         let n = &mut self.nodes[node as usize];
         n.first_child = first_child;
