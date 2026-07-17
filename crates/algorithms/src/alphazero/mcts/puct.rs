@@ -28,7 +28,7 @@ impl<E: EncodedEvaluator> MctsCore<E, Puct, Action, Vec<u64>> {
         self.clear_tree_common();
         self.nodes.push(Node::new(
             None,
-            0,
+            None,
             driver.root_hash(game),
             0.0,
             0.0,
@@ -76,7 +76,12 @@ impl<E: EncodedEvaluator> MctsCore<E, Puct, Action, Vec<u64>> {
 
         for c in root.first_child..root.first_child + root.num_children as u32 {
             let child = &self.nodes[c as usize];
-            policy.push((child.action_from_parent, child.visits as f32));
+            policy.push((
+                child
+                    .move_from_parent
+                    .expect("root child must store a move"),
+                child.visits as f32,
+            ));
         }
 
         let sum: f32 = policy.iter().map(|&(_, probability)| probability).sum();

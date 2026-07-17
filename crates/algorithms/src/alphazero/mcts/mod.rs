@@ -216,7 +216,7 @@ struct Node<M> {
     repetitions_before_current: u8,
     repetition_cached: bool,
     first_child: u32,
-    action_from_parent: M,
+    move_from_parent: Option<M>,
     visits: u32,
     virtual_loss_count: u32,
     value_sum: f32,
@@ -231,7 +231,7 @@ struct Node<M> {
 impl<M> Node<M> {
     fn new(
         parent: Option<u32>,
-        action_from_parent: M,
+        move_from_parent: Option<M>,
         hash: u64,
         prior: f32,
         logit: f32,
@@ -244,7 +244,7 @@ impl<M> Node<M> {
             repetitions_before_current: 0,
             repetition_cached: false,
             first_child: 0,
-            action_from_parent,
+            move_from_parent,
             visits: 0,
             virtual_loss_count: 0,
             value_sum: 0.0,

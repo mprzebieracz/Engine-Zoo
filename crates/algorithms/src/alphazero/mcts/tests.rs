@@ -34,11 +34,13 @@ fn search_result_supports_native_move_types() {
 
 #[test]
 fn node_storage_accepts_non_legacy_move_types() {
-    let node = super::Node::new(None, TestMove::Left, 0, 0.5, 0.0, false, 0.0);
-    assert_eq!(node.action_from_parent, TestMove::Left);
+    let root = super::Node::<TestMove>::new(None, None, 0, 0.5, 0.0, false, 0.0);
+    let node = super::Node::new(Some(0), Some(TestMove::Left), 0, 0.5, 0.0, false, 0.0);
+    assert_eq!(root.move_from_parent, None);
+    assert_eq!(node.move_from_parent, Some(TestMove::Left));
     assert_eq!(
-        std::mem::size_of_val(&node.action_from_parent),
-        std::mem::size_of::<TestMove>()
+        std::mem::size_of_val(&node.move_from_parent),
+        std::mem::size_of::<Option<TestMove>>()
     );
 }
 
@@ -97,7 +99,11 @@ impl<E: EncodedEvaluator> Mcts<E> {
                 .variant
                 .root_actions
                 .iter()
-                .map(|a| core.nodes[a.node as usize].action_from_parent)
+                .map(|a| {
+                    core.nodes[a.node as usize]
+                        .move_from_parent
+                        .expect("root action must be a child move")
+                })
                 .collect(),
         }
     }

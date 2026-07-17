@@ -15,7 +15,11 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V, Action, Vec<u64>> {
         let mut current = game.clone();
 
         if node != 0 {
-            current.step(self.nodes[node as usize].action_from_parent);
+            current.step(
+                self.nodes[node as usize]
+                    .move_from_parent
+                    .expect("non-root node must store a move"),
+            );
             self.cache_terminal(node, &current);
         }
 
@@ -32,7 +36,11 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V, Action, Vec<u64>> {
                 break;
             };
             node = best;
-            current.step(self.nodes[best as usize].action_from_parent);
+            current.step(
+                self.nodes[best as usize]
+                    .move_from_parent
+                    .expect("selected child must store a move"),
+            );
             self.cache_terminal(best, &current);
         }
 
@@ -57,7 +65,11 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V, Action, Vec<u64>> {
         self.path_state.push(current.repetition_hash());
 
         if node != 0 {
-            current.step(self.nodes[node as usize].action_from_parent);
+            current.step(
+                self.nodes[node as usize]
+                    .move_from_parent
+                    .expect("non-root node must store a move"),
+            );
             self.path_state.push(current.repetition_hash());
             self.cache_repetition_state(node, &mut current, root_repetitions);
         }
@@ -75,7 +87,11 @@ impl<E: EncodedEvaluator, V> MctsCore<E, V, Action, Vec<u64>> {
                 break;
             };
             node = best;
-            current.step(self.nodes[best as usize].action_from_parent);
+            current.step(
+                self.nodes[best as usize]
+                    .move_from_parent
+                    .expect("selected child must store a move"),
+            );
             self.path_state.push(current.repetition_hash());
             self.cache_repetition_state(best, &mut current, root_repetitions);
         }
