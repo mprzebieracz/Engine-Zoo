@@ -1,5 +1,4 @@
-use super::action::{decode_v2_action, encode_v2_action, square_to_az_cell, AZ_ACTION_SIZE};
-use super::notation;
+use super::action::square_to_az_cell;
 use super::position::ChessPosition;
 use chess::{Board, ChessMove, Color, MoveGen, Piece};
 use engine_core::game::{GameState, TerminalValue};
