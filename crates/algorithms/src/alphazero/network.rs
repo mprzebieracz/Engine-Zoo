@@ -1,4 +1,5 @@
-use engine_core::game::Game;
+use super::representation::AlphaZeroRepresentation;
+use engine_core::GameState;
 use serde::{Deserialize, Serialize};
 use tch::{nn, Kind, Tensor};
 
@@ -26,15 +27,18 @@ pub struct NetConfig {
 }
 
 impl NetConfig {
-    pub fn for_game<G: Game>(num_res_blocks: i64, num_filters: i64) -> Self {
-        let [input_channels, height, width] = G::STATE_SHAPE;
+    pub fn for_representation<G: GameState, R: AlphaZeroRepresentation<G>>(
+        num_res_blocks: i64,
+        num_filters: i64,
+    ) -> Self {
+        let [input_channels, height, width] = R::STATE_SHAPE.map(|size| size as i64);
         Self {
             input_channels,
             height,
             width,
             num_res_blocks,
             num_filters,
-            action_size: G::ACTION_SIZE as i64,
+            action_size: R::ACTION_SIZE as i64,
         }
     }
 
