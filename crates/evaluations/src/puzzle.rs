@@ -2,8 +2,8 @@ use algorithms::alphazero::representation::{ChessAzRepresentation, ChessV1Repres
 use algorithms::alphazero::{Batcher, Mcts, MctsConfig, RepresentedEvaluator, RunArchitecture};
 use algorithms::search::{ChessRepetitionRules, NoExtraRules};
 use anyhow::{Context, Result};
-use engine_core::game::Game;
 use engine_core::notation::GameNotation;
+use games::chess::ChessUciNotation;
 use games::ChessGame;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -93,14 +93,16 @@ pub fn evaluate_moves(
         let game = ChessGame::from_fen(&puzzle.fen)
             .with_context(|| format!("invalid FEN for puzzle {}", puzzle.id))?;
         for accepted in &puzzle.accepted_moves {
-            let action = game.parse_move(accepted).with_context(|| {
-                format!(
-                    "puzzle {} has illegal accepted UCI move {accepted}",
-                    puzzle.id
-                )
-            })?;
+            let action = ChessUciNotation
+                .parse_move(&game.position(), accepted)
+                .with_context(|| {
+                    format!(
+                        "puzzle {} has illegal accepted UCI move {accepted}",
+                        puzzle.id
+                    )
+                })?;
             anyhow::ensure!(
-                game.format_action(action) == *accepted,
+                ChessUciNotation.format_move(&game.position(), action) == *accepted,
                 "puzzle {} has non-canonical accepted UCI move {accepted}",
                 puzzle.id
             );
@@ -111,14 +113,16 @@ pub fn evaluate_moves(
             puzzle.id
         );
         let move_played = candidate_move(puzzle)?;
-        let action = game.parse_move(&move_played).with_context(|| {
-            format!(
-                "candidate returned illegal UCI move {move_played} for puzzle {}",
-                puzzle.id
-            )
-        })?;
+        let action = ChessUciNotation
+            .parse_move(&game.position(), &move_played)
+            .with_context(|| {
+                format!(
+                    "candidate returned illegal UCI move {move_played} for puzzle {}",
+                    puzzle.id
+                )
+            })?;
         anyhow::ensure!(
-            game.format_action(action) == move_played,
+            ChessUciNotation.format_move(&game.position(), action) == move_played,
             "candidate returned non-canonical UCI move {move_played} for puzzle {}",
             puzzle.id
         );
