@@ -3,8 +3,8 @@ use algorithms::alphazero::representation::{
     ChessAzRepresentation, ChessV1Representation, Connect4AzRepresentation,
 };
 use algorithms::search::{ChessRepetitionRules, NoExtraRules};
+use engine_core::game::{GameState, TerminalValue};
 use engine_core::notation::GameNotation;
-use engine_core::Game;
 
 struct ChessHistoryNotation;
 
@@ -189,10 +189,10 @@ fn analyze_chess_az_v2<const HISTORY: usize>(
     cfg: &AnalyzeConfig,
 ) -> Result<Analysis> {
     let (game, state) = chess_az_state_snapshot::<HISTORY>(position)?;
-    if Game::is_terminal(&state) {
+    if state.is_terminal() {
         return Ok(Analysis {
-            value: state.reward(),
-            network_value: state.reward(),
+            value: state.terminal_value().map_or(0.0, TerminalValue::as_f32),
+            network_value: state.terminal_value().map_or(0.0, TerminalValue::as_f32),
             mcts_value: None,
             best_action: None,
             best_move: None,

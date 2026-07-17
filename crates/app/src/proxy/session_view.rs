@@ -1,5 +1,6 @@
 use super::*;
-use engine_core::game::{Game, GameState, TerminalValue};
+use algorithms::alphazero::representation::{AlphaZeroRepresentation, ChessAzRepresentation};
+use engine_core::game::{GameState, TerminalValue};
 use engine_core::notation::GameNotation;
 
 pub(super) fn session_id(session: &LiveSession) -> u64 {
@@ -45,9 +46,15 @@ pub(super) fn session_view_chess(session: &SessionState<ChessGame>) -> serde_jso
 
 fn v2_legal_moves<const HISTORY: usize>(game: &ChessGame) -> Vec<serde_json::Value> {
     let state = game.history_state::<HISTORY>();
+    let representation = ChessAzRepresentation::<HISTORY>;
     state
-        .legal_actions()
-        .map(|action| json!({ "action": action, "move": state.format_action(action) }))
+        .legal_moves()
+        .map(|mv| {
+            json!({
+                "action": representation.move_to_action(&state, mv).as_u32(),
+                "move": games::chess::ChessUciNotation.format_move(&state.position(), mv),
+            })
+        })
         .collect()
 }
 
