@@ -6,7 +6,8 @@ description = "Background Stockfish evaluation for engine-zoo checkpoints"
 build = "build.rs"
 
 [dependencies]
-algorithms = { path = "../algorithms" }
+alphazero = { path = "../alphazero" }
+search = { path = "../search" }
 anyhow.workspace = true
 clap.workspace = true
 engine_core = { path = "../core" }

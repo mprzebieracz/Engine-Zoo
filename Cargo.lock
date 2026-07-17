@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "algorithms"
+name = "alphazero"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -37,7 +37,7 @@ dependencies = [
  "engine_core",
  "games",
  "rand 0.9.4",
- "rand_distr",
+ "search",
  "serde",
  "serde_json",
  "tch",
@@ -288,12 +288,13 @@ dependencies = [
 name = "checkpoint-eval"
 version = "0.1.0"
 dependencies = [
- "algorithms",
+ "alphazero",
  "anyhow",
  "clap",
  "engine_core",
  "games",
  "rand 0.9.4",
+ "search",
  "serde",
  "serde_json",
  "tch",
@@ -454,7 +455,7 @@ dependencies = [
 name = "engine_app"
 version = "0.1.0"
 dependencies = [
- "algorithms",
+ "alphazero",
  "anyhow",
  "axum",
  "checkpoint-eval",
@@ -464,6 +465,7 @@ dependencies = [
  "libc",
  "rand 0.9.4",
  "reqwest",
+ "search",
  "serde",
  "serde_json",
  "tch",
@@ -1572,6 +1574,16 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "search"
+version = "0.1.0"
+dependencies = [
+ "engine_core",
+ "games",
+ "rand 0.9.4",
+ "rand_distr",
+]
 
 [[package]]
 name = "serde"

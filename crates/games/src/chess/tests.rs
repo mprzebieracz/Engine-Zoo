@@ -1,8 +1,16 @@
 use super::az::HistoryFrame;
 use super::*;
 use engine_core::game::{GameState, TerminalValue};
-use engine_core::rules::RepetitionGame;
+use engine_core::notation::GameNotation;
 use std::str::FromStr;
+
+/// Parses a legal UCI move against the current game position and plays it.
+fn play_uci(game: &mut ChessGame, text: &str) {
+    let mv = ChessUciNotation
+        .parse_move(&game.position(), text)
+        .unwrap_or_else(|| panic!("{text} should be legal"));
+    game.play(mv);
+}
 
 /// Load a FEN for unit tests. Restores the board and mate/stalemate only;
 /// ply and halfmove_clock start at zero (the `chess` crate drops FEN clocks).
@@ -33,7 +41,7 @@ fn from_fen(fen: &str) -> ChessGame {
 #[test]
 fn startpos_has_twenty_moves() {
     let g = ChessGame::default();
-    assert_eq!(g.legal_actions().count(), 20);
+    assert_eq!(g.legal_moves().count(), 20);
 }
 
 #[test]
@@ -41,19 +49,20 @@ fn native_chess_states_match_policy_stepping() {
     let mv = ChessMove::from_str("e2e4").unwrap();
     let mut position = ChessPosition::initial();
     let mut az_native = ChessHistoryState::<4>::initial();
-    let mut az_compat = az_native;
+    let mut az_from_codec = az_native;
 
     assert_eq!(position.legal_moves().count(), 20);
     assert_eq!(az_native.legal_moves().count(), 20);
     position.play(mv);
     az_native.play(mv);
-    az_compat.step(encode_v2_action(az_compat.board(), mv));
+    let action = encode_v2_action(az_from_codec.board(), mv);
+    az_from_codec.play(decode_v2_action(az_from_codec.board(), action).unwrap());
 
     assert_eq!(position.hash(), az_native.position().hash());
-    assert_eq!(az_native.position().hash(), az_compat.position().hash());
+    assert_eq!(az_native.position().hash(), az_from_codec.position().hash());
     assert_eq!(
         az_native.position().halfmove_clock(),
-        az_compat.position().halfmove_clock()
+        az_from_codec.position().halfmove_clock()
     );
 }
 
@@ -107,55 +116,46 @@ fn public_fen_loader_rejects_invalid_clocks() {
 }
 
 #[test]
-#[should_panic(expected = "invalid state buffer length")]
-fn encoding_rejects_wrong_buffer_length() {
-    ChessGame::default().encode_state(&mut []);
-}
-
-#[test]
-fn action_roundtrip_over_random_games() {
+fn az_actions_roundtrip_over_random_games() {
     use rand::prelude::*;
     let mut rng = StdRng::seed_from_u64(7);
     for _ in 0..20 {
-        let mut g = ChessGame::default();
+        let mut game = ChessGame::default();
         for _ in 0..80 {
-            if engine_core::Game::is_terminal(&g) {
+            if game.is_terminal() {
                 break;
             }
-            let legal: Vec<u32> = g.legal_actions().collect();
-            for &a in &legal {
-                assert_eq!(encode_v1_action(decode_v1_action(a)), a);
-                assert!((a as usize) < ChessGame::ACTION_SIZE);
+            let legal: Vec<_> = game.legal_moves().collect();
+            for &mv in &legal {
+                let action = encode_v2_action(game.board(), mv);
+                assert!((action as usize) < AZ_ACTION_SIZE);
+                assert_eq!(decode_v2_action(game.board(), action).unwrap(), mv);
             }
-            g.step(*legal.choose(&mut rng).unwrap());
+            game.play(*legal.choose(&mut rng).unwrap());
         }
     }
 }
 
 #[test]
-fn legacy_search_view_matches_full_game_until_repetition_adjudication() {
+fn history_state_matches_authoritative_game_position() {
     use rand::prelude::*;
     let mut rng = StdRng::seed_from_u64(31);
     for _ in 0..16 {
         let mut game = ChessGame::default();
-        let mut legacy = game.legacy_state();
         for _ in 0..60 {
-            if engine_core::Game::is_terminal(&game) {
+            if game.is_terminal() {
                 break;
             }
-            let legal: Vec<_> = game.legal_actions().collect();
-            assert_eq!(legal, legacy.legal_actions().collect::<Vec<_>>());
-            let mut game_encoding = vec![0.0; ChessGame::state_size()];
-            let mut legacy_encoding = vec![0.0; ChessLegacyState::state_size()];
-            game.encode_state(&mut game_encoding);
-            legacy.encode_state(&mut legacy_encoding);
-            assert_eq!(game_encoding, legacy_encoding);
+            let history = game.history_state::<8>();
+            assert_eq!(
+                game.legal_moves().collect::<Vec<_>>(),
+                history.legal_moves().collect::<Vec<_>>()
+            );
+            assert_eq!(game.position().hash(), history.repetition_hash());
+            assert_eq!(game.position().halfmove_clock(), history.reversible_plies());
 
-            let action = *legal.choose(&mut rng).unwrap();
-            game.step(action);
-            legacy.step(action);
-            assert_eq!(game.position().hash(), legacy.repetition_hash());
-            assert_eq!(game.position().halfmove_clock(), legacy.halfmove_clock());
+            let legal: Vec<_> = game.legal_moves().collect();
+            game.play(*legal.choose(&mut rng).unwrap());
         }
     }
 }
@@ -167,10 +167,10 @@ fn az_actions_roundtrip_over_random_games_without_collisions() {
     for _ in 0..20 {
         let mut game = ChessGame::default();
         for _ in 0..80 {
-            if engine_core::Game::is_terminal(&game) {
+            if game.is_terminal() {
                 break;
             }
-            let legal: Vec<_> = MoveGen::new_legal(game.board()).collect();
+            let legal: Vec<_> = game.legal_moves().collect();
             let actions: Vec<_> = legal
                 .iter()
                 .map(|&mv| encode_v2_action(game.board(), mv))
@@ -185,25 +185,23 @@ fn az_actions_roundtrip_over_random_games_without_collisions() {
             for (&mv, &action) in legal.iter().zip(&actions) {
                 assert_eq!(decode_v2_action(game.board(), action).unwrap(), mv);
             }
-            game.step(encode_v1_action(*legal.choose(&mut rng).unwrap()));
+            game.play(*legal.choose(&mut rng).unwrap());
         }
     }
 }
 
 #[test]
-fn az_evaluation_cache_key_includes_history_and_clock_features() {
+fn history_state_retains_frames_for_alpha_zero_evaluation() {
     let initial = ChessHistoryState::<4>::default();
     let mut returned = initial;
-    for mv in ["g1f3", "g8f6", "f3g1", "f6g8"] {
-        returned.step(returned.parse_move(mv).unwrap());
+    for text in ["g1f3", "g8f6", "f3g1", "f6g8"] {
+        returned.play(ChessMove::from_str(text).unwrap());
     }
 
     assert_eq!(initial.repetition_hash(), returned.repetition_hash());
-    assert_ne!(
-        initial.evaluation_cache_key(),
-        returned.evaluation_cache_key(),
-        "identical boards with different v2 feature histories must not share an evaluation"
-    );
+    assert_ne!(initial.position().ply(), returned.position().ply());
+    assert_eq!(returned.frames.iter().flatten().count(), 4);
+    assert_eq!(returned.position().halfmove_clock(), 4);
 }
 
 #[test]
@@ -230,7 +228,8 @@ fn az_codec_handles_promotions_castling_and_en_passant() {
 
     let mut ep = ChessGame::default();
     for text in ["e2e4", "a7a6", "e4e5", "d7d5"] {
-        ep.step(ep.parse_move(text).unwrap());
+        let mv = ChessUciNotation.parse_move(&ep.position(), text).unwrap();
+        ep.play(mv);
     }
     let mv = ChessMove::from_str("e5d6").unwrap();
     let action = encode_v2_action(ep.board(), mv);
@@ -248,40 +247,32 @@ fn az_codec_is_color_canonical_and_rejects_invalid_actions() {
         encode_v2_action(black.board(), black_move)
     );
     assert_eq!(
-        decode_v2_action(white.board(), AZ_ACTION_SIZE as Action),
-        Err(AzActionError::OutOfRange(AZ_ACTION_SIZE as Action))
+        decode_v2_action(white.board(), AZ_ACTION_SIZE as u32),
+        Err(AzActionError::OutOfRange(AZ_ACTION_SIZE as u32))
     );
 }
 
 #[test]
 fn history_state_shapes_and_history_are_canonical() {
-    assert_eq!(ChessHistoryState::<1>::STATE_SHAPE, [21, 8, 8]);
-    assert_eq!(ChessHistoryState::<4>::STATE_SHAPE, [63, 8, 8]);
-    assert_eq!(ChessHistoryState::<8>::STATE_SHAPE, [119, 8, 8]);
+    assert_eq!(ChessHistoryState::<1>::INPUT_PLANES, 21);
+    assert_eq!(ChessHistoryState::<4>::INPUT_PLANES, 63);
+    assert_eq!(ChessHistoryState::<8>::INPUT_PLANES, 119);
 
     let mut state = ChessGame::default().history_state::<4>();
-    let mut encoded = vec![0.0; ChessHistoryState::<4>::state_size()];
-    state.encode_state(&mut encoded);
-    assert!(encoded[14 * 64..56 * 64].iter().all(|&value| value == 0.0));
-    assert_eq!(encoded[6 * 8], 1.0, "own pawns face north for white");
-
-    let action = state.parse_move("e2e4").unwrap();
-    state.step(action);
-    state.encode_state(&mut encoded);
-    assert_eq!(encoded[6 * 8], 1.0, "own pawns face north for black too");
-    assert!(encoded[14 * 64..28 * 64].iter().any(|&value| value != 0.0));
+    assert_eq!(state.frames.iter().flatten().count(), 1);
+    state.play(ChessMove::from_str("e2e4").unwrap());
+    assert_eq!(state.frames.iter().flatten().count(), 2);
+    assert_eq!(state.position().board().side_to_move(), Color::Black);
 }
 
 #[test]
 fn history_state_marks_repeated_current_positions() {
     let mut state = ChessGame::default().history_state::<8>();
     for text in ["b1c3", "b8c6", "c3b1", "c6b8"] {
-        state.step(state.parse_move(text).unwrap());
+        state.play(ChessMove::from_str(text).unwrap());
     }
-    let mut encoded = vec![0.0; ChessHistoryState::<8>::state_size()];
-    state.encode_state(&mut encoded);
-    assert!(encoded[12 * 64..13 * 64].iter().all(|&value| value == 1.0));
-    assert!(encoded[13 * 64..14 * 64].iter().all(|&value| value == 0.0));
+    assert_eq!(state.frames[0].unwrap().repetitions_before, 1);
+    assert_eq!(state.frames[1].unwrap().repetitions_before, 0);
 }
 
 #[test]
@@ -299,8 +290,9 @@ fn fen_has_only_its_current_real_frame() {
 #[test]
 fn authoritative_snapshots_support_one_four_and_eight_frames() {
     let mut game = ChessGame::default();
-    for mv in ["b1c3", "b8c6", "g1f3", "g8f6"] {
-        game.step(game.parse_move(mv).unwrap());
+    for text in ["b1c3", "b8c6", "g1f3", "g8f6"] {
+        let mv = ChessUciNotation.parse_move(&game.position(), text).unwrap();
+        game.play(mv);
     }
 
     let h1 = game.history_state::<1>();
@@ -317,9 +309,17 @@ fn authoritative_snapshots_support_one_four_and_eight_frames() {
 #[test]
 fn irreversible_move_resets_counts_but_retains_real_neural_history() {
     let mut game = ChessGame::default();
-    game.step(game.parse_move("b1c3").unwrap());
+    game.play(
+        ChessUciNotation
+            .parse_move(&game.position(), "b1c3")
+            .unwrap(),
+    );
     let previous_hash = game.position().hash();
-    game.step(game.parse_move("a7a6").unwrap());
+    game.play(
+        ChessUciNotation
+            .parse_move(&game.position(), "a7a6")
+            .unwrap(),
+    );
 
     let state = game.history_state::<8>();
     assert_eq!(state.frames.iter().flatten().count(), 3);
@@ -342,7 +342,7 @@ fn authoritative_frames_store_repetition_count_and_terminal_position() {
     for mv in [
         "b1c3", "b8c6", "c3b1", "c6b8", "b1c3", "b8c6", "c3b1", "c6b8",
     ] {
-        game.step(game.parse_move(mv).unwrap());
+        game.play(ChessUciNotation.parse_move(&game.position(), mv).unwrap());
     }
 
     let state = game.history_state::<8>();
@@ -352,88 +352,98 @@ fn authoritative_frames_store_repetition_count_and_terminal_position() {
         state.frames[0].unwrap().position.status,
         Status::DrawRepetition
     );
-    assert!(engine_core::Game::is_terminal(&game));
+    assert!(game.is_terminal());
 }
 
 #[test]
-fn scholars_mate_reward_convention() {
+fn scholars_mate_terminal_value_uses_side_to_move_perspective() {
     let mut g = ChessGame::default();
-    for mv in ["e2e4", "e7e5", "f1c4", "b8c6", "d1h5", "g8f6", "h5f7"] {
-        let a = g
-            .parse_move(mv)
-            .unwrap_or_else(|| panic!("{mv} should be legal"));
-        g.step(a);
+    for text in ["e2e4", "e7e5", "f1c4", "b8c6", "d1h5", "g8f6", "h5f7"] {
+        play_uci(&mut g, text);
     }
     // Black is to move and has been mated.
-    assert!(engine_core::Game::is_terminal(&g));
-    assert_eq!(g.reward(), -1.0);
+    assert!(g.is_terminal());
+    assert_eq!(g.terminal_value(), Some(TerminalValue::Loss));
     assert_eq!(g.board().side_to_move(), Color::Black);
 }
 
 #[test]
 fn stalemate_is_a_draw() {
     let g = from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1");
-    assert!(engine_core::Game::is_terminal(&g));
+    assert!(g.is_terminal());
     assert_eq!(g.pos.status, Status::Stalemate);
-    assert_eq!(g.reward(), 0.0);
+    assert_eq!(g.terminal_value(), Some(TerminalValue::Draw));
 }
 
 #[test]
-fn canonical_encoding_flips_for_black() {
-    let mut g = ChessGame::default();
-    let mut white_view = vec![0.0f32; ChessGame::state_size()];
-    g.encode_state(&mut white_view);
-    // White's own pawns (plane 0) appear on output row 6 (rank 2).
-    assert_eq!(white_view[6 * 8], 1.0);
-    assert_eq!(white_view[12 * 64], 1.0); // white-to-move plane
+fn history_state_tracks_side_to_move_for_alpha_zero_encoding() {
+    let mut game = ChessGame::default();
+    assert_eq!(
+        game.history_state::<1>().position().board().side_to_move(),
+        Color::White
+    );
 
-    g.step(g.parse_move("e2e4").unwrap());
-    let mut black_view = vec![0.0f32; ChessGame::state_size()];
-    g.encode_state(&mut black_view);
-    // Black's own pawns also appear on row 6 after the vertical flip.
-    assert_eq!(black_view[6 * 8], 1.0);
-    assert_eq!(black_view[12 * 64], 0.0);
-    // No black pawn can capture on e3, so the en-passant plane stays empty.
-    assert!(black_view[18 * 64..].iter().all(|&v| v == 0.0));
+    play_uci(&mut game, "e2e4");
+    let state = game.history_state::<1>();
+    assert_eq!(state.position().board().side_to_move(), Color::Black);
+    assert_eq!(state.position().board().en_passant(), None);
 }
 
 #[test]
-fn en_passant_plane_when_capturable() {
-    // 1.e4 a6 2.e5 d5 — exd6 e.p. is available; the d-file is flagged.
+fn en_passant_move_is_exposed_to_alpha_zero_policy() {
+    // 1.e4 a6 2.e5 d5 — exd6 e.p. is available.
     let mut g = ChessGame::default();
-    for mv in ["e2e4", "a7a6", "e4e5", "d7d5"] {
-        g.step(g.parse_move(mv).unwrap());
+    for text in ["e2e4", "a7a6", "e4e5", "d7d5"] {
+        play_uci(&mut g, text);
     }
-    let mut v = vec![0.0f32; ChessGame::state_size()];
-    g.encode_state(&mut v);
-    assert_eq!(v[18 * 64 + 3], 1.0);
-    assert_eq!(v[18 * 64 + 4], 0.0);
+    let mv = ChessMove::from_str("e5d6").unwrap();
+    assert!(g.legal_moves().any(|legal| legal == mv));
+    let action = encode_v2_action(g.board(), mv);
+    assert_eq!(decode_v2_action(g.board(), action), Ok(mv));
 }
 
 #[test]
 fn promotions_encode_distinctly() {
     let g = from_fen("8/P6k/8/8/8/8/8/K7 w - - 0 1");
-    let promos: Vec<u32> = g.legal_actions().map(|a| a % 5).collect();
-    for p in [1u32, 2, 3, 4] {
-        assert!(promos.contains(&p), "missing promotion code {p}");
+    let promotions: Vec<_> = g
+        .legal_moves()
+        .filter(|mv| mv.get_promotion().is_some())
+        .collect();
+    let actions: Vec<_> = promotions
+        .iter()
+        .map(|&mv| encode_v2_action(g.board(), mv))
+        .collect();
+    for piece in [Piece::Queen, Piece::Rook, Piece::Knight, Piece::Bishop] {
+        assert!(promotions
+            .iter()
+            .any(|mv| mv.get_promotion() == Some(piece)));
     }
+    let mut unique = actions;
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), promotions.len());
 }
 
 #[test]
-fn castling_actions_are_exposed_to_policy() {
+fn castling_moves_are_exposed_to_policy() {
     let g = from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
-    let kingside = g.parse_move("e1g1").expect("white O-O should be legal");
-    let queenside = g.parse_move("e1c1").expect("white O-O-O should be legal");
-    let legal: Vec<u32> = g.legal_actions().collect();
+    let position = g.position();
+    let kingside = ChessUciNotation
+        .parse_move(&position, "e1g1")
+        .expect("white O-O should be legal");
+    let queenside = ChessUciNotation
+        .parse_move(&position, "e1c1")
+        .expect("white O-O-O should be legal");
+    let legal: Vec<_> = g.legal_moves().collect();
 
     assert!(legal.contains(&kingside));
     assert!(legal.contains(&queenside));
-    assert_eq!(g.format_action(kingside), "e1g1");
-    assert_eq!(g.format_action(queenside), "e1c1");
-    assert_eq!(g.san_for_action(kingside), "O-O");
-    assert_eq!(g.san_for_action(queenside), "O-O-O");
-    assert!((kingside as usize) < ChessGame::ACTION_SIZE);
-    assert!((queenside as usize) < ChessGame::ACTION_SIZE);
+    assert_eq!(ChessUciNotation.format_move(&position, kingside), "e1g1");
+    assert_eq!(ChessUciNotation.format_move(&position, queenside), "e1c1");
+    assert_eq!(notation::san(g.board(), kingside), "O-O");
+    assert_eq!(notation::san(g.board(), queenside), "O-O-O");
+    assert!((encode_v2_action(g.board(), kingside) as usize) < AZ_ACTION_SIZE);
+    assert!((encode_v2_action(g.board(), queenside) as usize) < AZ_ACTION_SIZE);
 }
 
 #[test]
@@ -441,7 +451,7 @@ fn castling_step_moves_king_and_rook() {
     let mut g = from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
     g.pos.halfmove_clock = 17;
 
-    g.step(g.parse_move("e1g1").unwrap());
+    play_uci(&mut g, "e1g1");
     assert_eq!(g.board().piece_on(Square::G1), Some(Piece::King));
     assert_eq!(g.board().piece_on(Square::F1), Some(Piece::Rook));
     assert_eq!(g.board().piece_on(Square::E1), None);
@@ -450,7 +460,7 @@ fn castling_step_moves_king_and_rook() {
     assert!(!g.board().castle_rights(Color::White).has_queenside());
     assert_eq!(g.pos.halfmove_clock, 0);
 
-    g.step(g.parse_move("e8c8").unwrap());
+    play_uci(&mut g, "e8c8");
     assert_eq!(g.board().piece_on(Square::C8), Some(Piece::King));
     assert_eq!(g.board().piece_on(Square::D8), Some(Piece::Rook));
     assert_eq!(g.board().piece_on(Square::E8), None);
@@ -465,25 +475,22 @@ fn threefold_repetition_is_a_draw() {
     for mv in [
         "b1c3", "b8c6", "c3b1", "c6b8", "b1c3", "b8c6", "c3b1", "c6b8",
     ] {
-        assert!(
-            !engine_core::Game::is_terminal(&g),
-            "draw too early before {mv}"
-        );
-        g.step(g.parse_move(mv).unwrap());
+        assert!(!g.is_terminal(), "draw too early before {mv}");
+        play_uci(&mut g, mv);
     }
-    assert!(engine_core::Game::is_terminal(&g));
+    assert!(g.is_terminal());
     assert_eq!(g.pos.status, Status::DrawRepetition);
-    assert_eq!(g.reward(), 0.0);
+    assert_eq!(g.terminal_value(), Some(TerminalValue::Draw));
 }
 
 #[test]
 fn fifty_move_rule_is_a_draw() {
     let mut g = from_fen("k7/8/8/8/8/8/8/K7 w - - 0 1");
     g.pos.halfmove_clock = 99;
-    g.step(g.parse_move("a1a2").unwrap());
-    assert!(engine_core::Game::is_terminal(&g));
+    play_uci(&mut g, "a1a2");
+    assert!(g.is_terminal());
     assert_eq!(g.pos.status, Status::DrawFiftyMoveRule);
-    assert_eq!(g.reward(), 0.0);
+    assert_eq!(g.terminal_value(), Some(TerminalValue::Draw));
 }
 
 #[test]
@@ -499,52 +506,52 @@ fn move_effect_describes_move_properties_even_when_terminal() {
 fn pawn_move_resets_halfmove_clock() {
     let mut g = from_fen("k7/8/8/8/8/8/P7/K7 w - - 0 1");
     g.pos.halfmove_clock = 99;
-    g.step(g.parse_move("a2a3").unwrap());
+    play_uci(&mut g, "a2a3");
     assert_eq!(g.pos.halfmove_clock, 0);
-    assert!(!engine_core::Game::is_terminal(&g));
+    assert!(!g.is_terminal());
 }
 
 #[test]
 fn en_passant_capture_resets_halfmove_clock() {
     let mut g = ChessGame::default();
-    for mv in ["e2e4", "a7a6", "e4e5", "d7d5"] {
-        g.step(g.parse_move(mv).unwrap());
+    for text in ["e2e4", "a7a6", "e4e5", "d7d5"] {
+        play_uci(&mut g, text);
     }
     g.pos.halfmove_clock = 99;
-    g.step(g.parse_move("e5d6").unwrap());
+    play_uci(&mut g, "e5d6");
     assert_eq!(g.pos.halfmove_clock, 0);
-    assert!(!engine_core::Game::is_terminal(&g));
+    assert!(!g.is_terminal());
 }
 
 #[test]
 fn capture_resets_halfmove_clock() {
     let mut g = from_fen("4k3/8/8/8/8/8/4p3/4K3 w - - 0 1");
     g.pos.halfmove_clock = 99;
-    g.step(g.parse_move("e1e2").unwrap());
+    play_uci(&mut g, "e1e2");
     assert_eq!(g.pos.halfmove_clock, 0);
-    assert!(!engine_core::Game::is_terminal(&g));
+    assert!(!g.is_terminal());
 }
 
 #[test]
 fn castling_rights_change_resets_halfmove_clock() {
     let mut g = from_fen("4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1");
     g.pos.halfmove_clock = 99;
-    g.step(g.parse_move("e1f1").unwrap());
+    play_uci(&mut g, "e1f1");
     assert_eq!(g.pos.halfmove_clock, 0);
-    assert!(!engine_core::Game::is_terminal(&g));
+    assert!(!g.is_terminal());
 }
 
 #[test]
 fn irreversible_move_clears_repetition_history() {
     let mut g = ChessGame::default();
-    for mv in ["b1c3", "b8c6", "c3b1", "c6b8"] {
-        g.step(g.parse_move(mv).unwrap());
+    for text in ["b1c3", "b8c6", "c3b1", "c6b8"] {
+        play_uci(&mut g, text);
     }
-    assert!(!engine_core::Game::is_terminal(&g));
-    g.step(g.parse_move("a2a3").unwrap());
-    g.step(g.parse_move("a7a6").unwrap());
-    for mv in ["b1c3", "b8c6", "c3b1", "c6b8"] {
-        g.step(g.parse_move(mv).unwrap());
+    assert!(!g.is_terminal());
+    play_uci(&mut g, "a2a3");
+    play_uci(&mut g, "a7a6");
+    for text in ["b1c3", "b8c6", "c3b1", "c6b8"] {
+        play_uci(&mut g, text);
     }
-    assert!(!engine_core::Game::is_terminal(&g));
+    assert!(!g.is_terminal());
 }

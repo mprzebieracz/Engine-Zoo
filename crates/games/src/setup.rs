@@ -1,4 +1,3 @@
-use engine_core::game::Action;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -14,7 +13,7 @@ pub struct ChessSetup {
 pub struct Connect4Setup {
     /// Columns played from the empty board.
     #[serde(default)]
-    pub moves: Vec<Action>,
+    pub moves: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,7 +27,7 @@ pub enum GameSetup {
 mod tests {
     use super::*;
     use crate::{ChessGame, Connect4};
-    use engine_core::game::Game;
+    use engine_core::game::GameState;
 
     #[test]
     fn loads_chess_and_connect4_positions() {

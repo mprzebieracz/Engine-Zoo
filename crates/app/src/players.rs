@@ -1,10 +1,10 @@
-use algorithms::alphazero::representation::{
+use alphazero::representation::{
     AlphaZeroRepresentation, ChessV1Representation, Connect4AzRepresentation,
 };
-use algorithms::alphazero::{
-    Batcher, Mcts, MctsConfig, MctsVariant, NetConfig, RepresentedEvaluator,
+use alphazero::{
+    Batcher, Mcts, MctsConfig, MctsVariant, NetworkConfig, RepresentedEvaluator,
 };
-use algorithms::search::SearchRules;
+use search::SearchRules;
 use anyhow::{Context, Result};
 use engine_core::agent::{Agent, PolicyMode};
 use engine_core::game::GameState;
@@ -85,7 +85,7 @@ impl InteractiveGame for Connect4 {
 
     type SearchState = Connect4;
     type Representation = Connect4AzRepresentation;
-    type Rules = algorithms::search::NoExtraRules;
+    type Rules = search::NoExtraRules;
 
     fn search_state(&self) -> Self::SearchState {
         *self
@@ -104,7 +104,7 @@ impl InteractiveGame for ChessGame {
 
     type SearchState = ChessPosition;
     type Representation = ChessV1Representation;
-    type Rules = algorithms::search::ChessRepetitionRules;
+    type Rules = alphazero::ChessRepetitionRules;
 
     fn search_state(&self) -> Self::SearchState {
         self.position_state()
@@ -125,7 +125,7 @@ type NativeMcts<G> = Mcts<
     RepresentedEvaluator<
         <G as InteractiveGame>::SearchState,
         <G as InteractiveGame>::Representation,
-        algorithms::alphazero::BatcherClient,
+        alphazero::BatcherClient,
     >,
     <G as InteractiveGame>::Rules,
 >;
@@ -137,15 +137,16 @@ pub struct AlphaZeroAgent<G: InteractiveGame> {
 
 impl<G: InteractiveGame> AlphaZeroAgent<G> {
     pub fn new(
-        cfg: &NetConfig,
+        cfg: &NetworkConfig,
         weights: &Path,
         device: Device,
         simulations: usize,
         wait_for_count: usize,
         timeout: Duration,
     ) -> Result<Self> {
-        let batcher = Batcher::new(cfg, weights, device, wait_for_count.max(1), timeout)
-            .with_context(|| format!("loading AlphaZero agent from {}", weights.display()))?;
+        let batcher =
+            Batcher::new_with_network(cfg, weights, device, wait_for_count.max(1), timeout)
+                .with_context(|| format!("loading AlphaZero agent from {}", weights.display()))?;
         let mcts = Mcts::new(
             RepresentedEvaluator::new(G::Representation::default(), batcher.client()),
             MctsConfig {
@@ -169,8 +170,7 @@ impl<G: InteractiveGame> Agent<G> for AlphaZeroAgent<G> {
         let result = self.mcts.search(&state, game.search_context(), mode);
         if matches!(variant, MctsVariant::Puct) && mode == PolicyMode::Explore {
             result.sample_move(&mut rand::rng())
-        }
-        else {
+        } else {
             result.best_move()
         }
     }

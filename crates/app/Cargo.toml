@@ -22,7 +22,8 @@ name = "engine-zoo-uci"
 path = "src/bin/engine-zoo-uci.rs"
 
 [dependencies]
-algorithms = { path = "../algorithms" }
+alphazero = { path = "../alphazero" }
+search = { path = "../search" }
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true

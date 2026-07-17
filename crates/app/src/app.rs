@@ -1,5 +1,6 @@
 use crate::players::{AgentSpec, AlphaZeroAgent, HumanAgent, PlayerAgent};
 use crate::proxy::{open_existing_run, resolve_model, run_dir, serve, GameKind, ServeConfig};
+use alphazero::ModelConfig;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use engine_core::agent::{Agent, PolicyMode};
@@ -118,14 +119,12 @@ fn run_game<G: crate::players::InteractiveGame>(args: PlayArgs) -> Result<()> {
         let side = ply % 2;
         let mode = if ply < cfg.opening_moves {
             PolicyMode::Explore
-        }
-        else {
+        } else {
             PolicyMode::Deterministic
         };
         let mv = if side == 0 {
             first.select_move(&game, mode)
-        }
-        else {
+        } else {
             second.select_move(&game, mode)
         };
         println!(
@@ -151,8 +150,18 @@ fn build_agent<G: crate::players::InteractiveGame>(
         AgentSpec::AlphaZero { model } => {
             let (_, cfg) = open_existing_run(run_dir, interactive_game_name::<G>())?;
             let weights = resolve_model(run_dir, model);
+            let compatible = match (&cfg.model, interactive_game_name::<G>()) {
+                (ModelConfig::Connect4ScalarAz(_), "connect4")
+                | (ModelConfig::ChessScalarAzV1(_), "chess") => true,
+                (ModelConfig::ChessAzV2(_), "chess") => false,
+                _ => false,
+            };
+            anyhow::ensure!(
+                compatible,
+                "interactive play supports Connect4 scalar AlphaZero and Chess scalar AlphaZero v1; use serve/UCI for Chess v2"
+            );
             Ok(PlayerAgent::AlphaZero(Box::new(AlphaZeroAgent::<G>::new(
-                &cfg.net,
+                &cfg.network_config(),
                 &weights,
                 device,
                 simulations,
@@ -166,8 +175,7 @@ fn build_agent<G: crate::players::InteractiveGame>(
 fn interactive_game_name<G: crate::players::InteractiveGame>() -> &'static str {
     if std::any::TypeId::of::<G>() == std::any::TypeId::of::<ChessGame>() {
         "chess"
-    }
-    else {
+    } else {
         "connect4"
     }
 }
@@ -180,15 +188,12 @@ fn side_name<G: crate::players::InteractiveGame>(side: usize) -> &'static str {
     if std::any::TypeId::of::<G>() == std::any::TypeId::of::<ChessGame>() {
         if side == 0 {
             "white"
-        }
-        else {
+        } else {
             "black"
         }
-    }
-    else if side == 0 {
+    } else if side == 0 {
         "first"
-    }
-    else {
+    } else {
         "second"
     }
 }

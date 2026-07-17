@@ -115,6 +115,20 @@ impl<const HISTORY: usize> Default for ChessHistoryState<HISTORY> {
     }
 }
 
+impl<const HISTORY: usize> super::ChessRepetitionState for ChessHistoryState<HISTORY> {
+    fn repetition_hash(&self) -> u64 {
+        self.repetition_hash()
+    }
+
+    fn reversible_plies(&self) -> usize {
+        self.current().position.halfmove_clock()
+    }
+
+    fn set_current_repetitions_before(&mut self, count: u8) {
+        self.set_repetitions_before_current(count);
+    }
+}
+
 impl<const HISTORY: usize> GameState for ChessHistoryState<HISTORY> {
     type Move = ChessMove;
 

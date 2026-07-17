@@ -27,19 +27,13 @@ pub(super) fn run_chess_az_v2(
     let threads = args.threads.unwrap_or_else(|| {
         if device.is_cuda() {
             128
-        }
-        else {
+        } else {
             default_cpu_threads()
         }
     });
-    let wait_for = args.wait_for.unwrap_or_else(|| {
-        if device.is_cuda() {
-            threads.min(24)
-        }
-        else {
-            1
-        }
-    });
+    let wait_for = args
+        .wait_for
+        .unwrap_or_else(|| if device.is_cuda() { threads.min(24) } else { 1 });
     // The v2 trainer keeps `vs` and its optimizer in FP32. This precision
     // selection applies only to the self-play inference batcher.
     let self_play_precision = match args.inference_precision {
@@ -49,8 +43,8 @@ pub(super) fn run_chess_az_v2(
     };
     let network_cfg = cfg.network_config();
     anyhow::ensure!(
-        matches!(&network_cfg, NetworkConfig::ChessAzV2(saved) if *saved == v2),
-        "saved run configuration is not the requested chess-az-v2 architecture"
+        matches!(&cfg.model, ModelConfig::ChessAzV2(saved) if *saved == v2),
+        "saved run configuration is not the requested chess-az-v2 model"
     );
     let mut vs = nn::VarStore::new(device);
     let net = ChessAzV2Net::new(&vs.root(), v2);
@@ -80,7 +74,7 @@ pub(super) fn run_chess_az_v2(
         lr: args.lr,
         weight_decay: args.weight_decay,
     };
-    let mut optimizer = algorithms::alphazero::build_optimizer(&vs, &train_cfg)?;
+    let mut optimizer = alphazero::build_optimizer(&vs, &train_cfg)?;
     let profiles = ChessV2GumbelProfiles {
         full: GumbelSearchProfile::new(args.v2_full_simulations, args.v2_full_root_candidates),
         fast: GumbelSearchProfile::new(args.v2_fast_simulations, args.v2_fast_root_candidates),
@@ -134,8 +128,7 @@ pub(super) fn run_chess_az_v2(
         let tt_queries = stats.tt_hits + stats.tt_misses;
         let tt_hit_rate = if tt_queries == 0 {
             0.0
-        }
-        else {
+        } else {
             stats.tt_hits as f64 / tt_queries as f64
         };
         let games_per_sec = stats.games as f64 / self_play_secs.max(f64::EPSILON);

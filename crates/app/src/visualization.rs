@@ -1,5 +1,5 @@
 use crate::proxy::{game_name, GameKind};
-use algorithms::analysis::Analysis;
+use alphazero::Analysis;
 use games::setup::GameSetup;
 use games::ChessGame;
 

@@ -4,19 +4,16 @@
 //! chess rules needed for repetition tracking, resignation, and the shared
 //! evaluation cache.
 
-use algorithms::alphazero::representation::{
+use alphazero::representation::{
     AlphaZeroRepresentation, ChessAzRepresentation, ChessV1Representation,
 };
-use algorithms::alphazero::{
+use alphazero::{
     select_temperature_action, Batcher, BatcherClient, EvalTable, Mcts, MctsVariant, ReplayBuffer,
     RepresentedEvaluator, SelfPlayConfig, SelfPlayStats, Transition,
 };
-use algorithms::search::ChessRepetitionRules;
+use alphazero::ChessRepetitionRules;
 use engine_core::agent::PolicyMode;
-use engine_core::{
-    game::{GameState, TerminalValue},
-    Game,
-};
+use engine_core::{GameState, TerminalValue};
 use games::{ChessGame, ChessHistoryState, ChessPosition};
 use rand::Rng;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -56,12 +53,10 @@ pub fn self_play_chess(
                 while finished.load(Ordering::Relaxed) < cfg.num_games {
                     let Some(completed) = play_chess_game(&mut mcts, cfg, || {
                         finished.load(Ordering::Relaxed) >= cfg.num_games
-                    })
-                    else {
+                    }) else {
                         break;
                     };
-                    let Ok(done_before) = claim_completed_game(finished, cfg.num_games)
-                    else {
+                    let Ok(done_before) = claim_completed_game(finished, cfg.num_games) else {
                         break;
                     };
                     replay.add(completed.trajectory);
@@ -110,12 +105,10 @@ pub fn self_play_chess_az_v2<const HISTORY: usize>(
                 while finished.load(Ordering::Relaxed) < cfg.num_games {
                     let Some(completed) = play_chess_az_v2_game::<HISTORY>(&mut mcts, cfg, || {
                         finished.load(Ordering::Relaxed) >= cfg.num_games
-                    })
-                    else {
+                    }) else {
                         break;
                     };
-                    let Ok(done_before) = claim_completed_game(finished, cfg.num_games)
-                    else {
+                    let Ok(done_before) = claim_completed_game(finished, cfg.num_games) else {
                         break;
                     };
                     replay.add(completed.trajectory);
@@ -157,38 +150,38 @@ fn play_chess_game(
         ..Default::default()
     };
 
-    while !Game::is_terminal(&game) && trajectory.len() < cfg.max_moves {
+    while !game.is_terminal() && trajectory.len() < cfg.max_moves {
         if should_stop() {
             return None;
         }
-        let mut state = vec![0.0; ChessGame::state_size()];
-        ChessV1Representation.encode_state(&game.position_state(), &mut state);
+        let search_state = game.position_state();
+        let mut state = vec![
+            0.0;
+            <ChessV1Representation as AlphaZeroRepresentation<ChessPosition>>::state_size()
+        ];
+        ChessV1Representation.encode_state(&search_state, &mut state);
 
         let full_search = rng.random_bool(cfg.full_simulation_probability.clamp(0.0, 1.0) as f64);
         if let Some(profiles) = cfg.chess_v2_gumbel_profiles {
             let profile = if full_search {
                 stats.full_searches += 1;
                 profiles.full
-            }
-            else {
+            } else {
                 stats.fast_searches += 1;
                 profiles.fast
             };
             mcts.set_gumbel_profile(profile);
-        }
-        else {
+        } else {
             let simulations = if full_search {
                 stats.full_searches += 1;
                 cfg.mcts.simulations
-            }
-            else {
+            } else {
                 stats.fast_searches += 1;
                 cfg.fast_simulations.max(1)
             };
             mcts.set_simulations(simulations);
         }
 
-        let search_state = game.position_state();
         let result = mcts.search(
             &search_state,
             game.repetition_context(),
@@ -196,13 +189,11 @@ fn play_chess_game(
         );
         let action = if let Some(temperature) = cfg.chess_v2_temperature {
             select_temperature_action(&result, temperature.at_ply(trajectory.len()), &mut rng)
-        }
-        else if matches!(mcts.config().variant, MctsVariant::Gumbel { .. })
+        } else if matches!(mcts.config().variant, MctsVariant::Gumbel { .. })
             || trajectory.len() >= cfg.temperature_moves
         {
             result.best_move()
-        }
-        else {
+        } else {
             result.sample_move(&mut rng)
         };
         let search_value = result.value;
@@ -211,9 +202,7 @@ fn play_chess_game(
             .iter()
             .map(|&(mv, probability)| {
                 (
-                    ChessV1Representation
-                        .move_to_action(&search_state, mv)
-                        .as_u32(),
+                    ChessV1Representation.move_to_action(&search_state, mv),
                     probability,
                 )
             })
@@ -221,7 +210,7 @@ fn play_chess_game(
         trajectory.push(Transition {
             state,
             policy,
-            reward: 0.0,
+            value: 0.0,
         });
 
         if cfg.resignation_enabled
@@ -230,8 +219,7 @@ fn play_chess_game(
             && search_value < cfg.resignation_threshold
         {
             resignation_streak += 1;
-        }
-        else {
+        } else {
             resignation_streak = 0;
         }
         if resignation_streak >= cfg.resignation_consecutive_moves.max(1) {
@@ -245,7 +233,7 @@ fn play_chess_game(
     let mut value =
         resigned_value.unwrap_or_else(|| -game.terminal_value().map_or(0.0, TerminalValue::as_f32));
     for transition in trajectory.iter_mut().rev() {
-        transition.reward = value;
+        transition.value = value;
         value = -value;
     }
     stats.moves = trajectory.len();
@@ -277,32 +265,34 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
         ..Default::default()
     };
 
-    while !Game::is_terminal(&game) && trajectory.len() < cfg.max_moves {
+    while !game.is_terminal() && trajectory.len() < cfg.max_moves {
         if should_stop() {
             return None;
         }
-        let mut encoded = vec![0.0; ChessHistoryState::<HISTORY>::state_size()];
         let search_state = game.history_state::<HISTORY>();
-        search_state.encode_state(&mut encoded);
+        let mut encoded = vec![
+            0.0;
+            <ChessAzRepresentation<HISTORY> as AlphaZeroRepresentation<
+                ChessHistoryState<HISTORY>,
+            >>::state_size()
+        ];
+        ChessAzRepresentation::<HISTORY>.encode_state(&search_state, &mut encoded);
 
         let full_search = rng.random_bool(cfg.full_simulation_probability as f64);
         if let Some(profiles) = cfg.chess_v2_gumbel_profiles {
             let profile = if full_search {
                 stats.full_searches += 1;
                 profiles.full
-            }
-            else {
+            } else {
                 stats.fast_searches += 1;
                 profiles.fast
             };
             mcts.set_gumbel_profile(profile);
-        }
-        else {
+        } else {
             let simulations = if full_search {
                 stats.full_searches += 1;
                 cfg.mcts.simulations
-            }
-            else {
+            } else {
                 stats.fast_searches += 1;
                 cfg.fast_simulations.max(1)
             };
@@ -324,9 +314,7 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
             .iter()
             .map(|&(mv, probability)| {
                 (
-                    ChessAzRepresentation::<HISTORY>
-                        .move_to_action(&search_state, mv)
-                        .as_u32(),
+                    ChessAzRepresentation::<HISTORY>.move_to_action(&search_state, mv),
                     probability,
                 )
             })
@@ -334,7 +322,7 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
         trajectory.push(Transition {
             state: encoded,
             policy,
-            reward: 0.0,
+            value: 0.0,
         });
 
         if cfg.resignation_enabled
@@ -343,8 +331,7 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
             && search_value < cfg.resignation_threshold
         {
             resignation_streak += 1;
-        }
-        else {
+        } else {
             resignation_streak = 0;
         }
         if resignation_streak >= cfg.resignation_consecutive_moves.max(1) {
@@ -358,7 +345,7 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
     let mut value =
         resigned_value.unwrap_or_else(|| -game.terminal_value().map_or(0.0, TerminalValue::as_f32));
     for transition in trajectory.iter_mut().rev() {
-        transition.reward = value;
+        transition.value = value;
         value = -value;
     }
     stats.moves = trajectory.len();

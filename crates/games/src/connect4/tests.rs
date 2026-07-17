@@ -1,5 +1,8 @@
 use super::*;
-use engine_core::game::{GameState, TerminalValue};
+use engine_core::{
+    game::{GameState, TerminalValue},
+    notation::GameNotation,
+};
 use std::mem::size_of;
 
 /// Straightforward array-based implementation used as an oracle for randomized
@@ -11,9 +14,17 @@ struct Naive {
     status: Status,
 }
 
+fn mv(column: u8) -> Connect4Move {
+    Connect4Move::new(column).unwrap()
+}
+
+fn moves(columns: &[u8]) -> Vec<Connect4Move> {
+    columns.iter().copied().map(mv).collect()
+}
+
 #[test]
 fn move_is_checked_and_compact() {
-    assert_eq!(Connect4Move::new(3).unwrap().column(), 3);
+    assert_eq!(mv(3).column(), 3);
     assert!(Connect4Move::new(7).is_none());
     assert_eq!(size_of::<Connect4Move>(), 1);
     // A private u8 has no invalid bit pattern for Option to use as a niche.
@@ -24,12 +35,12 @@ fn move_is_checked_and_compact() {
 fn native_move_flow_and_terminal_values() {
     let mut game = Connect4::initial();
     assert_eq!(game.legal_moves().count(), COLS);
-    game.play(Connect4Move::new(0).unwrap());
+    game.play(mv(0));
     assert_eq!(game.legal_moves().next().unwrap().column(), 0);
     assert_eq!(game.terminal_value(), None);
 
     for column in [1, 0, 1, 0, 1, 0] {
-        game.play(Connect4Move::new(column).unwrap());
+        game.play(mv(column));
     }
     assert_eq!(game.terminal_value(), Some(TerminalValue::Loss));
 }
@@ -43,14 +54,15 @@ impl Naive {
         }
     }
 
-    fn legal(&self) -> Vec<Action> {
+    fn legal(&self) -> Vec<Connect4Move> {
         (0..COLS)
             .filter(|&c| self.board[0][c] == 0)
-            .map(|c| c as Action)
+            .map(|c| mv(c as u8))
             .collect()
     }
 
-    fn step(&mut self, col: usize) {
+    fn step(&mut self, mv: Connect4Move) {
+        let col = mv.column() as usize;
         let row = (0..ROWS).rev().find(|&r| self.board[r][col] == 0).unwrap();
         self.board[row][col] = self.current;
         let won = self.check_win(row as i32, col as i32);
@@ -58,8 +70,7 @@ impl Naive {
         self.current = -self.current;
         if won {
             self.status = Status::Loss;
-        }
-        else if full {
+        } else if full {
             self.status = Status::Draw;
         }
     }
@@ -80,151 +91,133 @@ impl Naive {
                     if count == 4 {
                         return true;
                     }
-                }
-                else {
+                } else {
                     count = 0;
                 }
             }
         }
         false
     }
-
-    fn encode(&self) -> Vec<f32> {
-        let mut out = vec![0.0f32; ROWS * COLS];
-        for r in 0..ROWS {
-            for c in 0..COLS {
-                out[r * COLS + c] = (self.board[r][c] * self.current) as f32;
-            }
-        }
-        out
-    }
-
-    fn reward(&self) -> f32 {
-        if self.status == Status::Loss {
-            -1.0
-        }
-        else {
-            0.0
-        }
-    }
 }
 
 #[test]
 fn startpos_has_seven_moves() {
-    let g = Connect4::default();
-    assert_eq!(g.legal_actions().count(), COLS);
+    let game = Connect4::initial();
+    assert_eq!(game.legal_moves().count(), COLS);
 }
 
 #[test]
 fn loads_position_from_move_list() {
-    let g = Connect4::from_moves(&[3, 3, 4]).unwrap();
-    assert_eq!(g.legal_actions().count(), COLS);
-    assert_eq!(g.current_player(), -1);
+    let game = Connect4::from_moves(&moves(&[3, 3, 4])).unwrap();
+    assert_eq!(game.legal_moves().count(), COLS);
+    assert_eq!(game.current_player(), -1);
 }
 
 #[test]
-fn vertical_win_reward_convention() {
-    let mut g = Connect4::default();
-    for a in [0u32, 1, 0, 1, 0, 1, 0] {
-        assert!(!engine_core::Game::is_terminal(&g));
-        g.step(a);
+fn vertical_win_terminal_value_convention() {
+    let mut game = Connect4::initial();
+    for column in [0, 1, 0, 1, 0, 1, 0] {
+        assert!(!game.is_terminal());
+        game.play(mv(column));
     }
     // X just completed four-in-a-row in column 0; O to move has lost.
-    assert!(engine_core::Game::is_terminal(&g));
-    assert_eq!(g.status, Status::Loss);
-    assert_eq!(g.reward(), -1.0);
-    assert_eq!(g.current_player(), -1);
+    assert!(game.is_terminal());
+    assert_eq!(game.status, Status::Loss);
+    assert_eq!(game.terminal_value(), Some(TerminalValue::Loss));
+    assert_eq!(game.current_player(), -1);
 }
 
 #[test]
 fn horizontal_win_is_a_loss() {
-    let mut g = Connect4::default();
-    for a in [0u32, 0, 1, 1, 2, 2, 3] {
-        g.step(a);
+    let mut game = Connect4::initial();
+    for column in [0, 0, 1, 1, 2, 2, 3] {
+        game.play(mv(column));
     }
-    assert!(engine_core::Game::is_terminal(&g));
-    assert_eq!(g.status, Status::Loss);
-    assert_eq!(g.reward(), -1.0);
+    assert!(game.is_terminal());
+    assert_eq!(game.status, Status::Loss);
+    assert_eq!(game.terminal_value(), Some(TerminalValue::Loss));
 }
 
 #[test]
 fn detects_both_diagonal_win_directions() {
-    for moves in [
-        vec![0, 1, 1, 2, 4, 2, 2, 3, 5, 3, 5, 3, 3],
-        vec![6, 5, 5, 4, 2, 4, 4, 3, 1, 3, 1, 3, 3],
+    for columns in [
+        [0, 1, 1, 2, 4, 2, 2, 3, 5, 3, 5, 3, 3].as_slice(),
+        [6, 5, 5, 4, 2, 4, 4, 3, 1, 3, 1, 3, 3].as_slice(),
     ] {
-        let game = Connect4::from_moves(&moves).unwrap();
+        let game = Connect4::from_moves(&moves(columns)).unwrap();
         assert_eq!(game.status, Status::Loss);
-        assert_eq!(game.reward(), -1.0);
-        assert!(engine_core::Game::is_terminal(&game));
+        assert_eq!(game.terminal_value(), Some(TerminalValue::Loss));
+        assert!(game.is_terminal());
     }
 }
 
 #[test]
 fn completely_filled_board_is_a_draw() {
-    let moves = [
+    let columns = [
         1, 4, 6, 6, 6, 0, 2, 0, 3, 6, 3, 3, 5, 3, 6, 1, 0, 3, 0, 4, 3, 5, 0, 6, 5, 2, 2, 5, 1, 2,
         2, 0, 2, 5, 4, 5, 4, 4, 4, 1, 1, 1,
     ];
-    let game = Connect4::from_moves(&moves).unwrap();
+    let game = Connect4::from_moves(&moves(&columns)).unwrap();
     assert_eq!(game.mask, FULL_MASK);
     assert_eq!(game.status, Status::Draw);
-    assert_eq!(game.reward(), 0.0);
-    assert!(game.legal_actions().next().is_none());
+    assert_eq!(game.terminal_value(), Some(TerminalValue::Draw));
+    assert!(game.legal_moves().next().is_none());
 }
 
 #[test]
-fn encoding_is_canonical() {
-    let mut g = Connect4::default();
-    g.step(3);
-    // From O's perspective the X stone at bottom row, column 3 is -1.
-    let mut out = vec![0.0f32; Connect4::state_size()];
-    g.encode_state(&mut out);
-    assert_eq!(out[5 * COLS + 3], -1.0);
-    assert_eq!(out.iter().filter(|&&v| v != 0.0).count(), 1);
+fn state_bits_are_from_the_side_to_move_perspective() {
+    let mut game = Connect4::initial();
+    game.play(mv(3));
+    // O is now to move, so X's stone is not in the side-to-move bitboard.
+    assert_eq!(game.position_bits(), 0);
+    assert_eq!(game.occupied_bits(), 1 << (3 * 7));
 }
 
 #[test]
 fn full_column_is_not_legal() {
-    let mut g = Connect4::default();
+    let mut game = Connect4::initial();
     for _ in 0..ROWS {
-        g.step(0);
+        game.play(mv(0));
     }
-    assert!(!g.legal_actions().any(|a| a == 0));
+    assert!(!game.legal_moves().any(|move_| move_ == mv(0)));
 }
 
 #[test]
-fn legal_actions_parse_and_format_roundtrip() {
-    let mut game = Connect4::default();
+fn legal_moves_parse_and_format_roundtrip() {
+    let mut game = Connect4::initial();
+    let notation = notation::Connect4Notation;
     for played in [3, 3, 0, 6] {
-        for action in game.legal_actions() {
-            let text = game.format_action(action);
-            assert_eq!(game.parse_move(&text), Some(action));
-            assert_eq!(game.parse_move(&format!("  {text}  ")), Some(action));
+        for move_ in game.legal_moves() {
+            let text = notation.format_move(&game, move_);
+            assert_eq!(notation.parse_move(&game, &text), Some(move_));
+            assert_eq!(
+                notation.parse_move(&game, &format!("  {text}  ")),
+                Some(move_)
+            );
         }
-        game.step(played);
+        game.play(mv(played));
     }
     for invalid in ["", "-1", "7", "3.0", "garbage"] {
-        assert_eq!(game.parse_move(invalid), None);
+        assert_eq!(notation.parse_move(&game, invalid), None);
     }
 }
 
 #[test]
-fn terminal_position_has_no_legal_actions() {
-    let mut g = Connect4::default();
-    for action in [0, 1, 0, 1, 0, 1, 0] {
-        g.step(action);
+fn terminal_position_has_no_legal_moves() {
+    let mut game = Connect4::initial();
+    for column in [0, 1, 0, 1, 0, 1, 0] {
+        game.play(mv(column));
     }
 
-    assert!(engine_core::Game::is_terminal(&g));
-    assert_eq!(g.legal_actions().count(), 0);
+    assert!(game.is_terminal());
+    assert_eq!(game.legal_moves().count(), 0);
 }
 
 #[test]
-fn illegal_steps_panic_without_mutating_the_position() {
-    let mut full_column = Connect4::default();
+fn illegal_plays_panic_without_mutating_the_position() {
+    let mut full_column = Connect4::initial();
     for _ in 0..ROWS {
-        full_column.step(0);
+        full_column.play(mv(0));
     }
     let before = (
         full_column.pos,
@@ -233,7 +226,7 @@ fn illegal_steps_panic_without_mutating_the_position() {
         full_column.status,
     );
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        full_column.step(0);
+        full_column.play(mv(0));
     }))
     .is_err());
     assert_eq!(
@@ -246,13 +239,13 @@ fn illegal_steps_panic_without_mutating_the_position() {
         )
     );
 
-    let mut terminal = Connect4::default();
-    for action in [0, 1, 0, 1, 0, 1, 0] {
-        terminal.step(action);
+    let mut terminal = Connect4::initial();
+    for column in [0, 1, 0, 1, 0, 1, 0] {
+        terminal.play(mv(column));
     }
     let before = (terminal.pos, terminal.mask, terminal.ply, terminal.status);
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        terminal.step(2);
+        terminal.play(mv(2));
     }))
     .is_err());
     assert_eq!(
@@ -262,32 +255,31 @@ fn illegal_steps_panic_without_mutating_the_position() {
 }
 
 #[test]
-#[should_panic(expected = "invalid state buffer length")]
-fn encoding_rejects_wrong_buffer_length() {
-    Connect4::default().encode_state(&mut []);
-}
-
-#[test]
 fn matches_naive_oracle_on_random_games() {
     use rand::prelude::*;
+
     let mut rng = StdRng::seed_from_u64(42);
     for _ in 0..300 {
-        let mut fast = Connect4::default();
+        let mut fast = Connect4::initial();
         let mut naive = Naive::new();
-        while !engine_core::Game::is_terminal(&fast) {
-            let legal: Vec<u32> = fast.legal_actions().collect();
+        while !fast.is_terminal() {
+            let legal: Vec<_> = fast.legal_moves().collect();
             assert_eq!(legal, naive.legal());
             assert_eq!(fast.current_player(), naive.current);
-            let mut enc = vec![0.0f32; Connect4::state_size()];
-            fast.encode_state(&mut enc);
-            assert_eq!(enc, naive.encode());
 
-            let a = *legal.choose(&mut rng).unwrap();
-            fast.step(a);
-            naive.step(a as usize);
+            let move_ = *legal.choose(&mut rng).unwrap();
+            fast.play(move_);
+            naive.step(move_);
         }
         assert_ne!(naive.status, Status::Ongoing);
         assert_eq!(fast.status, naive.status);
-        assert_eq!(fast.reward(), naive.reward());
+        assert_eq!(
+            fast.terminal_value(),
+            match naive.status {
+                Status::Ongoing => None,
+                Status::Loss => Some(TerminalValue::Loss),
+                Status::Draw => Some(TerminalValue::Draw),
+            }
+        );
     }
 }

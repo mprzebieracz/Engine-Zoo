@@ -1,5 +1,5 @@
 use super::*;
-use algorithms::alphazero::representation::{AlphaZeroRepresentation, ChessAzRepresentation};
+use alphazero::representation::{AlphaZeroRepresentation, ChessAzRepresentation};
 use engine_core::game::{GameState, TerminalValue};
 use engine_core::notation::GameNotation;
 

@@ -82,8 +82,7 @@ pub fn evaluate<G: GameState + Default>(
     for game_index in 0..config.games {
         let outcome = if game_index.is_multiple_of(2) {
             play_single_game::<G, _, _>(candidate, baseline, config)
-        }
-        else {
+        } else {
             play_single_game::<G, _, _>(baseline, candidate, config).reverse()
         };
         result.record(outcome);
@@ -126,18 +125,20 @@ where
     while !game.is_terminal() && move_index < config.max_moves {
         let mode = if move_index < config.opening_moves {
             PolicyMode::Explore
-        }
-        else {
+        } else {
             PolicyMode::Deterministic
         };
         let mv = if move_index.is_multiple_of(2) {
             first.select_move(&game, mode)
-        }
-        else {
+        } else {
             second.select_move(&game, mode)
         };
         game.play(mv);
         move_index += 1;
+    }
+
+    if !game.is_terminal() {
+        return Outcome::Draw;
     }
 
     match game.terminal_value() {
@@ -181,8 +182,7 @@ mod tests {
             self.0.last().map(|mv| {
                 if mv.column() == 3 {
                     TerminalValue::Draw
-                }
-                else {
+                } else {
                     TerminalValue::Loss
                 }
             })
