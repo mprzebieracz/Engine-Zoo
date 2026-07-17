@@ -1,7 +1,6 @@
 use crate::setup::Connect4Setup;
 pub mod notation;
-use engine_core::game::{Action, Game, GameState, TensorDim, TerminalValue};
-use engine_core::notation::GameNotation;
+use engine_core::game::{GameState, TerminalValue};
 use std::fmt;
 
 const ROWS: usize = 6;
@@ -190,71 +189,6 @@ impl GameState for Connect4 {
             Status::Loss => Some(TerminalValue::Loss),
             Status::Draw => Some(TerminalValue::Draw),
         }
-    }
-}
-
-impl Game for Connect4 {
-    const ACTION_SIZE: usize = COLS;
-    const STATE_SHAPE: [TensorDim; 3] = [1, ROWS as TensorDim, COLS as TensorDim];
-    const NAME: &'static str = "connect4";
-
-    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
-        (0..COLS)
-            .filter(|&c| self.status == Status::Ongoing && self.column_playable(c))
-            .map(|c| c as Action)
-    }
-
-    fn step(&mut self, action: Action) {
-        let mv = Connect4Move::try_from(u8::try_from(action).expect("illegal Connect Four action"))
-            .expect("illegal Connect Four action");
-        self.play_move(mv);
-    }
-
-    fn is_terminal(&self) -> bool {
-        self.status != Status::Ongoing
-    }
-
-    fn reward(&self) -> f32 {
-        if self.status == Status::Loss {
-            -1.0
-        }
-        else {
-            0.0
-        }
-    }
-
-    fn encode_state(&self, out: &mut [f32]) {
-        assert_eq!(out.len(), Self::state_size(), "invalid state buffer length");
-        let own = self.pos;
-        let opp = self.pos ^ self.mask;
-        for row_top in 0..ROWS {
-            for col in 0..COLS {
-                let b = bit(col, ROWS - 1 - row_top);
-                out[row_top * COLS + col] = if own & b != 0 {
-                    1.0
-                }
-                else if opp & b != 0 {
-                    -1.0
-                }
-                else {
-                    0.0
-                };
-            }
-        }
-    }
-
-    fn parse_move(&self, s: &str) -> Option<Action> {
-        notation::Connect4Notation
-            .parse_move(self, s)
-            .map(|mv| mv.column() as Action)
-    }
-
-    fn format_action(&self, action: Action) -> String {
-        notation::Connect4Notation.format_move(
-            self,
-            Connect4Move::try_from(u8::try_from(action).expect("illegal Connect Four action"))
-                .expect("illegal Connect Four action"),
-        )
     }
 }
 

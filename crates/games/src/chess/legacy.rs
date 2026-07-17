@@ -1,11 +1,5 @@
-use super::notation;
 use super::position::ChessPosition;
-use super::{decode_v1_action, encode_v1_action};
-use chess::{Color, MoveGen, Piece};
-use engine_core::game::{Action, Game, TensorDim};
-use engine_core::notation::GameNotation;
-use engine_core::rules::RepetitionGame;
-use std::fmt;
+use chess::{Color, Piece};
 
 const PIECES: [Piece; 6] = [
     Piece::Pawn,
@@ -56,65 +50,5 @@ pub(super) fn encode(position: &ChessPosition, out: &mut [f32]) {
                 out[(base_plane + piece.to_index()) * 64 + row * 8 + file] = 1.0;
             }
         }
-    }
-}
-
-/// Allocation-free legacy policy/feature view used by search.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ChessLegacyState(pub(crate) ChessPosition);
-
-impl Game for ChessLegacyState {
-    const ACTION_SIZE: usize = 64 * 64 * 5;
-    const STATE_SHAPE: [TensorDim; 3] = [19, 8, 8];
-    const NAME: &'static str = "chess";
-
-    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
-        MoveGen::new_legal(&self.0.board).map(encode_v1_action)
-    }
-
-    fn step(&mut self, action: Action) {
-        self.0.play_with_effect(decode_v1_action(action));
-    }
-
-    fn is_terminal(&self) -> bool {
-        self.0.is_terminal()
-    }
-
-    fn reward(&self) -> f32 {
-        self.0.reward()
-    }
-
-    fn encode_state(&self, out: &mut [f32]) {
-        encode(&self.0, out);
-    }
-
-    fn parse_move(&self, text: &str) -> Option<Action> {
-        notation::ChessUciNotation
-            .parse_move(&self.0, text)
-            .map(encode_v1_action)
-    }
-
-    fn format_action(&self, action: Action) -> String {
-        notation::ChessUciNotation.format_move(&self.0, decode_v1_action(action))
-    }
-}
-
-impl RepetitionGame for ChessLegacyState {
-    fn repetition_hash(&self) -> u64 {
-        self.0.hash()
-    }
-
-    fn halfmove_clock(&self) -> usize {
-        self.0.halfmove_clock()
-    }
-
-    fn set_repetition_draw(&mut self) {
-        self.0.set_repetition_draw();
-    }
-}
-
-impl fmt::Display for ChessLegacyState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
     }
 }
