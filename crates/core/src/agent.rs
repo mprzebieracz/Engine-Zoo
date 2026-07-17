@@ -1,4 +1,4 @@
-use crate::game::{Action, Game};
+use crate::game::GameState;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PolicyMode {
@@ -7,10 +7,10 @@ pub enum PolicyMode {
 }
 
 /// Anything that can pick a move
-pub trait Agent<G: Game> {
-    fn act_with_mode(&mut self, game: &G, mode: PolicyMode) -> Action;
+pub trait Agent<G: GameState> {
+    fn select_move(&mut self, game: &G, mode: PolicyMode) -> G::Move;
 
-    fn act(&mut self, game: &G) -> Action {
-        self.act_with_mode(game, PolicyMode::Deterministic)
+    fn select_deterministic_move(&mut self, game: &G) -> G::Move {
+        self.select_move(game, PolicyMode::Deterministic)
     }
 }
