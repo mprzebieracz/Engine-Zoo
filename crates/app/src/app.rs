@@ -3,7 +3,7 @@ use crate::proxy::{open_existing_run, resolve_model, run_dir, serve, GameKind, S
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use engine_core::agent::{Agent, PolicyMode};
-use engine_core::game::Game;
+use engine_core::game::GameState;
 use games::{ChessGame, Connect4};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -123,18 +123,18 @@ fn run_game<G: crate::players::InteractiveGame>(args: PlayArgs) -> Result<()> {
         else {
             PolicyMode::Deterministic
         };
-        let action = if side == 0 {
-            first.act_with_mode(&game, mode)
+        let mv = if side == 0 {
+            first.select_move(&game, mode)
         }
         else {
-            second.act_with_mode(&game, mode)
+            second.select_move(&game, mode)
         };
         println!(
             "{} plays {}",
             side_name::<G>(side),
-            game.format_action(action)
+            game.format_native_move(mv)
         );
-        game.step(action);
+        game.play(mv);
         println!("{game}");
     }
     Ok(())
@@ -168,8 +168,8 @@ fn parse_agent(s: &str) -> Result<AgentSpec> {
     AgentSpec::parse(s)
 }
 
-fn side_name<G: Game>(side: usize) -> &'static str {
-    if G::NAME == ChessGame::NAME {
+fn side_name<G: crate::players::InteractiveGame>(side: usize) -> &'static str {
+    if std::any::TypeId::of::<G>() == std::any::TypeId::of::<ChessGame>() {
         if side == 0 {
             "white"
         }

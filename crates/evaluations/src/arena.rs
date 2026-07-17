@@ -1,6 +1,6 @@
 //! In-process matches between two engine agents.
 
-use engine_core::{Agent, Game, PolicyMode};
+use engine_core::{Agent, GameState, PolicyMode, TerminalValue};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
@@ -71,7 +71,7 @@ impl ArenaResult {
 }
 
 /// Pits `candidate` against `baseline`, alternating colors every game.
-pub fn evaluate<G: Game>(
+pub fn evaluate<G: GameState + Default>(
     candidate: &mut impl Agent<G>,
     baseline: &mut impl Agent<G>,
     config: &ArenaConfig,
@@ -117,7 +117,7 @@ impl Outcome {
 
 fn play_single_game<G, A, B>(first: &mut A, second: &mut B, config: &ArenaConfig) -> Outcome
 where
-    G: Game,
+    G: GameState + Default,
     A: Agent<G>,
     B: Agent<G>,
 {
@@ -130,34 +130,32 @@ where
         else {
             PolicyMode::Deterministic
         };
-        let action = if move_index.is_multiple_of(2) {
-            first.act_with_mode(&game, mode)
+        let mv = if move_index.is_multiple_of(2) {
+            first.select_move(&game, mode)
         }
         else {
-            second.act_with_mode(&game, mode)
+            second.select_move(&game, mode)
         };
-        game.step(action);
+        game.play(mv);
         move_index += 1;
     }
 
-    if !game.is_terminal() || game.reward() == 0.0 {
-        Outcome::Draw
-    }
-    else if (move_index - 1).is_multiple_of(2) {
-        Outcome::Win
-    }
-    else {
-        Outcome::Loss
+    match game.terminal_value() {
+        None | Some(TerminalValue::Draw) => Outcome::Draw,
+        Some(TerminalValue::Loss) if (move_index - 1).is_multiple_of(2) => Outcome::Win,
+        Some(TerminalValue::Loss) => Outcome::Loss,
+        Some(TerminalValue::Win) if (move_index - 1).is_multiple_of(2) => Outcome::Loss,
+        Some(TerminalValue::Win) => Outcome::Win,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_core::Action;
+    use games::connect4::Connect4Move;
 
     #[derive(Clone, Default)]
-    struct TinyGame(Vec<Action>);
+    struct TinyGame(Vec<Connect4Move>);
 
     impl Display for TinyGame {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -165,52 +163,46 @@ mod tests {
         }
     }
 
-    impl Game for TinyGame {
-        const ACTION_SIZE: usize = 4;
-        const STATE_SHAPE: [i64; 3] = [1, 1, 1];
-        const NAME: &'static str = "tiny";
-        fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
-            0..4
+    impl GameState for TinyGame {
+        type Move = Connect4Move;
+        fn initial() -> Self {
+            Self::default()
         }
-        fn step(&mut self, action: Action) {
-            self.0.push(action);
+        fn legal_moves(&self) -> impl Iterator<Item = Self::Move> + '_ {
+            (0..4).map(|i| Connect4Move::new(i).unwrap())
+        }
+        fn play(&mut self, mv: Self::Move) {
+            self.0.push(mv);
         }
         fn is_terminal(&self) -> bool {
-            self.0.last().is_some_and(|&action| action != 0)
+            self.0.last().is_some_and(|action| action.column() != 0)
         }
-        fn reward(&self) -> f32 {
-            if self.0.last().is_some_and(|&a| a == 1 || a == 2) {
-                -1.0
-            }
-            else {
-                0.0
-            }
-        }
-        fn encode_state(&self, out: &mut [f32]) {
-            out[0] = self.0.len() as f32;
-        }
-        fn parse_move(&self, value: &str) -> Option<Action> {
-            value.parse().ok()
-        }
-        fn format_action(&self, action: Action) -> String {
-            action.to_string()
+        fn terminal_value(&self) -> Option<TerminalValue> {
+            self.0.last().map(|mv| {
+                if mv.column() == 3 {
+                    TerminalValue::Draw
+                }
+                else {
+                    TerminalValue::Loss
+                }
+            })
         }
     }
 
     struct RecordingAgent {
-        action: Action,
+        action: Connect4Move,
         modes: Vec<PolicyMode>,
     }
     impl RecordingAgent {
-        fn new(action: Action) -> Self {
+        fn new(column: u8) -> Self {
             Self {
-                action,
+                action: Connect4Move::new(column).unwrap(),
                 modes: Vec::new(),
             }
         }
     }
     impl Agent<TinyGame> for RecordingAgent {
-        fn act_with_mode(&mut self, _: &TinyGame, mode: PolicyMode) -> Action {
+        fn select_move(&mut self, _: &TinyGame, mode: PolicyMode) -> Connect4Move {
             self.modes.push(mode);
             self.action
         }

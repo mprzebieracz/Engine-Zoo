@@ -7,8 +7,10 @@ use algorithms::alphazero::{
 use algorithms::search::SearchRules;
 use anyhow::{Context, Result};
 use engine_core::agent::{Agent, PolicyMode};
-use engine_core::game::{Action, Game, GameState};
-use games::{ChessGame, ChessPosition, ChessRepetitionContext, Connect4};
+use engine_core::game::GameState;
+use engine_core::notation::GameNotation;
+use games::chess::notation::ChessUciNotation;
+use games::{ChessGame, ChessPosition, ChessRepetitionContext, Connect4, Connect4Notation};
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -48,8 +50,8 @@ impl AgentSpec {
 
 pub struct HumanAgent;
 
-impl<G: Game> Agent<G> for HumanAgent {
-    fn act_with_mode(&mut self, game: &G, _mode: PolicyMode) -> Action {
+impl<G: InteractiveGame> Agent<G> for HumanAgent {
+    fn select_move(&mut self, game: &G, _mode: PolicyMode) -> G::Move {
         loop {
             print!("your move: ");
             std::io::stdout().flush().unwrap();
@@ -57,26 +59,23 @@ impl<G: Game> Agent<G> for HumanAgent {
             if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
                 panic!("stdin closed");
             }
-            if let Some(action) = game.parse_move(&line) {
-                return action;
+            if let Some(mv) = game.parse_native_move(&line) {
+                return mv;
             }
             println!("illegal or unparsable move");
         }
     }
 }
 
-pub trait InteractiveGame: Game {
-    type SearchState: GameState + Clone;
+pub trait InteractiveGame: GameState + Clone + Default + std::fmt::Display {
+    type SearchState: GameState<Move = Self::Move> + Clone;
     type Representation: AlphaZeroRepresentation<Self::SearchState> + Default;
     type Rules: SearchRules<Self::SearchState> + Default;
 
     fn search_state(&self) -> Self::SearchState;
     fn search_context(&self) -> <Self::Rules as SearchRules<Self::SearchState>>::Context<'_>;
-    fn to_action(
-        &self,
-        state: &Self::SearchState,
-        mv: <Self::SearchState as GameState>::Move,
-    ) -> Action;
+    fn parse_native_move(&self, text: &str) -> Option<Self::Move>;
+    fn format_native_move(&self, mv: Self::Move) -> String;
 }
 
 impl InteractiveGame for Connect4 {
@@ -88,8 +87,11 @@ impl InteractiveGame for Connect4 {
         *self
     }
     fn search_context(&self) {}
-    fn to_action(&self, state: &Self::SearchState, mv: <Connect4 as GameState>::Move) -> Action {
-        Connect4AzRepresentation.move_to_action(state, mv).as_u32()
+    fn parse_native_move(&self, text: &str) -> Option<Self::Move> {
+        Connect4Notation.parse_move(self, text)
+    }
+    fn format_native_move(&self, mv: Self::Move) -> String {
+        Connect4Notation.format_move(self, mv)
     }
 }
 
@@ -104,12 +106,11 @@ impl InteractiveGame for ChessGame {
     fn search_context(&self) -> ChessRepetitionContext<'_> {
         self.repetition_context()
     }
-    fn to_action(
-        &self,
-        state: &Self::SearchState,
-        mv: <ChessPosition as GameState>::Move,
-    ) -> Action {
-        ChessV1Representation.move_to_action(state, mv).as_u32()
+    fn parse_native_move(&self, text: &str) -> Option<Self::Move> {
+        ChessUciNotation.parse_move(&self.position_state(), text)
+    }
+    fn format_native_move(&self, mv: Self::Move) -> String {
+        ChessUciNotation.format_move(&self.position_state(), mv)
     }
 }
 
@@ -156,15 +157,15 @@ impl<G: InteractiveGame> AlphaZeroAgent<G> {
 }
 
 impl<G: InteractiveGame> Agent<G> for AlphaZeroAgent<G> {
-    fn act_with_mode(&mut self, game: &G, mode: PolicyMode) -> Action {
+    fn select_move(&mut self, game: &G, mode: PolicyMode) -> G::Move {
         let variant = self.mcts.config().variant;
         let state = game.search_state();
         let result = self.mcts.search(&state, game.search_context(), mode);
         if matches!(variant, MctsVariant::Puct) && mode == PolicyMode::Explore {
-            game.to_action(&state, result.sample_move(&mut rand::rng()))
+            result.sample_move(&mut rand::rng())
         }
         else {
-            game.to_action(&state, result.best_move())
+            result.best_move()
         }
     }
 }
@@ -175,10 +176,10 @@ pub enum PlayerAgent<G: InteractiveGame> {
 }
 
 impl<G: InteractiveGame> Agent<G> for PlayerAgent<G> {
-    fn act_with_mode(&mut self, game: &G, mode: PolicyMode) -> Action {
+    fn select_move(&mut self, game: &G, mode: PolicyMode) -> G::Move {
         match self {
-            PlayerAgent::Human(agent) => agent.act_with_mode(game, mode),
-            PlayerAgent::AlphaZero(agent) => agent.act_with_mode(game, mode),
+            PlayerAgent::Human(agent) => agent.select_move(game, mode),
+            PlayerAgent::AlphaZero(agent) => agent.select_move(game, mode),
         }
     }
 }
