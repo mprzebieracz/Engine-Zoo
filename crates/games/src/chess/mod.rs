@@ -15,7 +15,6 @@ pub use action::{
 };
 pub use az::ChessHistoryState;
 pub use game::{ChessGame, ChessRepetitionContext};
-pub use legacy::ChessLegacyState;
 pub use notation::ChessUciNotation;
 pub use position::ChessPosition;
 #[cfg(test)]
@@ -35,8 +34,6 @@ pub trait ChessRepetitionState: GameState<Move = chess::ChessMove> {
 
 #[cfg(test)]
 use chess::{Board, BoardStatus, ChessMove, Color, MoveGen, Piece, Square};
-#[cfg(test)]
-use engine_core::game::{Action, Game};
 
 #[cfg(test)]
 mod tests;

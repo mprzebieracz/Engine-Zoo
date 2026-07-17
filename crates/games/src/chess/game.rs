@@ -1,13 +1,12 @@
-use super::action::{decode_v1_action, encode_v1_action};
+use super::action::decode_v1_action;
 use super::az::{ChessHistoryState, HistoryFrame};
-use super::legacy::{self, ChessLegacyState};
+use super::legacy;
 use super::notation;
 use super::position::{ChessPosition, Status};
 use super::repetition::RepetitionTracker;
 use crate::setup::ChessSetup;
 use chess::{Board, BoardStatus, ChessMove, Color, MoveGen};
-use engine_core::game::{Action, Game, GameState, TensorDim};
-use engine_core::notation::GameNotation;
+use engine_core::game::{GameState, TerminalValue};
 use std::fmt;
 use std::str::FromStr;
 
@@ -41,10 +40,6 @@ impl ChessGame {
         self.pos
     }
 
-    pub fn legacy_state(&self) -> ChessLegacyState {
-        ChessLegacyState(self.pos)
-    }
-
     /// Returns the latest real game frames for neural evaluation.
     pub fn history_state<const HISTORY: usize>(&self) -> ChessHistoryState<HISTORY> {
         let mut state = ChessHistoryState::new(self.pos);
@@ -60,10 +55,6 @@ impl ChessGame {
             tracker: &self.repetitions,
             root_hash: self.pos.hash(),
         }
-    }
-
-    pub fn san_for_action(&self, action: Action) -> String {
-        notation::san(self.board(), decode_v1_action(action))
     }
 
     pub fn repetitions_before_current(&self, hash: u64) -> u8 {
@@ -200,44 +191,8 @@ impl GameState for ChessGame {
         ChessGame::play(self, mv);
     }
 
-    fn terminal_value(&self) -> Option<engine_core::game::TerminalValue> {
+    fn terminal_value(&self) -> Option<TerminalValue> {
         self.pos.terminal_value()
-    }
-}
-
-impl Game for ChessGame {
-    const ACTION_SIZE: usize = 64 * 64 * 5;
-    const STATE_SHAPE: [TensorDim; 3] = [19, 8, 8];
-    const NAME: &'static str = "chess";
-
-    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
-        MoveGen::new_legal(&self.pos.board).map(encode_v1_action)
-    }
-
-    fn step(&mut self, action: Action) {
-        self.play(decode_v1_action(action));
-    }
-
-    fn is_terminal(&self) -> bool {
-        self.pos.is_terminal()
-    }
-
-    fn reward(&self) -> f32 {
-        self.pos.reward()
-    }
-
-    fn encode_state(&self, out: &mut [f32]) {
-        legacy::encode(&self.pos, out);
-    }
-
-    fn parse_move(&self, s: &str) -> Option<Action> {
-        notation::ChessUciNotation
-            .parse_move(&self.pos, s)
-            .map(encode_v1_action)
-    }
-
-    fn format_action(&self, action: Action) -> String {
-        notation::ChessUciNotation.format_move(&self.pos, decode_v1_action(action))
     }
 }
 
