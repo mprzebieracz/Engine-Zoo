@@ -124,6 +124,16 @@ impl ChessPosition {
     }
 }
 
+impl super::ChessRepetitionState for ChessPosition {
+    fn repetition_hash(&self) -> u64 {
+        self.hash()
+    }
+
+    fn reversible_plies(&self) -> usize {
+        self.halfmove_clock()
+    }
+}
+
 impl GameState for ChessPosition {
     type Move = ChessMove;
 

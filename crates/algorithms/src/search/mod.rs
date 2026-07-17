@@ -2,4 +2,4 @@ mod evaluator;
 mod rules;
 
 pub use evaluator::{Evaluation, PolicyValueEvaluator};
-pub use rules::{NoExtraRules, RuleResult, SearchRules};
+pub use rules::{ChessNodeMeta, ChessRepetitionRules, NoExtraRules, RuleResult, SearchRules};

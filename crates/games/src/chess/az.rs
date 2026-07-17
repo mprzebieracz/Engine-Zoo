@@ -38,6 +38,10 @@ pub(crate) struct HistoryFrame {
 impl<const HISTORY: usize> ChessHistoryState<HISTORY> {
     pub const INPUT_PLANES: usize = AZ_HISTORY_PLANES * HISTORY + AZ_AUXILIARY_PLANES;
 
+    pub fn repetition_hash(&self) -> u64 {
+        self.current().position.hash()
+    }
+
     pub fn new(current: ChessPosition) -> Self {
         assert_supported_history::<HISTORY>();
         let mut frames = [None; HISTORY];
@@ -240,6 +244,20 @@ impl<const HISTORY: usize> RepetitionGame for ChessHistoryState<HISTORY> {
 
     fn set_repetition_draw(&mut self) {
         self.current_mut().position.set_repetition_draw();
+    }
+}
+
+impl<const HISTORY: usize> super::ChessRepetitionState for ChessHistoryState<HISTORY> {
+    fn repetition_hash(&self) -> u64 {
+        self.repetition_hash()
+    }
+
+    fn reversible_plies(&self) -> usize {
+        self.current().position.halfmove_clock()
+    }
+
+    fn set_current_repetitions_before(&mut self, count: u8) {
+        self.set_repetitions_before_current(count);
     }
 }
 

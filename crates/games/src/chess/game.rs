@@ -158,6 +158,7 @@ impl ChessGame {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct ChessRepetitionContext<'a> {
     tracker: &'a RepetitionTracker,
     root_hash: u64,
