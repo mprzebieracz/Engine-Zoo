@@ -6,7 +6,7 @@ use super::position::{ChessPosition, Status};
 use super::repetition::RepetitionTracker;
 use crate::setup::ChessSetup;
 use chess::{Board, BoardStatus, ChessMove, Color, MoveGen};
-use engine_core::game::{Action, Game, TensorDim};
+use engine_core::game::{Action, Game, GameState, TensorDim};
 use engine_core::notation::GameNotation;
 use std::fmt;
 use std::str::FromStr;
@@ -182,6 +182,26 @@ impl Default for ChessGame {
             repetitions_before: 0,
         });
         game
+    }
+}
+
+impl GameState for ChessGame {
+    type Move = ChessMove;
+
+    fn initial() -> Self {
+        Self::default()
+    }
+
+    fn legal_moves(&self) -> impl Iterator<Item = Self::Move> + '_ {
+        MoveGen::new_legal(&self.pos.board)
+    }
+
+    fn play(&mut self, mv: Self::Move) {
+        ChessGame::play(self, mv);
+    }
+
+    fn terminal_value(&self) -> Option<engine_core::game::TerminalValue> {
+        self.pos.terminal_value()
     }
 }
 

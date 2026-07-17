@@ -58,6 +58,23 @@ fn native_chess_states_match_policy_stepping() {
 }
 
 #[test]
+fn authoritative_game_state_tracks_repetition_terminal_value() {
+    let mut game = <ChessGame as GameState>::initial();
+    for text in [
+        "b1c3", "b8c6", "c3b1", "c6b8", "b1c3", "b8c6", "c3b1", "c6b8",
+    ] {
+        let mv = game
+            .legal_moves()
+            .find(|mv| mv == &ChessMove::from_str(text).unwrap())
+            .unwrap();
+        GameState::play(&mut game, mv);
+    }
+
+    assert_eq!(game.legal_moves().count(), 20);
+    assert_eq!(GameState::terminal_value(&game), Some(TerminalValue::Draw));
+}
+
+#[test]
 fn native_terminal_values_use_side_to_move_perspective() {
     let mut checkmate = from_fen("7k/R7/6K1/8/8/8/8/8 w - - 0 1").position();
     checkmate.play(ChessMove::from_str("a7a8").unwrap());
@@ -102,7 +119,7 @@ fn action_roundtrip_over_random_games() {
     for _ in 0..20 {
         let mut g = ChessGame::default();
         for _ in 0..80 {
-            if g.is_terminal() {
+            if engine_core::Game::is_terminal(&g) {
                 break;
             }
             let legal: Vec<u32> = g.legal_actions().collect();
@@ -123,7 +140,7 @@ fn legacy_search_view_matches_full_game_until_repetition_adjudication() {
         let mut game = ChessGame::default();
         let mut legacy = game.legacy_state();
         for _ in 0..60 {
-            if game.is_terminal() {
+            if engine_core::Game::is_terminal(&game) {
                 break;
             }
             let legal: Vec<_> = game.legal_actions().collect();
@@ -150,7 +167,7 @@ fn az_actions_roundtrip_over_random_games_without_collisions() {
     for _ in 0..20 {
         let mut game = ChessGame::default();
         for _ in 0..80 {
-            if game.is_terminal() {
+            if engine_core::Game::is_terminal(&game) {
                 break;
             }
             let legal: Vec<_> = MoveGen::new_legal(game.board()).collect();
@@ -335,7 +352,7 @@ fn authoritative_frames_store_repetition_count_and_terminal_position() {
         state.frames[0].unwrap().position.status,
         Status::DrawRepetition
     );
-    assert!(game.is_terminal());
+    assert!(engine_core::Game::is_terminal(&game));
 }
 
 #[test]
@@ -348,7 +365,7 @@ fn scholars_mate_reward_convention() {
         g.step(a);
     }
     // Black is to move and has been mated.
-    assert!(g.is_terminal());
+    assert!(engine_core::Game::is_terminal(&g));
     assert_eq!(g.reward(), -1.0);
     assert_eq!(g.board().side_to_move(), Color::Black);
 }
@@ -356,7 +373,7 @@ fn scholars_mate_reward_convention() {
 #[test]
 fn stalemate_is_a_draw() {
     let g = from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1");
-    assert!(g.is_terminal());
+    assert!(engine_core::Game::is_terminal(&g));
     assert_eq!(g.pos.status, Status::Stalemate);
     assert_eq!(g.reward(), 0.0);
 }
@@ -448,10 +465,13 @@ fn threefold_repetition_is_a_draw() {
     for mv in [
         "b1c3", "b8c6", "c3b1", "c6b8", "b1c3", "b8c6", "c3b1", "c6b8",
     ] {
-        assert!(!g.is_terminal(), "draw too early before {mv}");
+        assert!(
+            !engine_core::Game::is_terminal(&g),
+            "draw too early before {mv}"
+        );
         g.step(g.parse_move(mv).unwrap());
     }
-    assert!(g.is_terminal());
+    assert!(engine_core::Game::is_terminal(&g));
     assert_eq!(g.pos.status, Status::DrawRepetition);
     assert_eq!(g.reward(), 0.0);
 }
@@ -461,7 +481,7 @@ fn fifty_move_rule_is_a_draw() {
     let mut g = from_fen("k7/8/8/8/8/8/8/K7 w - - 0 1");
     g.pos.halfmove_clock = 99;
     g.step(g.parse_move("a1a2").unwrap());
-    assert!(g.is_terminal());
+    assert!(engine_core::Game::is_terminal(&g));
     assert_eq!(g.pos.status, Status::DrawFiftyMoveRule);
     assert_eq!(g.reward(), 0.0);
 }
@@ -481,7 +501,7 @@ fn pawn_move_resets_halfmove_clock() {
     g.pos.halfmove_clock = 99;
     g.step(g.parse_move("a2a3").unwrap());
     assert_eq!(g.pos.halfmove_clock, 0);
-    assert!(!g.is_terminal());
+    assert!(!engine_core::Game::is_terminal(&g));
 }
 
 #[test]
@@ -493,7 +513,7 @@ fn en_passant_capture_resets_halfmove_clock() {
     g.pos.halfmove_clock = 99;
     g.step(g.parse_move("e5d6").unwrap());
     assert_eq!(g.pos.halfmove_clock, 0);
-    assert!(!g.is_terminal());
+    assert!(!engine_core::Game::is_terminal(&g));
 }
 
 #[test]
@@ -502,7 +522,7 @@ fn capture_resets_halfmove_clock() {
     g.pos.halfmove_clock = 99;
     g.step(g.parse_move("e1e2").unwrap());
     assert_eq!(g.pos.halfmove_clock, 0);
-    assert!(!g.is_terminal());
+    assert!(!engine_core::Game::is_terminal(&g));
 }
 
 #[test]
@@ -511,7 +531,7 @@ fn castling_rights_change_resets_halfmove_clock() {
     g.pos.halfmove_clock = 99;
     g.step(g.parse_move("e1f1").unwrap());
     assert_eq!(g.pos.halfmove_clock, 0);
-    assert!(!g.is_terminal());
+    assert!(!engine_core::Game::is_terminal(&g));
 }
 
 #[test]
@@ -520,11 +540,11 @@ fn irreversible_move_clears_repetition_history() {
     for mv in ["b1c3", "b8c6", "c3b1", "c6b8"] {
         g.step(g.parse_move(mv).unwrap());
     }
-    assert!(!g.is_terminal());
+    assert!(!engine_core::Game::is_terminal(&g));
     g.step(g.parse_move("a2a3").unwrap());
     g.step(g.parse_move("a7a6").unwrap());
     for mv in ["b1c3", "b8c6", "c3b1", "c6b8"] {
         g.step(g.parse_move(mv).unwrap());
     }
-    assert!(!g.is_terminal());
+    assert!(!engine_core::Game::is_terminal(&g));
 }
