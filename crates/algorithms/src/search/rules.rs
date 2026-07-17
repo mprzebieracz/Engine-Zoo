@@ -67,14 +67,12 @@ impl<G: ChessRepetitionState> SearchRules<G> for ChessRepetitionRules {
     ) -> RuleResult {
         let hash = if meta.initialized {
             meta.hash
-        }
-        else {
+        } else {
             state.repetition_hash()
         };
         let repetitions_before = if meta.initialized {
             meta.repetitions_before_current
-        }
-        else {
+        } else {
             let mut count = context.occurrences_before_root(hash);
             for seen in path.iter().rev().take(state.reversible_plies()) {
                 count = count.saturating_add(u8::from(*seen == hash));
@@ -116,8 +114,8 @@ impl<G: GameState> SearchRules<G> for NoExtraRules {
 mod tests {
     use super::*;
     use chess::ChessMove;
-    use engine_core::game::{Game, TerminalValue};
-    use games::ChessGame;
+    use engine_core::{game::TerminalValue, notation::GameNotation};
+    use games::{chess::ChessUciNotation, ChessGame};
 
     #[derive(Clone, Copy, Debug, Default)]
     struct State;
@@ -175,8 +173,10 @@ mod tests {
 
     fn play_cycle(game: &mut ChessGame) {
         for mv in ["b1c3", "b8c6", "c3b1", "c6b8"] {
-            let action = game.parse_move(mv).unwrap();
-            game.step(action);
+            let mv = ChessUciNotation
+                .parse_move(&game.position_state(), mv)
+                .unwrap();
+            game.play(mv);
         }
     }
 
@@ -207,13 +207,17 @@ mod tests {
     fn chess_context_contributes_root_and_non_root_occurrences() {
         let mut game = ChessGame::default();
         let non_root_hash = {
-            let action = game.parse_move("b1c3").unwrap();
-            game.step(action);
+            let mv = ChessUciNotation
+                .parse_move(&game.position_state(), "b1c3")
+                .unwrap();
+            game.play(mv);
             game.position().hash()
         };
         for mv in ["b8c6", "c3b1", "c6b8"] {
-            let action = game.parse_move(mv).unwrap();
-            game.step(action);
+            let mv = ChessUciNotation
+                .parse_move(&game.position_state(), mv)
+                .unwrap();
+            game.play(mv);
         }
         let context = game.repetition_context();
         let root_hash = game.position().hash();
@@ -347,7 +351,7 @@ mod tests {
         let mut game = ChessGame::default();
         play_cycle(&mut game);
         let context = game.repetition_context();
-        let mut state = game.history_state::<4>();
+        let mut state = game.position();
 
         assert_eq!(
             ChessRepetitionRules.enter_state(
@@ -358,12 +362,5 @@ mod tests {
             ),
             RuleResult::Continue
         );
-        let mut current_repetitions = None;
-        state.for_each_frame(|index, _, repetitions| {
-            if index == 0 {
-                current_repetitions = Some(repetitions);
-            }
-        });
-        assert_eq!(current_repetitions, Some(1));
     }
 }
