@@ -12,8 +12,7 @@ use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use clap::ValueEnum;
 use engine_core::agent::PolicyMode;
-use engine_core::game::Game;
-use engine_core::notation::GameNotation;
+use engine_core::game::GameState;
 use games::chess::notation;
 use games::setup::{ChessSetup, Connect4Setup, GameSetup};
 use games::{decode_v2_action, ChessGame, ChessHistoryState, Connect4};
@@ -105,7 +104,7 @@ enum LiveSession {
     Connect4(SessionState<Connect4>),
 }
 
-struct SessionState<G: Game> {
+struct SessionState<G: GameState> {
     id: u64,
     game: G,
     moves: Vec<String>,
@@ -172,6 +171,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::notation::GameNotation;
 
     #[test]
     fn analyze_accepts_query_and_post_only() {
@@ -254,7 +254,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!("engine-zoo-missing-run-{unique}"));
-        assert!(open_existing_run::<ChessGame>(&root).is_err());
+        assert!(open_existing_run(&root, "chess").is_err());
         assert!(!root.exists());
     }
 }

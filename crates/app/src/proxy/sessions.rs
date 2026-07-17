@@ -4,6 +4,7 @@ use algorithms::alphazero::representation::{
 };
 use algorithms::search::{ChessRepetitionRules, NoExtraRules};
 use anyhow::Context;
+use engine_core::notation::GameNotation;
 
 pub(super) fn create_session_inner(
     state: &AppState,
@@ -17,7 +18,7 @@ pub(super) fn create_session_inner(
                 Some(_) => anyhow::bail!("session position does not match chess"),
                 None => ChessSetup::default(),
             };
-            let (_, cfg) = open_existing_run::<ChessGame>(&state.run_dir)?;
+            let (_, cfg) = open_existing_run(&state.run_dir, "chess")?;
             let v2_history = if let RunArchitecture::ChessAzV2(v2) = cfg.architecture {
                 v2.validate()?;
                 Some(v2.history)
@@ -74,7 +75,7 @@ pub(super) fn session_move_inner(
         .ok_or_else(|| anyhow::anyhow!("unknown session"))?;
     match session {
         LiveSession::Chess(s) => play_chess_human_turn(s, &req.mv)?,
-        LiveSession::Connect4(s) => play_human_turn(s, &req.mv)?,
+        LiveSession::Connect4(s) => play_connect4_human_turn(s, &req.mv)?,
     }
     Ok(session_view(session))
 }
@@ -92,14 +93,18 @@ pub(super) fn session_engine_move_inner(state: AppState, id: u64) -> Result<serd
     Ok(session_view(session))
 }
 
-pub(super) fn play_human_turn<G: Game>(session: &mut SessionState<G>, mv: &str) -> Result<()> {
+pub(super) fn play_connect4_human_turn(
+    session: &mut SessionState<Connect4>,
+    mv: &str,
+) -> Result<()> {
     anyhow::ensure!(session.human_turn, "not the human's turn");
-    let action = session
-        .game
-        .parse_move(mv)
+    let native = games::connect4::notation::Connect4Notation
+        .parse_move(&session.game, mv)
         .ok_or_else(|| anyhow::anyhow!("illegal or unparsable move {mv}"))?;
-    session.game.step(action);
-    session.moves.push(mv.to_owned());
+    session.game.play(native);
+    session
+        .moves
+        .push(games::connect4::notation::Connect4Notation.format_move(&session.game, native));
     session.san_moves.push(mv.to_owned());
     session.human_turn = false;
     Ok(())
@@ -137,7 +142,7 @@ pub(super) fn play_chess_engine_turn(
     if session.game.is_terminal() {
         return Ok(());
     }
-    let (_, cfg) = open_existing_run::<ChessGame>(run_dir)?;
+    let (_, cfg) = open_existing_run(run_dir, "chess")?;
     if let Some(history) = session.v2_history {
         let RunArchitecture::ChessAzV2(v2) = &cfg.architecture
         else {
@@ -222,7 +227,7 @@ pub(super) fn play_engine_turn_for(
     if session.game.is_terminal() {
         return Ok(());
     }
-    let (_, cfg) = open_existing_run::<Connect4>(run_dir)?;
+    let (_, cfg) = open_existing_run(run_dir, "connect4")?;
     let batcher = Batcher::new(
         &cfg.net,
         &resolve_model(run_dir, &session.model),
@@ -246,7 +251,7 @@ pub(super) fn play_engine_turn_for(
         .search(&session.game, (), PolicyMode::Deterministic)
         .best_move();
     let mv = games::connect4::notation::Connect4Notation.format_move(&session.game, native);
-    engine_core::game::GameState::play(&mut session.game, native);
+    session.game.play(native);
     session.moves.push(mv);
     session.human_turn = true;
     Ok(())
@@ -256,7 +261,7 @@ fn v2_best_action_for<const HISTORY: usize>(
     evaluator: algorithms::alphazero::BatcherClient,
     game: &ChessGame,
     simulations: usize,
-) -> Result<engine_core::game::Action> {
+) -> Result<u32> {
     let state = game.history_state::<HISTORY>();
     let context = game.repetition_context();
     let mv = Mcts::new(

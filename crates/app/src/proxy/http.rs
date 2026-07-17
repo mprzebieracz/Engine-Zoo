@@ -99,7 +99,7 @@ pub fn resolve_model(run_dir: &Path, model: &str) -> PathBuf {
     }
 }
 
-pub fn open_existing_run<G: Game>(root: &Path) -> Result<(RunDir, RunConfig)> {
+pub fn open_existing_run(root: &Path, expected_game: &str) -> Result<(RunDir, RunConfig)> {
     anyhow::ensure!(
         root.join("config.json").is_file(),
         "no run found at {}; train first or pass --run-dir",
@@ -112,19 +112,19 @@ pub fn open_existing_run<G: Game>(root: &Path) -> Result<(RunDir, RunConfig)> {
         )
     })?;
     anyhow::ensure!(
-        cfg.game == G::NAME,
+        cfg.game == expected_game,
         "run dir {} holds a {} run, not {}",
         root.display(),
         cfg.game,
-        G::NAME
+        expected_game
     );
     Ok((run, cfg))
 }
 
 pub fn game_name(game: GameKind) -> &'static str {
     match game {
-        GameKind::Connect4 => Connect4::NAME,
-        GameKind::Chess => ChessGame::NAME,
+        GameKind::Connect4 => "connect4",
+        GameKind::Chess => "chess",
     }
 }
 
