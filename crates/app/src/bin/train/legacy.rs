@@ -1,4 +1,5 @@
 use super::*;
+use algorithms::alphazero::representation::AlphaZeroRepresentation;
 
 pub(super) fn run<G: engine_app::players::InteractiveGame>(
     args: Args,
@@ -92,7 +93,11 @@ pub(super) fn run<G: engine_app::players::InteractiveGame>(
         vs.save(run.best_path())?;
     }
 
-    let replay = ReplayBuffer::new(args.buffer, G::state_size(), G::ACTION_SIZE);
+    let replay = ReplayBuffer::new(
+        args.buffer,
+        G::Representation::state_size(),
+        G::Representation::ACTION_SIZE,
+    );
     let train_cfg = TrainConfig {
         micro_batch_size: args.batch_size,
         batch_size: args.minibatch_size,

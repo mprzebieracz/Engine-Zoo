@@ -68,6 +68,8 @@ impl<G: InteractiveGame> Agent<G> for HumanAgent {
 }
 
 pub trait InteractiveGame: GameState + Clone + Default + std::fmt::Display {
+    const NAME: &'static str;
+
     type SearchState: GameState<Move = Self::Move> + Clone;
     type Representation: AlphaZeroRepresentation<Self::SearchState> + Default;
     type Rules: SearchRules<Self::SearchState> + Default;
@@ -79,6 +81,8 @@ pub trait InteractiveGame: GameState + Clone + Default + std::fmt::Display {
 }
 
 impl InteractiveGame for Connect4 {
+    const NAME: &'static str = "connect4";
+
     type SearchState = Connect4;
     type Representation = Connect4AzRepresentation;
     type Rules = algorithms::search::NoExtraRules;
@@ -96,6 +100,8 @@ impl InteractiveGame for Connect4 {
 }
 
 impl InteractiveGame for ChessGame {
+    const NAME: &'static str = "chess";
+
     type SearchState = ChessPosition;
     type Representation = ChessV1Representation;
     type Rules = algorithms::search::ChessRepetitionRules;
