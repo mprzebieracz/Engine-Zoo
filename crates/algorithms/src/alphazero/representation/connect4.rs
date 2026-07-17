@@ -22,11 +22,9 @@ impl AlphaZeroRepresentation<Connect4> for Connect4AzRepresentation {
                 let bit = 1u64 << (col * 7 + (5 - row_top));
                 output[row_top * 7 + col] = if own & bit != 0 {
                     1.0
-                }
-                else if opponent & bit != 0 {
+                } else if opponent & bit != 0 {
                     -1.0
-                }
-                else {
+                } else {
                     0.0
                 };
             }
@@ -52,13 +50,7 @@ impl AlphaZeroRepresentation<Connect4> for Connect4AzRepresentation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_core::{Game, GameState};
-
-    fn encoded(game: &Connect4) -> Vec<f32> {
-        let mut out = vec![0.0; Connect4AzRepresentation::state_size()];
-        Connect4AzRepresentation.encode_state(game, &mut out);
-        out
-    }
+    use engine_core::GameState;
 
     #[test]
     fn golden_encoding_and_legal_roundtrips() {
@@ -66,9 +58,6 @@ mod tests {
         let mut game = Connect4::initial();
         let mut seed = 0x1234_5678u32;
         for _ in 0..30 {
-            let mut legacy = vec![0.0; Connect4::state_size()];
-            game.encode_state(&mut legacy);
-            assert_eq!(encoded(&game), legacy);
             let moves: Vec<_> = game.legal_moves().collect();
             let mut actions = std::collections::HashSet::new();
             for mv in moves.iter().copied() {
@@ -89,7 +78,13 @@ mod tests {
         let r = Connect4AzRepresentation;
         let game = Connect4::initial();
         assert!(r.action_to_move(&game, Action::new(7)).is_none());
-        let full = Connect4::from_moves(&[0, 1, 0, 1, 0, 1, 0]).unwrap();
+        let full = Connect4::from_moves(
+            &[0, 1, 0, 1, 0, 1, 0]
+                .into_iter()
+                .map(|column| Connect4Move::new(column).unwrap())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         assert!(r.action_to_move(&full, Action::new(0)).is_none());
         let before = r.encoded_state_key(&game);
         let mut next = game;

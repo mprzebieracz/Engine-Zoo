@@ -1,7 +1,7 @@
 use super::*;
 use crate::search::{Evaluation, NoExtraRules, PolicyValueEvaluator, RuleResult, SearchRules};
 use engine_core::agent::PolicyMode;
-use engine_core::game::{Game, GameState, TerminalValue};
+use engine_core::game::{GameState, TerminalValue};
 use games::{Connect4, Connect4Move};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -167,11 +167,9 @@ impl GameState for ImmediateOutcomeGame {
         self.reward.map(|r| {
             if r < 0.0 {
                 TerminalValue::Loss
-            }
-            else if r > 0.0 {
+            } else if r > 0.0 {
                 TerminalValue::Win
-            }
-            else {
+            } else {
                 TerminalValue::Draw
             }
         })
@@ -291,8 +289,7 @@ impl SearchRules<CycleGame> for CycleRules {
         if state.ply >= 2 {
             state.repetition_draw = true;
             RuleResult::Terminal(TerminalValue::Draw)
-        }
-        else {
+        } else {
             RuleResult::Continue
         }
     }
@@ -432,8 +429,7 @@ impl<G: GameState> PolicyValueEvaluator<G> for RecordingEvaluator {
                     .map(|a| {
                         if self.favor_action_zero && format!("{a:?}") == "0" {
                             100.0
-                        }
-                        else {
+                        } else {
                             0.0
                         }
                     })
@@ -467,7 +463,7 @@ impl<G: GameState> PolicyValueEvaluator<G> for BadLogitEvaluator {
 fn play(moves: &[u32]) -> Connect4 {
     let mut g = Connect4::default();
     for &m in moves {
-        g.step(m);
+        g.play(Connect4Move::new(m as u8).unwrap());
     }
     g
 }
