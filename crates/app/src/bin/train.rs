@@ -9,7 +9,6 @@ use anyhow::Result;
 use checkpoint_eval::arena::{self, ArenaConfig};
 use clap::{Parser, ValueEnum};
 use engine_app::chess_selfplay::{self_play_chess, self_play_chess_az_v2};
-use engine_core::game::Game;
 use games::{ChessGame, ChessPosition, Connect4};
 use serde_json::json;
 use std::fs::{self, OpenOptions};
@@ -281,7 +280,7 @@ fn run_chess(mut args: Args) -> Result<()> {
             }),
         };
         RunConfig {
-            game: ChessGame::NAME.into(),
+            game: "chess".into(),
             net: NetConfig::for_representation::<ChessPosition, ChessV1Representation>(
                 args.blocks.unwrap_or(10),
                 args.filters.unwrap_or(64),
@@ -290,7 +289,7 @@ fn run_chess(mut args: Args) -> Result<()> {
         }
     })?;
     anyhow::ensure!(
-        cfg.game == ChessGame::NAME,
+        cfg.game == "chess",
         "run {} is not a chess run",
         root.display()
     );
