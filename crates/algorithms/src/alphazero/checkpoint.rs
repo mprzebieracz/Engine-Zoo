@@ -163,6 +163,7 @@ impl RunDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alphazero::representation::Connect4AzRepresentation;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_root(name: &str) -> PathBuf {
@@ -178,7 +179,7 @@ mod tests {
     fn config() -> RunConfig {
         RunConfig {
             game: "connect4".into(),
-            net: NetConfig::for_game::<games::Connect4>(1, 8),
+            net: NetConfig::for_representation::<games::Connect4, Connect4AzRepresentation>(1, 8),
             architecture: RunArchitecture::Legacy,
         }
     }

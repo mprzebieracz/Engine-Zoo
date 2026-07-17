@@ -57,7 +57,7 @@ pub(super) fn run<G: engine_app::players::InteractiveGame>(
         .unwrap_or_else(|| PathBuf::from("runs").join(G::NAME));
     let (run, cfg) = RunDir::open_or_create(&root, || RunConfig {
         game: G::NAME.into(),
-        net: NetConfig::for_game::<G>(
+        net: NetConfig::for_representation::<G::SearchState, G::Representation>(
             args.blocks.unwrap_or(default_blocks),
             args.filters.unwrap_or(default_filters),
         ),
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn rejected_candidate_restores_the_accepted_weights() {
         let root = test_root();
-        let cfg = NetConfig::for_game::<Connect4>(0, 2);
+        let cfg = NetConfig::for_representation::<Connect4, Connect4AzRepresentation>(0, 2);
         let (run, _) = RunDir::open_or_create(&root, || RunConfig {
             game: Connect4::NAME.into(),
             net: cfg.clone(),

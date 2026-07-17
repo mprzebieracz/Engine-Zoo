@@ -1,4 +1,4 @@
-use algorithms::alphazero::representation::Connect4AzRepresentation;
+use algorithms::alphazero::representation::{ChessV1Representation, Connect4AzRepresentation};
 use algorithms::alphazero::{
     self_play, train, train_chess_az_v2, AlphaZeroNet, Batcher, ChessAzV2Config, ChessAzV2Net,
     ChessV2GumbelProfiles, GumbelSearchProfile, InferencePrecision, MctsConfig, MctsVariant,
@@ -10,7 +10,7 @@ use checkpoint_eval::arena::{self, ArenaConfig};
 use clap::{Parser, ValueEnum};
 use engine_app::chess_selfplay::{self_play_chess, self_play_chess_az_v2};
 use engine_core::game::Game;
-use games::{ChessGame, Connect4};
+use games::{ChessGame, ChessPosition, Connect4};
 use serde_json::json;
 use std::fs::{self, OpenOptions};
 use std::os::fd::AsRawFd;
@@ -282,7 +282,7 @@ fn run_chess(mut args: Args) -> Result<()> {
         };
         RunConfig {
             game: ChessGame::NAME.into(),
-            net: NetConfig::for_game::<ChessGame>(
+            net: NetConfig::for_representation::<ChessPosition, ChessV1Representation>(
                 args.blocks.unwrap_or(10),
                 args.filters.unwrap_or(64),
             ),
