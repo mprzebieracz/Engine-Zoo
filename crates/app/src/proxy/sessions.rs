@@ -1,4 +1,8 @@
 use super::*;
+use algorithms::alphazero::representation::{
+    ChessAzRepresentation, ChessV1Representation, Connect4AzRepresentation,
+};
+use algorithms::search::{ChessRepetitionRules, NoExtraRules};
 use anyhow::Context;
 
 pub(super) fn create_session_inner(
@@ -121,7 +125,7 @@ pub(super) fn play_engine_turn(
 ) -> Result<()> {
     match session {
         LiveSession::Chess(s) => play_chess_engine_turn(run_dir, device, s),
-        LiveSession::Connect4(s) => play_engine_turn_for::<Connect4>(run_dir, device, s),
+        LiveSession::Connect4(s) => play_engine_turn_for(run_dir, device, s),
     }
 }
 
@@ -185,34 +189,40 @@ pub(super) fn play_chess_engine_turn(
         Duration::from_millis(1),
     )?;
     let mut mcts = Mcts::new(
-        batcher.client(),
+        algorithms::alphazero::RepresentedEvaluator::new(ChessV1Representation, batcher.client()),
         MctsConfig {
             simulations: session.simulations,
             eps: 0.0,
             ..Default::default()
         },
+        ChessRepetitionRules,
     );
-    let action = mcts
-        .search_with_mode(&session.game, PolicyMode::Deterministic)
-        .best_action();
-    let mv = session.game.format_action(action);
-    let san = session.game.san_for_action(action);
-    session.game.step(action);
-    session.moves.push(mv);
+    let position = session.game.position_state();
+    let mv = mcts
+        .search(
+            &position,
+            session.game.repetition_context(),
+            PolicyMode::Deterministic,
+        )
+        .best_move();
+    let uci = games::chess::ChessUciNotation.format_move(&position, mv);
+    let san = games::chess::notation::san(session.game.board(), mv);
+    session.game.play(mv);
+    session.moves.push(uci);
     session.san_moves.push(san);
     session.human_turn = true;
     Ok(())
 }
 
-pub(super) fn play_engine_turn_for<G: Game>(
+pub(super) fn play_engine_turn_for(
     run_dir: &Path,
     device: Device,
-    session: &mut SessionState<G>,
+    session: &mut SessionState<Connect4>,
 ) -> Result<()> {
     if session.game.is_terminal() {
         return Ok(());
     }
-    let (_, cfg) = open_existing_run::<G>(run_dir)?;
+    let (_, cfg) = open_existing_run::<Connect4>(run_dir)?;
     let batcher = Batcher::new(
         &cfg.net,
         &resolve_model(run_dir, &session.model),
@@ -221,18 +231,22 @@ pub(super) fn play_engine_turn_for<G: Game>(
         Duration::from_millis(1),
     )?;
     let mut mcts = Mcts::new(
-        batcher.client(),
+        algorithms::alphazero::RepresentedEvaluator::new(
+            Connect4AzRepresentation,
+            batcher.client(),
+        ),
         MctsConfig {
             simulations: session.simulations,
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
-    let action = mcts
-        .search_with_mode(&session.game, PolicyMode::Deterministic)
-        .best_action();
-    let mv = session.game.format_action(action);
-    session.game.step(action);
+    let native = mcts
+        .search(&session.game, (), PolicyMode::Deterministic)
+        .best_move();
+    let mv = games::connect4::notation::Connect4Notation.format_move(&session.game, native);
+    engine_core::game::GameState::play(&mut session.game, native);
     session.moves.push(mv);
     session.human_turn = true;
     Ok(())
@@ -245,19 +259,20 @@ fn v2_best_action_for<const HISTORY: usize>(
 ) -> Result<engine_core::game::Action> {
     let state = game.history_state::<HISTORY>();
     let context = game.repetition_context();
-    Ok(Mcts::new(
-        evaluator,
+    let mv = Mcts::new(
+        algorithms::alphazero::RepresentedEvaluator::new(
+            ChessAzRepresentation::<HISTORY>,
+            evaluator,
+        ),
         MctsConfig {
             simulations: simulations.max(1),
             variant: MctsVariant::Puct,
             eps: 0.0,
             ..Default::default()
         },
+        ChessRepetitionRules,
     )
-    .search_with_repetitions_mode(
-        &state,
-        |hash| context.occurrences_before_root(hash),
-        PolicyMode::Deterministic,
-    )
-    .best_action())
+    .search(&state, context, PolicyMode::Deterministic)
+    .best_move();
+    Ok(games::encode_v2_action(game.board(), mv))
 }

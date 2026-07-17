@@ -1,13 +1,15 @@
-use crate::alphazero::representation::Action as EncodedAction;
-use crate::alphazero::{Batcher, EncodedEvalBatch, EncodedEvaluator, Mcts, MctsConfig, NetConfig};
+use crate::alphazero::representation::AlphaZeroRepresentation;
+use crate::alphazero::RepresentedEvaluator;
+use crate::alphazero::{EncodedEvaluator, Mcts, MctsConfig};
+use crate::search::{ChessRepetitionRules, PolicyValueEvaluator, SearchRules};
 use anyhow::Result;
 use engine_core::agent::PolicyMode;
-use engine_core::game::{Action, Game};
-use engine_core::rules::RepetitionGame;
+use engine_core::game::{Action, GameState};
+use engine_core::notation::GameNotation;
+use games::ChessRepetitionContext;
+use games::ChessRepetitionState;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::time::Duration;
-use tch::Device;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -42,63 +44,33 @@ pub struct AnalyzeConfig {
     pub timeout: Duration,
 }
 
-pub fn analyze_game<G: Game>(
+pub fn analyze_game_net<G, Rep, N, Notation>(
     game: G,
-    net_cfg: &NetConfig,
-    weights: &Path,
-    device: Device,
-    cfg: &AnalyzeConfig,
-) -> Result<Analysis> {
-    if game.is_terminal() {
-        return Ok(Analysis {
-            value: game.reward(),
-            network_value: game.reward(),
-            mcts_value: None,
-            best_action: None,
-            best_move: None,
-            policy: Vec::new(),
-            network_policy: Vec::new(),
-            mcts_policy: Vec::new(),
-        });
-    }
-
-    let batcher = Batcher::new(net_cfg, weights, device, cfg.wait_for_count, cfg.timeout)?;
-    match cfg.mode {
-        AnalyzeMode::Net => analyze_game_net::<G>(game, batcher.client()),
-        AnalyzeMode::Mcts => {
-            let mut mcts_cfg = cfg.mcts;
-            mcts_cfg.eps = 0.0;
-            let network = analyze_game_net::<G>(game.clone(), batcher.client())?;
-            let mut mcts = Mcts::new(batcher.client(), mcts_cfg);
-            analyze_game_mcts(game, &mut mcts, network)
-        }
-    }
-}
-
-/// Evaluates an already-constructed game. This keeps position construction in
-/// the owning integration crate while allowing alternate game state wrappers
-/// (such as history-aware chess) to share the API analysis schema.
-pub fn analyze_game_net<G: Game>(
-    game: G,
-    mut evaluator: impl EncodedEvaluator,
-) -> Result<Analysis> {
-    let legal: Vec<_> = game.legal_actions().collect();
-    let mut state = vec![0.0f32; G::state_size()];
-    game.encode_state(&mut state);
-    let mut batch = EncodedEvalBatch {
-        states: state,
-        legal_actions: legal.iter().copied().map(EncodedAction::new).collect(),
-        offsets: vec![0, legal.len() as u32],
-    };
-    let eval = evaluator.evaluate(&mut batch);
+    evaluator: N,
+    rep: &Rep,
+    notation: &Notation,
+) -> Result<Analysis>
+where
+    G: GameState + Clone,
+    Rep: AlphaZeroRepresentation<G>,
+    N: EncodedEvaluator,
+    Notation: GameNotation<G>,
+{
+    let mut evaluator = RepresentedEvaluator::new(rep.clone(), evaluator);
+    let legal: Vec<_> = game.legal_moves().collect();
+    let eval = evaluator.evaluate(
+        std::slice::from_ref(&game),
+        &legal,
+        &[0, legal.len() as u32],
+    );
     anyhow::ensure!(eval.len() == 1, "evaluator returned {} results", eval.len());
     let probs = softmax(&eval[0].logits);
     let policy: Vec<MoveScore> = legal
         .iter()
         .zip(probs)
-        .map(|(&action, p)| MoveScore {
-            action,
-            mv: game.format_action(action),
+        .map(|(&mv, p)| MoveScore {
+            action: rep.move_to_action(&game, mv).as_u32(),
+            mv: notation.format_move(&game, mv),
             p,
         })
         .collect();
@@ -108,18 +80,28 @@ pub fn analyze_game_net<G: Game>(
 }
 
 /// Runs ordinary deterministic MCTS for an already-constructed game.
-pub fn analyze_game_mcts<G: Game, E: EncodedEvaluator>(
+pub fn analyze_game_mcts<G, R, E, Rep, Notation>(
     game: G,
-    mcts: &mut Mcts<E>,
+    mcts: &mut Mcts<G, E, R>,
+    context: R::Context<'_>,
     network: Analysis,
-) -> Result<Analysis> {
-    let result = mcts.search_with_mode(&game, PolicyMode::Deterministic);
-    let legal: Vec<_> = game.legal_actions().collect();
+    rep: &Rep,
+    notation: &Notation,
+) -> Result<Analysis>
+where
+    G: GameState + Clone,
+    R: SearchRules<G>,
+    E: PolicyValueEvaluator<G>,
+    Rep: AlphaZeroRepresentation<G>,
+    Notation: GameNotation<G>,
+{
+    let result = mcts.search(&game, context, PolicyMode::Deterministic);
+    let legal: Vec<_> = game.legal_moves().collect();
     let policy: Vec<MoveScore> = legal
         .into_iter()
         .map(|action| MoveScore {
-            action,
-            mv: game.format_action(action),
+            action: rep.move_to_action(&game, action).as_u32(),
+            mv: notation.format_move(&game, action),
             p: result.probability(action),
         })
         .collect();
@@ -134,37 +116,22 @@ pub fn analyze_game_mcts<G: Game, E: EncodedEvaluator>(
 /// Runs deterministic repetition-aware MCTS for an already-constructed game.
 /// The callback belongs to the authoritative rules owner, rather than the
 /// search state, because it may retain history beyond the encoded frames.
-pub fn analyze_game_mcts_with_repetitions<G, E, F>(
+pub fn analyze_game_mcts_with_repetitions<G, E, Rep, Notation>(
     game: G,
-    mcts: &mut Mcts<E>,
+    mcts: &mut Mcts<G, E, ChessRepetitionRules>,
+    context: ChessRepetitionContext<'_>,
     network: Analysis,
-    repetitions_before_current: F,
+    rep: &Rep,
+    notation: &Notation,
 ) -> Result<Analysis>
 where
-    G: RepetitionGame,
-    E: EncodedEvaluator,
-    F: Fn(u64) -> u8 + Copy,
+    G: GameState + Clone + ChessRepetitionState,
+    E: PolicyValueEvaluator<G>,
+    for<'a> ChessRepetitionRules: SearchRules<G, Context<'a> = ChessRepetitionContext<'a>>,
+    Rep: AlphaZeroRepresentation<G>,
+    Notation: GameNotation<G>,
 {
-    let result = mcts.search_with_repetitions_mode(
-        &game,
-        repetitions_before_current,
-        PolicyMode::Deterministic,
-    );
-    let legal: Vec<_> = game.legal_actions().collect();
-    let policy: Vec<MoveScore> = legal
-        .into_iter()
-        .map(|action| MoveScore {
-            action,
-            mv: game.format_action(action),
-            p: result.probability(action),
-        })
-        .collect();
-    let mut analysis = with_best(result.value, policy.clone());
-    analysis.network_value = network.value;
-    analysis.network_policy = network.policy;
-    analysis.mcts_value = Some(result.value);
-    analysis.mcts_policy = policy;
-    Ok(analysis)
+    analyze_game_mcts(game, mcts, context, network, rep, notation)
 }
 
 fn with_best(value: f32, policy: Vec<MoveScore>) -> Analysis {

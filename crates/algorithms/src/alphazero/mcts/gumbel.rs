@@ -1,8 +1,7 @@
-use super::super::evaluator::EncodedEvaluator;
-use super::core::{LeafBatch, MctsCore, SearchDriver};
+use super::core::{LeafBatch, MctsCore};
 use super::{Node, RootAction, RootQTransform, SearchResult};
 use engine_core::agent::PolicyMode;
-use engine_core::game::{Action, Game};
+use engine_core::game::GameState;
 use rand::prelude::*;
 
 #[derive(Debug)]
@@ -20,43 +19,30 @@ impl Gumbel {
     const EXPLORATION_SCALE: f32 = 1.0;
 }
 
-impl<E: EncodedEvaluator> MctsCore<E, Gumbel, Action, Vec<u64>> {
-    fn clear_tree(&mut self) {
-        self.nodes.clear();
-        self.variant.root_actions.clear();
-        self.policy_buf.clear();
-        self.batch.clear();
-    }
-
-    pub(super) fn search_inner<G, D>(
+impl<G, E, R> MctsCore<G, E, R, Gumbel>
+where
+    G: GameState + Clone,
+    E: crate::search::PolicyValueEvaluator<G>,
+    R: crate::search::SearchRules<G>,
+{
+    pub(super) fn search_inner(
         &mut self,
         game: &G,
+        context: R::Context<'_>,
         mode: PolicyMode,
-        driver: D,
-    ) -> SearchResult<Action>
-    where
-        G: Game,
-        D: SearchDriver<G>,
-    {
-        if game.is_terminal() {
-            return SearchResult {
-                policy: Vec::new(),
-                selected_move: 0,
-                value: game.reward(),
-            };
-        }
-        self.clear_tree();
-        self.nodes.push(Node::new(
-            None,
-            None,
-            driver.root_hash(game),
-            0.0,
-            0.0,
-            game.is_terminal(),
-            game.reward(),
-        ));
+    ) -> SearchResult<G::Move> {
+        assert!(!game.is_terminal(), "terminal roots must be rejected");
+        self.clear_tree_common();
+        self.nodes.push(Node::new(None, None, 0.0, 0.0, false, 0.0));
 
-        let (root_legal, root_eval) = driver.evaluate(self, game);
+        let mut root = game.clone();
+        let _ = self.rules.enter_state(
+            context,
+            &mut root,
+            &mut self.path_state,
+            &mut self.nodes[0].meta,
+        );
+        let (root_legal, root_eval) = self.evaluate_position(&root);
         let root_value = root_eval.value;
         self.build_policy_from(&root_legal, &root_eval, false);
         self.expand(0);
@@ -67,7 +53,7 @@ impl<E: EncodedEvaluator> MctsCore<E, Gumbel, Action, Vec<u64>> {
         else {
             0.0
         };
-        let winner = self.run_gumbel(game, root_value, gumbel_scale, driver);
+        let winner = self.run_gumbel(game, root_value, gumbel_scale, context);
         let selected_move = self.nodes[winner as usize]
             .move_from_parent
             .expect("Gumbel winner must be a root child");
@@ -85,7 +71,7 @@ impl<E: EncodedEvaluator> MctsCore<E, Gumbel, Action, Vec<u64>> {
         }
     }
 
-    fn root_gumbel_policy(&self, root_value: f32) -> Vec<(Action, f32)> {
+    fn root_gumbel_policy(&self, root_value: f32) -> Vec<(G::Move, f32)> {
         let root = &self.nodes[0];
         let transform = self.root_q_transform(root_value);
         let mut policy = Vec::with_capacity(usize::from(root.num_children));
@@ -125,11 +111,13 @@ impl<E: EncodedEvaluator> MctsCore<E, Gumbel, Action, Vec<u64>> {
         policy
     }
 
-    fn run_gumbel<G, D>(&mut self, game: &G, root_value: f32, gumbel_scale: f32, driver: D) -> u32
-    where
-        G: Game,
-        D: SearchDriver<G>,
-    {
+    fn run_gumbel(
+        &mut self,
+        game: &G,
+        root_value: f32,
+        gumbel_scale: f32,
+        context: R::Context<'_>,
+    ) -> u32 {
         self.init_gumbel_root_actions(gumbel_scale);
         debug_assert!(!self.variant.root_actions.is_empty());
 
@@ -142,13 +130,13 @@ impl<E: EncodedEvaluator> MctsCore<E, Gumbel, Action, Vec<u64>> {
                 .expect("Gumbel visit schedule must always have a considered action");
             batch
                 .leaves
-                .push(self.collect_leaf(game, Some(child), driver));
+                .push(self.collect_leaf(game, Some(child), context));
             if batch.leaves.len() >= self.leaf_batch_size() {
-                self.finish_leaf_batch(&mut batch, driver);
+                self.finish_leaf_batch(&mut batch);
             }
         }
         if !batch.leaves.is_empty() {
-            self.finish_leaf_batch(&mut batch, driver);
+            self.finish_leaf_batch(&mut batch);
         }
 
         self.select_gumbel_winner(root_value)

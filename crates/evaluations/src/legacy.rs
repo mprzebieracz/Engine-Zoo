@@ -1,12 +1,15 @@
 mod support;
 
 use self::support::{apply_opening, Stockfish};
-use algorithms::alphazero::{Batcher, Mcts, MctsConfig, RunConfig};
+use algorithms::alphazero::representation::ChessV1Representation;
+use algorithms::alphazero::{Batcher, Mcts, MctsConfig, RepresentedEvaluator, RunConfig};
+use algorithms::search::ChessRepetitionRules;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use engine_core::game::Game;
-use games::chess::notation;
-use games::ChessGame;
+use engine_core::game::{Game, GameState};
+use engine_core::notation::GameNotation;
+use games::chess::{notation, ChessUciNotation};
+use games::{ChessGame, ChessPosition};
 use rand::{rngs::StdRng, SeedableRng};
 use serde::Serialize;
 use std::fs;
@@ -101,13 +104,14 @@ pub fn run() -> Result<()> {
         1,
         Duration::from_millis(2),
     )?;
-    let mut model = Mcts::new(
-        batcher.client(),
+    let mut model = Mcts::<ChessPosition, _, _>::new(
+        RepresentedEvaluator::new(ChessV1Representation, batcher.client()),
         MctsConfig {
             simulations: args.simulations,
             eps: 0.0,
             ..Default::default()
         },
+        ChessRepetitionRules,
     );
     let mut stockfish =
         Stockfish::start(&args.stockfish, args.stockfish_elo, args.stockfish_threads)?;
@@ -139,22 +143,30 @@ pub fn run() -> Result<()> {
             args.opening_plies,
             &mut rng,
         );
+        let mut state = game.position_state();
         let mut ply = uci_moves.len();
-        while !game.is_terminal() && ply < args.max_moves {
+        while !state.is_terminal() && ply < args.max_moves {
             let model_turn = (ply.is_multiple_of(2)) == model_white;
             let action = if model_turn {
                 model
-                    .search_with_mode(&game, engine_core::agent::PolicyMode::Deterministic)
-                    .best_action()
+                    .search(
+                        &state,
+                        game.repetition_context(),
+                        engine_core::agent::PolicyMode::Deterministic,
+                    )
+                    .best_move()
             }
             else {
                 let mv = stockfish.best_move(&uci_moves, args.stockfish_movetime_ms)?;
-                game.parse_move(&mv)
+                ChessUciNotation
+                    .parse_move(&state, &mv)
                     .with_context(|| format!("Stockfish returned illegal move {mv}"))?
             };
-            san_moves.push(game.san_for_action(action));
-            uci_moves.push(game.format_action(action));
-            game.step(action);
+            let uci = ChessUciNotation.format_move(&state, action);
+            san_moves.push(game.san_for_action(game.parse_move(&uci).unwrap()));
+            uci_moves.push(uci.clone());
+            state.play(action);
+            game.step(game.parse_move(&uci).unwrap());
             ply += 1;
         }
         let result = if !game.is_terminal() || game.reward() == 0.0 {
@@ -206,31 +218,43 @@ pub fn run() -> Result<()> {
         );
         let baseline_batcher =
             Batcher::new(&config.net, path, device, 1, Duration::from_millis(2))?;
-        let mut baseline = Mcts::new(
-            baseline_batcher.client(),
+        let mut baseline = Mcts::<ChessPosition, _, _>::new(
+            RepresentedEvaluator::new(ChessV1Representation, baseline_batcher.client()),
             MctsConfig {
                 simulations: args.simulations,
                 eps: 0.0,
                 ..Default::default()
             },
+            ChessRepetitionRules,
         );
         let (mut baseline_wins, mut baseline_draws, mut baseline_losses) = (0usize, 0usize, 0usize);
         for game_idx in 0..args.baseline_games {
             let model_white = game_idx.is_multiple_of(2);
             let mut game = ChessGame::default();
             let mut ply = apply_opening(&mut game, None, args.opening_plies, &mut rng);
-            while !game.is_terminal() && ply < args.max_moves {
+            let mut state = game.position_state();
+            while !state.is_terminal() && ply < args.max_moves {
                 let action = if ply.is_multiple_of(2) == model_white {
                     model
-                        .search_with_mode(&game, engine_core::agent::PolicyMode::Deterministic)
-                        .best_action()
+                        .search(
+                            &state,
+                            game.repetition_context(),
+                            engine_core::agent::PolicyMode::Deterministic,
+                        )
+                        .best_move()
                 }
                 else {
                     baseline
-                        .search_with_mode(&game, engine_core::agent::PolicyMode::Deterministic)
-                        .best_action()
+                        .search(
+                            &state,
+                            game.repetition_context(),
+                            engine_core::agent::PolicyMode::Deterministic,
+                        )
+                        .best_move()
                 };
-                game.step(action);
+                let uci = ChessUciNotation.format_move(&state, action);
+                state.play(action);
+                game.step(game.parse_move(&uci).unwrap());
                 ply += 1;
             }
             if !game.is_terminal() || game.reward() == 0.0 {

@@ -1,7 +1,8 @@
-use super::core::MctsKind;
 use super::*;
-use engine_core::rules::RepetitionGame;
-use games::Connect4;
+use crate::search::{Evaluation, NoExtraRules, PolicyValueEvaluator, RuleResult, SearchRules};
+use engine_core::agent::PolicyMode;
+use engine_core::game::{Game, GameState, TerminalValue};
+use games::{Connect4, Connect4Move};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use std::fmt;
@@ -34,8 +35,9 @@ fn search_result_supports_native_move_types() {
 
 #[test]
 fn node_storage_accepts_non_legacy_move_types() {
-    let root = super::Node::<TestMove>::new(None, None, 0, 0.5, 0.0, false, 0.0);
-    let node = super::Node::new(Some(0), Some(TestMove::Left), 0, 0.5, 0.0, false, 0.0);
+    let root = super::Node::<TestMove>::new(None, None, 0.5, 0.0, false, 0.0);
+    let node =
+        super::Node::<TestMove, ()>::new(Some(0), Some(TestMove::Left), 0.5, 0.0, false, 0.0);
     assert_eq!(root.move_from_parent, None);
     assert_eq!(node.move_from_parent, Some(TestMove::Left));
     assert_eq!(
@@ -84,18 +86,23 @@ fn generic_cache_and_policy_keep_native_move_order() {
     assert!((policy.iter().map(|entry| entry.1).sum::<f32>() - 1.0).abs() < 1e-6);
 }
 
-impl<E: EncodedEvaluator> Mcts<E> {
+impl<G, E, R> Mcts<G, E, R>
+where
+    G: GameState + Clone,
+    E: PolicyValueEvaluator<G>,
+    R: SearchRules<G>,
+{
     fn seed_rng(&mut self, seed: u64) {
         match &mut self.inner {
-            MctsKind::Puct(core) => core.rng = SmallRng::seed_from_u64(seed),
-            MctsKind::Gumbel(core) => core.rng = SmallRng::seed_from_u64(seed),
+            super::core::MctsKind::Puct(core) => core.rng = SmallRng::seed_from_u64(seed),
+            super::core::MctsKind::Gumbel(core) => core.rng = SmallRng::seed_from_u64(seed),
         }
     }
 
-    fn gumbel_root_actions(&self) -> Vec<Action> {
+    fn gumbel_root_actions(&self) -> Vec<G::Move> {
         match &self.inner {
-            MctsKind::Puct(_) => Vec::new(),
-            MctsKind::Gumbel(core) => core
+            super::core::MctsKind::Puct(_) => Vec::new(),
+            super::core::MctsKind::Gumbel(core) => core
                 .variant
                 .root_actions
                 .iter()
@@ -110,47 +117,44 @@ impl<E: EncodedEvaluator> Mcts<E> {
 
     fn virtual_loss_total(&self) -> u32 {
         match &self.inner {
-            MctsKind::Puct(core) => core.nodes.iter().map(|n| n.virtual_loss_count).sum(),
-            MctsKind::Gumbel(core) => core.nodes.iter().map(|n| n.virtual_loss_count).sum(),
+            super::core::MctsKind::Puct(core) => {
+                core.nodes.iter().map(|n| n.virtual_loss_count).sum()
+            }
+            super::core::MctsKind::Gumbel(core) => {
+                core.nodes.iter().map(|n| n.virtual_loss_count).sum()
+            }
         }
     }
 
     fn root_visits(&self) -> u32 {
         match &self.inner {
-            MctsKind::Puct(core) => core.nodes[0].visits,
-            MctsKind::Gumbel(core) => core.nodes[0].visits,
+            super::core::MctsKind::Puct(core) => core.nodes[0].visits,
+            super::core::MctsKind::Gumbel(core) => core.nodes[0].visits,
         }
     }
 
     fn node_count(&self) -> usize {
         match &self.inner {
-            MctsKind::Puct(core) => core.nodes.len(),
-            MctsKind::Gumbel(core) => core.nodes.len(),
+            super::core::MctsKind::Puct(core) => core.nodes.len(),
+            super::core::MctsKind::Gumbel(core) => core.nodes.len(),
         }
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 struct ImmediateOutcomeGame {
     reward: Option<f32>,
 }
 
-impl fmt::Display for ImmediateOutcomeGame {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.reward)
+impl GameState for ImmediateOutcomeGame {
+    type Move = u8;
+    fn initial() -> Self {
+        Self::default()
     }
-}
-
-impl Game for ImmediateOutcomeGame {
-    const ACTION_SIZE: usize = 3;
-    const STATE_SHAPE: [engine_core::game::TensorDim; 3] = [1, 1, 1];
-    const NAME: &'static str = "immediate";
-
-    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
-        (0..Self::ACTION_SIZE as Action).filter(|_| self.reward.is_none())
+    fn legal_moves(&self) -> impl Iterator<Item = Self::Move> + '_ {
+        (0..3).filter(|_| self.reward.is_none())
     }
-
-    fn step(&mut self, action: Action) {
+    fn play(&mut self, action: Self::Move) {
         self.reward = Some(match action {
             0 => -1.0, // The mover won; after step, side to move has lost.
             1 => 0.0,
@@ -159,24 +163,18 @@ impl Game for ImmediateOutcomeGame {
         });
     }
 
-    fn is_terminal(&self) -> bool {
-        self.reward.is_some()
-    }
-
-    fn reward(&self) -> f32 {
-        self.reward.unwrap_or(0.0)
-    }
-
-    fn encode_state(&self, out: &mut [f32]) {
-        out[0] = self.reward();
-    }
-
-    fn parse_move(&self, s: &str) -> Option<Action> {
-        s.parse().ok().filter(|&a| a < Self::ACTION_SIZE as Action)
-    }
-
-    fn format_action(&self, action: Action) -> String {
-        action.to_string()
+    fn terminal_value(&self) -> Option<TerminalValue> {
+        self.reward.map(|r| {
+            if r < 0.0 {
+                TerminalValue::Loss
+            }
+            else if r > 0.0 {
+                TerminalValue::Win
+            }
+            else {
+                TerminalValue::Draw
+            }
+        })
     }
 }
 
@@ -191,51 +189,23 @@ impl fmt::Display for SinglePathGame {
     }
 }
 
-impl Game for SinglePathGame {
-    const ACTION_SIZE: usize = 1;
-    const STATE_SHAPE: [engine_core::game::TensorDim; 3] = [1, 1, 1];
-    const NAME: &'static str = "single-path";
-
-    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
+impl GameState for SinglePathGame {
+    type Move = u8;
+    fn initial() -> Self {
+        Self::default()
+    }
+    fn legal_moves(&self) -> impl Iterator<Item = Self::Move> + '_ {
         (0..1).filter(|_| self.ply < 2)
     }
 
-    fn step(&mut self, action: Action) {
+    fn play(&mut self, action: Self::Move) {
         assert_eq!(action, 0);
         self.ply += 1;
     }
 
-    fn is_terminal(&self) -> bool {
-        self.ply >= 2
+    fn terminal_value(&self) -> Option<TerminalValue> {
+        (self.ply >= 2).then_some(TerminalValue::Draw)
     }
-
-    fn reward(&self) -> f32 {
-        0.0
-    }
-
-    fn encode_state(&self, out: &mut [f32]) {
-        out[0] = self.ply as f32;
-    }
-
-    fn parse_move(&self, s: &str) -> Option<Action> {
-        (s == "0").then_some(0)
-    }
-
-    fn format_action(&self, action: Action) -> String {
-        action.to_string()
-    }
-}
-
-impl RepetitionGame for SinglePathGame {
-    fn repetition_hash(&self) -> u64 {
-        u64::from(self.ply)
-    }
-
-    fn halfmove_clock(&self) -> usize {
-        100
-    }
-
-    fn set_repetition_draw(&mut self) {}
 }
 
 #[derive(Clone, Copy, Default)]
@@ -256,56 +226,78 @@ impl fmt::Display for FeatureRepetitionGame {
     }
 }
 
-impl Game for FeatureRepetitionGame {
-    const ACTION_SIZE: usize = 1;
-    const STATE_SHAPE: [engine_core::game::TensorDim; 3] = [1, 1, 1];
-    const NAME: &'static str = "feature-repetition";
-
-    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
+impl GameState for FeatureRepetitionGame {
+    type Move = u8;
+    fn initial() -> Self {
+        Self::default()
+    }
+    fn legal_moves(&self) -> impl Iterator<Item = Self::Move> + '_ {
         (0..1).filter(|_| self.ply == 0)
     }
-
-    fn step(&mut self, action: Action) {
+    fn play(&mut self, action: Self::Move) {
         assert_eq!(action, 0);
         self.ply += 1;
     }
-
-    fn is_terminal(&self) -> bool {
-        false
-    }
-
-    fn reward(&self) -> f32 {
-        0.0
-    }
-
-    fn encode_state(&self, out: &mut [f32]) {
-        out[0] = f32::from(self.repetitions_before);
-    }
-
-    fn parse_move(&self, s: &str) -> Option<Action> {
-        (s == "0").then_some(0)
-    }
-
-    fn format_action(&self, action: Action) -> String {
-        action.to_string()
+    fn terminal_value(&self) -> Option<TerminalValue> {
+        None
     }
 }
 
-impl RepetitionGame for FeatureRepetitionGame {
-    fn repetition_hash(&self) -> u64 {
-        u64::from(self.ply)
-    }
+#[derive(Clone, Copy, Default)]
+struct FeatureRules;
 
-    fn halfmove_clock(&self) -> usize {
-        100
-    }
+impl SearchRules<FeatureRepetitionGame> for FeatureRules {
+    type Context<'a>
+        = ()
+    where
+        FeatureRepetitionGame: 'a;
+    type PathState = ();
+    type NodeMeta = ();
 
-    fn set_repetitions_before_current(&mut self, count: u8) {
-        self.repetitions_before = count;
-    }
+    fn reset_path<'a>(&self, _: Self::Context<'a>, _: &FeatureRepetitionGame, _: &mut ()) {}
 
-    fn set_repetition_draw(&mut self) {}
+    fn enter_state<'a>(
+        &self,
+        _: Self::Context<'a>,
+        state: &mut FeatureRepetitionGame,
+        _: &mut (),
+        _: &mut (),
+    ) -> RuleResult {
+        state.repetitions_before = u8::from(state.ply > 0);
+        RuleResult::Continue
+    }
 }
+
+#[derive(Clone, Copy, Default)]
+struct CycleRules;
+
+impl SearchRules<CycleGame> for CycleRules {
+    type Context<'a>
+        = ()
+    where
+        CycleGame: 'a;
+    type PathState = ();
+    type NodeMeta = ();
+
+    fn reset_path<'a>(&self, _: Self::Context<'a>, _: &CycleGame, _: &mut ()) {}
+
+    fn enter_state<'a>(
+        &self,
+        _: Self::Context<'a>,
+        state: &mut CycleGame,
+        _: &mut (),
+        _: &mut (),
+    ) -> RuleResult {
+        if state.ply >= 2 {
+            state.repetition_draw = true;
+            RuleResult::Terminal(TerminalValue::Draw)
+        }
+        else {
+            RuleResult::Continue
+        }
+    }
+}
+/* legacy repetition hooks intentionally removed; SearchRules below owns them. */
 
 impl fmt::Display for CycleGame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -313,57 +305,22 @@ impl fmt::Display for CycleGame {
     }
 }
 
-impl Game for CycleGame {
-    const ACTION_SIZE: usize = 1;
-    const STATE_SHAPE: [engine_core::game::TensorDim; 3] = [1, 1, 1];
-    const NAME: &'static str = "cycle";
-
-    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
+impl GameState for CycleGame {
+    type Move = u8;
+    fn initial() -> Self {
+        Self::default()
+    }
+    fn legal_moves(&self) -> impl Iterator<Item = Self::Move> + '_ {
         (0..1).filter(|_| self.ply < 2 && !self.repetition_draw)
     }
 
-    fn step(&mut self, action: Action) {
+    fn play(&mut self, action: Self::Move) {
         assert_eq!(action, 0);
         self.ply += 1;
     }
 
-    fn is_terminal(&self) -> bool {
-        self.repetition_draw
-    }
-
-    fn reward(&self) -> f32 {
-        0.0
-    }
-
-    fn encode_state(&self, out: &mut [f32]) {
-        out[0] = self.ply as f32;
-    }
-
-    fn parse_move(&self, s: &str) -> Option<Action> {
-        (s == "0").then_some(0)
-    }
-
-    fn format_action(&self, action: Action) -> String {
-        action.to_string()
-    }
-}
-
-impl RepetitionGame for CycleGame {
-    fn repetition_hash(&self) -> u64 {
-        if self.ply.is_multiple_of(2) {
-            1
-        }
-        else {
-            2
-        }
-    }
-
-    fn halfmove_clock(&self) -> usize {
-        100
-    }
-
-    fn set_repetition_draw(&mut self) {
-        self.repetition_draw = true;
+    fn terminal_value(&self) -> Option<TerminalValue> {
+        self.repetition_draw.then_some(TerminalValue::Draw)
     }
 }
 
@@ -382,52 +339,33 @@ impl fmt::Display for TerminalGame {
     }
 }
 
-impl Game for TerminalGame {
-    const ACTION_SIZE: usize = 2;
-    const STATE_SHAPE: [engine_core::game::TensorDim; 3] = [1, 1, 1];
-    const NAME: &'static str = "terminal";
-
-    fn legal_actions(&self) -> impl Iterator<Item = Action> + '_ {
+impl GameState for TerminalGame {
+    type Move = u8;
+    fn initial() -> Self {
+        Self
+    }
+    fn legal_moves(&self) -> impl Iterator<Item = Self::Move> + '_ {
         std::iter::empty()
     }
 
-    fn step(&mut self, action: Action) {
+    fn play(&mut self, action: Self::Move) {
         panic!("terminal game has no legal action {action}");
     }
 
-    fn is_terminal(&self) -> bool {
-        true
-    }
-
-    fn reward(&self) -> f32 {
-        -1.0
-    }
-
-    fn encode_state(&self, out: &mut [f32]) {
-        out[0] = 1.0;
-    }
-
-    fn parse_move(&self, _s: &str) -> Option<Action> {
-        None
-    }
-
-    fn format_action(&self, action: Action) -> String {
-        action.to_string()
+    fn terminal_value(&self) -> Option<TerminalValue> {
+        Some(TerminalValue::Loss)
     }
 }
 
 /// Uniform policy, zero value: MCTS degenerates to a plain PUCT tree search.
 struct UniformEvaluator;
-
-impl EncodedEvaluator for UniformEvaluator {
-    fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
-        (0..batch.len())
-            .map(|i| {
-                let n = (batch.offsets[i + 1] - batch.offsets[i]) as usize;
-                Evaluation {
-                    logits: vec![0.0; n],
-                    value: 0.0,
-                }
+impl<G: GameState> PolicyValueEvaluator<G> for UniformEvaluator {
+    fn evaluate(&mut self, _states: &[G], _legal: &[G::Move], offsets: &[u32]) -> Vec<Evaluation> {
+        offsets
+            .windows(2)
+            .map(|w| Evaluation {
+                logits: vec![0.0; (w[1] - w[0]) as usize],
+                value: 0.0,
             })
             .collect()
     }
@@ -437,10 +375,10 @@ struct CountingEvaluator {
     calls: Arc<AtomicUsize>,
 }
 
-impl EncodedEvaluator for CountingEvaluator {
-    fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
+impl<G: GameState> PolicyValueEvaluator<G> for CountingEvaluator {
+    fn evaluate(&mut self, states: &[G], legal: &[G::Move], offsets: &[u32]) -> Vec<Evaluation> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        UniformEvaluator.evaluate(batch)
+        UniformEvaluator.evaluate(states, legal, offsets)
     }
 }
 
@@ -453,15 +391,18 @@ struct FeatureRecordingEvaluator {
     encoded: Arc<Mutex<Vec<f32>>>,
 }
 
-impl EncodedEvaluator for FeatureRecordingEvaluator {
-    fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
-        self.encoded.lock().unwrap().extend(
-            batch
-                .states
-                .chunks_exact(FeatureRepetitionGame::state_size())
-                .map(|state| state[0]),
-        );
-        UniformEvaluator.evaluate(batch)
+impl PolicyValueEvaluator<FeatureRepetitionGame> for FeatureRecordingEvaluator {
+    fn evaluate(
+        &mut self,
+        states: &[FeatureRepetitionGame],
+        legal: &[u8],
+        offsets: &[u32],
+    ) -> Vec<Evaluation> {
+        self.encoded
+            .lock()
+            .unwrap()
+            .extend(states.iter().map(|state| state.repetitions_before as f32));
+        UniformEvaluator.evaluate(states, legal, offsets)
     }
 }
 
@@ -481,17 +422,15 @@ impl RecordingEvaluator {
     }
 }
 
-impl EncodedEvaluator for RecordingEvaluator {
-    fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
-        self.calls.lock().unwrap().push(batch.len());
-        (0..batch.len())
+impl<G: GameState> PolicyValueEvaluator<G> for RecordingEvaluator {
+    fn evaluate(&mut self, _states: &[G], legal: &[G::Move], offsets: &[u32]) -> Vec<Evaluation> {
+        self.calls.lock().unwrap().push(offsets.len() - 1);
+        (0..offsets.len() - 1)
             .map(|i| {
-                let legal_actions =
-                    &batch.legal_actions[batch.offsets[i] as usize..batch.offsets[i + 1] as usize];
-                let logits = legal_actions
+                let logits = legal[offsets[i] as usize..offsets[i + 1] as usize]
                     .iter()
-                    .map(|&a| {
-                        if self.favor_action_zero && a.as_u32() == 0 {
+                    .map(|a| {
+                        if self.favor_action_zero && format!("{a:?}") == "0" {
                             100.0
                         }
                         else {
@@ -506,18 +445,17 @@ impl EncodedEvaluator for RecordingEvaluator {
 }
 
 struct EmptyResultEvaluator;
-
-impl EncodedEvaluator for EmptyResultEvaluator {
-    fn evaluate(&mut self, _batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
+impl<G: GameState> PolicyValueEvaluator<G> for EmptyResultEvaluator {
+    fn evaluate(&mut self, _states: &[G], _legal: &[G::Move], _offsets: &[u32]) -> Vec<Evaluation> {
         Vec::new()
     }
 }
 
 struct BadLogitEvaluator;
 
-impl EncodedEvaluator for BadLogitEvaluator {
-    fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
-        (0..batch.len())
+impl<G: GameState> PolicyValueEvaluator<G> for BadLogitEvaluator {
+    fn evaluate(&mut self, states: &[G], _legal: &[G::Move], _offsets: &[u32]) -> Vec<Evaluation> {
+        (0..states.len())
             .map(|_| Evaluation {
                 logits: Vec::new(),
                 value: 0.0,
@@ -534,7 +472,7 @@ fn play(moves: &[u32]) -> Connect4 {
     g
 }
 
-fn mcts(simulations: usize) -> Mcts<UniformEvaluator> {
+fn mcts<G: GameState + Clone>(simulations: usize) -> Mcts<G, UniformEvaluator, NoExtraRules> {
     Mcts::new(
         UniformEvaluator,
         MctsConfig {
@@ -542,6 +480,7 @@ fn mcts(simulations: usize) -> Mcts<UniformEvaluator> {
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     )
 }
 

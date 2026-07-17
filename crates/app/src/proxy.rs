@@ -2,8 +2,7 @@ use algorithms::alphazero::{
     Batcher, InferencePrecision, Mcts, MctsConfig, MctsVariant, RunArchitecture, RunConfig, RunDir,
 };
 use algorithms::analysis::{
-    analyze_game, analyze_game_mcts_with_repetitions, analyze_game_net, Analysis, AnalyzeConfig,
-    AnalyzeMode,
+    analyze_game_mcts, analyze_game_net, Analysis, AnalyzeConfig, AnalyzeMode,
 };
 use anyhow::Result;
 use axum::extract::State;

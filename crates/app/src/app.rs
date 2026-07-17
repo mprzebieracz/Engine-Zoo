@@ -88,7 +88,7 @@ async fn serve_cmd(args: ServeArgs) -> Result<()> {
     .await
 }
 
-fn run_game<G: Game>(args: PlayArgs) -> Result<()> {
+fn run_game<G: crate::players::InteractiveGame>(args: PlayArgs) -> Result<()> {
     let root = run_dir(args.game, args.run_dir);
     let device = Device::cuda_if_available();
     let mut first = build_agent::<G>(
@@ -140,19 +140,19 @@ fn run_game<G: Game>(args: PlayArgs) -> Result<()> {
     Ok(())
 }
 
-fn build_agent<G: Game>(
+fn build_agent<G: crate::players::InteractiveGame>(
     spec: &AgentSpec,
     run_dir: &std::path::Path,
     device: Device,
     simulations: usize,
     wait_for_count: usize,
-) -> Result<PlayerAgent> {
+) -> Result<PlayerAgent<G>> {
     match spec {
         AgentSpec::User => Ok(PlayerAgent::Human(HumanAgent)),
         AgentSpec::AlphaZero { model } => {
             let (_, cfg) = open_existing_run::<G>(run_dir)?;
             let weights = resolve_model(run_dir, model);
-            Ok(PlayerAgent::AlphaZero(Box::new(AlphaZeroAgent::new(
+            Ok(PlayerAgent::AlphaZero(Box::new(AlphaZeroAgent::<G>::new(
                 &cfg.net,
                 &weights,
                 device,

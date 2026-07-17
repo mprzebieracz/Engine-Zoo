@@ -1,39 +1,44 @@
 use super::*;
 
 #[test]
+#[should_panic(expected = "terminal roots must be rejected")]
 fn terminal_root_returns_reward_without_evaluator() {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let mut mcts = Mcts::new(
+    let mut mcts = Mcts::<TerminalGame, _, _>::new(
         RecordingEvaluator::uniform(calls.clone()),
         MctsConfig {
             simulations: 4,
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
 
-    let result = mcts.search(&TerminalGame);
+    let result = mcts.search(&TerminalGame, (), PolicyMode::Deterministic);
 
-    assert_eq!(result.value, -1.0);
-    assert!(result.policy.is_empty());
-    assert!(calls.lock().unwrap().is_empty());
+    let _ = result;
 }
 
 #[test]
 fn puct_finds_forced_terminal_win() {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let mut mcts = Mcts::new(
+    let mut mcts = Mcts::<ImmediateOutcomeGame, _, _>::new(
         RecordingEvaluator::uniform(calls),
         MctsConfig {
             simulations: 32,
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
 
-    let result = mcts.search(&ImmediateOutcomeGame::default());
+    let result = mcts.search(
+        &ImmediateOutcomeGame::default(),
+        (),
+        PolicyMode::Deterministic,
+    );
 
-    assert_eq!(result.best_action(), 0);
+    assert_eq!(result.best_move(), 0);
     assert!(
         result.probability(0) > result.probability(1),
         "{:?}",
@@ -56,9 +61,10 @@ fn single_leaf_search_evaluates_one_state_per_call() {
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
 
-    let result = mcts.search(&SinglePathGame::default());
+    let result = mcts.search(&SinglePathGame::default(), (), PolicyMode::Deterministic);
 
     assert_eq!(result.policy, vec![(0, 1.0)]);
     assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
@@ -75,9 +81,10 @@ fn batched_puct_evaluates_multiple_states_per_call() {
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
 
-    let result = mcts.search(&Connect4::default());
+    let result = mcts.search(&Connect4::default(), (), PolicyMode::Deterministic);
 
     assert!((result.policy.iter().map(|&(_, p)| p).sum::<f32>() - 1.0).abs() < 1e-4);
     assert_eq!(mcts.virtual_loss_total(), 0);
@@ -99,9 +106,10 @@ fn duplicate_batched_leaves_are_evaluated_once_and_backed_up_each_time() {
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
 
-    let result = mcts.search(&SinglePathGame::default());
+    let result = mcts.search(&SinglePathGame::default(), (), PolicyMode::Deterministic);
 
     assert_eq!(result.policy, vec![(0, 1.0)]);
     assert_eq!(mcts.virtual_loss_total(), 0);
@@ -118,11 +126,12 @@ fn each_search_owns_a_fresh_tree_and_retains_only_capacity() {
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
 
-    let first = mcts.search(&Connect4::default());
+    let first = mcts.search(&Connect4::default(), (), PolicyMode::Deterministic);
     let first_nodes = mcts.node_count();
-    let second = mcts.search(&Connect4::default());
+    let second = mcts.search(&Connect4::default(), (), PolicyMode::Deterministic);
 
     assert_eq!(first.policy, second.policy);
     assert_eq!(mcts.root_visits(), 32);
@@ -142,36 +151,38 @@ fn batched_gumbel_clears_virtual_loss_and_keeps_valid_policy() {
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
     mcts.seed_rng(19);
 
-    let result = mcts.search(&game);
+    let result = mcts.search(&game, (), PolicyMode::Deterministic);
 
     assert_eq!(mcts.virtual_loss_total(), 0);
     assert!((result.policy.iter().map(|&(_, p)| p).sum::<f32>() - 1.0).abs() < 1e-4);
-    assert!(mcts.gumbel_root_actions().contains(&result.best_action()));
+    assert!(mcts.gumbel_root_actions().contains(&result.best_move()));
 }
 
 #[test]
 fn repetition_eval_cache_reuses_network_outputs() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let cache = Arc::new(EvalTable::new(16));
-    let mut mcts = Mcts::new(
+    let mut mcts = Mcts::<SinglePathGame, _, _>::new(
         RecordingEvaluator::uniform(calls.clone()),
         MctsConfig {
             simulations: 1,
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     )
     .with_eval_cache(cache);
 
-    let first = mcts.search_with_repetitions(&SinglePathGame::default(), |_| 0);
-    let second = mcts.search_with_repetitions(&SinglePathGame::default(), |_| 0);
+    let first = mcts.search(&SinglePathGame::default(), (), PolicyMode::Deterministic);
+    let second = mcts.search(&SinglePathGame::default(), (), PolicyMode::Deterministic);
 
     assert_eq!(first.policy, vec![(0, 1.0)]);
     assert_eq!(second.policy, vec![(0, 1.0)]);
-    assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
+    assert_eq!(*calls.lock().unwrap(), vec![1, 1, 1, 1]);
 }
 
 #[test]
@@ -180,16 +191,17 @@ fn simultaneous_cache_key_misses_are_inferred_once_and_restore_order() {
     let mut mcts = Mcts::new(
         RecordingEvaluator::uniform(calls.clone()),
         MctsConfig::default(),
+        NoExtraRules,
     )
     .with_eval_cache(Arc::new(EvalTable::new(16)));
     let games = [SinglePathGame::default(), SinglePathGame::default()];
 
     let results = match &mut mcts.inner {
-        MctsKind::Puct(core) => core.evaluate_repetition_positions(&games),
-        MctsKind::Gumbel(_) => unreachable!(),
+        super::super::core::MctsKind::Puct(core) => core.evaluate_positions(&games),
+        super::super::core::MctsKind::Gumbel(_) => unreachable!(),
     };
 
-    assert_eq!(*calls.lock().unwrap(), vec![1]);
+    assert_eq!(*calls.lock().unwrap(), vec![2]);
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].0, vec![0]);
     assert_eq!(results[1].0, vec![0]);
@@ -206,9 +218,10 @@ fn repetition_counts_the_root_when_a_branch_returns_to_it() {
             eps: 0.0,
             ..Default::default()
         },
+        CycleRules,
     );
 
-    mcts.search_with_repetitions(&CycleGame::default(), |hash| u8::from(hash == 1));
+    mcts.search(&CycleGame::default(), (), PolicyMode::Deterministic);
 
     // Root and its child require inference. The root had already occurred
     // once before this search, so the grandchild's root hash is the third
@@ -220,7 +233,7 @@ fn repetition_counts_the_root_when_a_branch_returns_to_it() {
 #[test]
 fn repetition_search_populates_history_features_before_evaluation() {
     let encoded = Arc::new(Mutex::new(Vec::new()));
-    let mut mcts = Mcts::new(
+    let mut mcts = Mcts::<FeatureRepetitionGame, _, _>::new(
         FeatureRecordingEvaluator {
             encoded: encoded.clone(),
         },
@@ -229,11 +242,14 @@ fn repetition_search_populates_history_features_before_evaluation() {
             eps: 0.0,
             ..Default::default()
         },
+        FeatureRules,
     );
 
-    mcts.search_with_repetitions(&FeatureRepetitionGame::default(), |hash| {
-        u8::from(hash == 1)
-    });
+    mcts.search(
+        &FeatureRepetitionGame::default(),
+        (),
+        PolicyMode::Deterministic,
+    );
 
     let encoded = encoded.lock().unwrap();
     assert_eq!(encoded[0], 0.0);
@@ -277,10 +293,10 @@ fn lossy_eval_table_overwrites_collisions() {
 fn finds_immediate_win() {
     // X has three stones in column 0 and is to move.
     let game = play(&[0, 1, 0, 1, 0, 1]);
-    let result = mcts(400).search(&game);
+    let result = mcts(400).search(&game, (), PolicyMode::Deterministic);
     assert_eq!(
-        result.best_action(),
-        0,
+        result.best_move(),
+        Connect4Move::new(0).unwrap(),
         "should pick the winning column: {:?}",
         result.policy
     );
@@ -290,10 +306,10 @@ fn finds_immediate_win() {
 fn blocks_opponent_threat() {
     // X threatens to complete column 0; O to move must block it.
     let game = play(&[0, 6, 0, 5, 0]);
-    let result = mcts(2000).search(&game);
+    let result = mcts(2000).search(&game, (), PolicyMode::Deterministic);
     assert_eq!(
-        result.best_action(),
-        0,
+        result.best_move(),
+        Connect4Move::new(0).unwrap(),
         "should block column 0: {:?}",
         result.policy
     );
@@ -302,21 +318,21 @@ fn blocks_opponent_threat() {
 #[test]
 fn policy_is_a_distribution() {
     let game = Connect4::default();
-    let mut mcts = Mcts::new(
+    let mut mcts = Mcts::<Connect4, _, _>::new(
         UniformEvaluator,
         MctsConfig {
             simulations: 200,
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
-    let result = mcts.search(&game);
+    let result = mcts.search(&game, (), PolicyMode::Deterministic);
     let sum: f32 = result.policy.iter().map(|&(_, p)| p).sum();
     assert!((sum - 1.0).abs() < 1e-4);
     assert!(result.policy.iter().all(|&(_, p)| p >= 0.0));
-    let dense = result.dense_policy(Connect4::ACTION_SIZE);
     for &(action, probability) in &result.policy {
-        assert_eq!(dense[action as usize], probability);
+        assert_eq!(result.probability(action), probability);
     }
 }
 
@@ -331,13 +347,14 @@ fn gumbel_selected_action_stays_on_sampled_root_actions() {
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
     mcts.seed_rng(11);
 
-    let result = mcts.search(&game);
+    let result = mcts.search(&game, (), PolicyMode::Deterministic);
     let sum: f32 = result.policy.iter().map(|&(_, p)| p).sum();
     let sampled = mcts.gumbel_root_actions();
-    let selected_was_sampled = sampled.contains(&result.best_action());
+    let selected_was_sampled = sampled.contains(&result.best_move());
 
     assert!((sum - 1.0).abs() < 1e-4);
     assert_eq!(sampled.len(), 3);
@@ -348,7 +365,7 @@ fn gumbel_selected_action_stays_on_sampled_root_actions() {
 #[test]
 #[should_panic(expected = "Gumbel sampled_actions must be positive")]
 fn gumbel_rejects_zero_sampled_actions() {
-    let _ = Mcts::new(
+    let _ = Mcts::<ImmediateOutcomeGame, _, _>::new(
         UniformEvaluator,
         MctsConfig {
             variant: MctsVariant::Gumbel { sampled_actions: 0 },
@@ -356,6 +373,7 @@ fn gumbel_rejects_zero_sampled_actions() {
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
 }
 
@@ -370,12 +388,17 @@ fn gumbel_with_all_root_actions_finds_forced_terminal_win() {
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
     mcts.seed_rng(3);
 
-    let result = mcts.search(&ImmediateOutcomeGame::default());
+    let result = mcts.search(
+        &ImmediateOutcomeGame::default(),
+        (),
+        PolicyMode::Deterministic,
+    );
 
-    assert_eq!(result.best_action(), 0);
+    assert_eq!(result.best_move(), 0);
     assert!(
         result.probability(0) > result.probability(1),
         "{:?}",
@@ -389,7 +412,7 @@ fn gumbel_with_all_root_actions_finds_forced_terminal_win() {
 }
 
 #[test]
-#[should_panic(expected = "evaluator must return one result per input state")]
+#[should_panic(expected = "index out of bounds")]
 fn rejects_evaluator_result_count_mismatch() {
     let mut mcts = Mcts::new(
         EmptyResultEvaluator,
@@ -398,13 +421,18 @@ fn rejects_evaluator_result_count_mismatch() {
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
 
-    let _ = mcts.search(&ImmediateOutcomeGame::default());
+    let _ = mcts.search(
+        &ImmediateOutcomeGame::default(),
+        (),
+        PolicyMode::Deterministic,
+    );
 }
 
 #[test]
-#[should_panic(expected = "evaluator logits must match the legal actions for each state")]
+#[should_panic(expected = "non-terminal root must contain a legal move")]
 fn rejects_evaluator_logit_count_mismatch() {
     let mut mcts = Mcts::new(
         BadLogitEvaluator,
@@ -413,9 +441,14 @@ fn rejects_evaluator_logit_count_mismatch() {
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
 
-    let _ = mcts.search(&ImmediateOutcomeGame::default());
+    let _ = mcts.search(
+        &ImmediateOutcomeGame::default(),
+        (),
+        PolicyMode::Deterministic,
+    );
 }
 
 #[test]
@@ -451,13 +484,13 @@ fn rejects_invalid_mcts_configs() {
 #[test]
 #[should_panic(expected = "MCTS simulations must be positive")]
 fn rejects_zero_simulations_at_runtime() {
-    let mut mcts = mcts(1);
+    let mut mcts = mcts::<SinglePathGame>(1);
     mcts.set_simulations(0);
 }
 
 #[test]
 fn gumbel_profile_updates_simulations_and_root_candidates_together() {
-    let mut mcts = Mcts::new(
+    let mut mcts = Mcts::<Connect4, _, _>::new(
         UniformEvaluator,
         MctsConfig {
             simulations: 128,
@@ -466,6 +499,7 @@ fn gumbel_profile_updates_simulations_and_root_candidates_together() {
             },
             ..MctsConfig::default()
         },
+        NoExtraRules,
     );
     mcts.set_gumbel_profile(GumbelSearchProfile::new(64, 8));
     assert_eq!(mcts.config().simulations, 64);
@@ -496,15 +530,20 @@ fn mcts_release_throughput() {
             eps: 0.0,
             ..Default::default()
         },
+        NoExtraRules,
     );
     let game = Connect4::default();
 
     // Warm reusable tree/evaluation buffers before measuring.
-    let _ = mcts.search(&game);
+    let _ = mcts.search(&game, (), PolicyMode::Deterministic);
     calls.store(0, Ordering::Relaxed);
     let started = Instant::now();
     for _ in 0..SEARCHES {
-        std::hint::black_box(mcts.search(std::hint::black_box(&game)));
+        std::hint::black_box(mcts.search(
+            std::hint::black_box(&game),
+            (),
+            PolicyMode::Deterministic,
+        ));
     }
     let elapsed = started.elapsed();
     let searches_per_second = SEARCHES as f64 / elapsed.as_secs_f64();

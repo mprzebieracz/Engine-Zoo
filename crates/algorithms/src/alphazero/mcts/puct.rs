@@ -1,42 +1,35 @@
-use super::super::evaluator::EncodedEvaluator;
-use super::core::{LeafBatch, MctsCore, SearchDriver};
+use super::core::{LeafBatch, MctsCore};
 use super::{Node, SearchResult};
 use engine_core::agent::PolicyMode;
-use engine_core::game::{Action, Game};
+use engine_core::game::GameState;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Puct;
 
-impl<E: EncodedEvaluator> MctsCore<E, Puct, Action, Vec<u64>> {
-    pub(super) fn search_inner<G, D>(
+impl<G, E, R> MctsCore<G, E, R, Puct>
+where
+    G: GameState + Clone,
+    E: crate::search::PolicyValueEvaluator<G>,
+    R: crate::search::SearchRules<G>,
+{
+    pub(super) fn search_inner(
         &mut self,
         game: &G,
+        context: R::Context<'_>,
         mode: PolicyMode,
-        driver: D,
-    ) -> SearchResult<Action>
-    where
-        G: Game,
-        D: SearchDriver<G>,
-    {
-        if game.is_terminal() {
-            return SearchResult {
-                policy: Vec::new(),
-                selected_move: 0,
-                value: game.reward(),
-            };
-        }
+    ) -> SearchResult<G::Move> {
+        assert!(!game.is_terminal(), "terminal roots must be rejected");
         self.clear_tree_common();
-        self.nodes.push(Node::new(
-            None,
-            None,
-            driver.root_hash(game),
-            0.0,
-            0.0,
-            game.is_terminal(),
-            game.reward(),
-        ));
+        self.nodes.push(Node::new(None, None, 0.0, 0.0, false, 0.0));
 
-        let (root_legal, root_eval) = driver.evaluate(self, game);
+        let mut root = game.clone();
+        let _ = self.rules.enter_state(
+            context,
+            &mut root,
+            &mut self.path_state,
+            &mut self.nodes[0].meta,
+        );
+        let (root_legal, root_eval) = self.evaluate_position(&root);
         let root_value = root_eval.value;
         self.build_policy_from(&root_legal, &root_eval, mode == PolicyMode::Explore);
         self.expand(0);
@@ -47,16 +40,17 @@ impl<E: EncodedEvaluator> MctsCore<E, Puct, Action, Vec<u64>> {
             simulations_done += self.collect_leaf_batch(
                 game,
                 self.cfg.simulations - simulations_done,
-                driver,
+                context,
                 &mut batch.leaves,
             );
-            self.finish_leaf_batch(&mut batch, driver);
+            self.finish_leaf_batch(&mut batch);
         }
         let policy = self.root_visit_policy();
         let selected_move = policy
             .iter()
             .max_by(|a, b| a.1.total_cmp(&b.1))
-            .map_or(0, |&(action, _)| action);
+            .expect("non-terminal root must contain a legal move")
+            .0;
 
         SearchResult {
             policy,
@@ -70,7 +64,7 @@ impl<E: EncodedEvaluator> MctsCore<E, Puct, Action, Vec<u64>> {
         }
     }
 
-    fn root_visit_policy(&self) -> Vec<(Action, f32)> {
+    fn root_visit_policy(&self) -> Vec<(G::Move, f32)> {
         let root = &self.nodes[0];
         let mut policy = Vec::with_capacity(usize::from(root.num_children));
 
