@@ -93,17 +93,23 @@ pub struct Connect4 {
 
 impl Connect4 {
     pub fn from_setup(setup: &Connect4Setup) -> anyhow::Result<Self> {
-        Self::from_moves(&setup.moves)
+        let moves = setup
+            .moves
+            .iter()
+            .map(|&action| {
+                u8::try_from(action)
+                    .ok()
+                    .and_then(|column| Connect4Move::new(column))
+                    .ok_or_else(|| anyhow::anyhow!("invalid connect4 move {action}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Self::from_moves(&moves)
     }
-    pub fn from_moves(moves: &[Action]) -> anyhow::Result<Self> {
+    pub fn from_moves(moves: &[Connect4Move]) -> anyhow::Result<Self> {
         let mut game = Connect4::default();
-        for &action in moves {
-            let Some(mv) = u8::try_from(action)
-                .ok()
-                .and_then(Connect4Move::new)
-                .filter(|&mv| game.legal_moves().any(|legal| legal == mv))
-            else {
-                anyhow::bail!("illegal connect4 move {action}");
+        for &mv in moves {
+            if !game.legal_moves().any(|legal| legal == mv) {
+                anyhow::bail!("illegal connect4 move {}", mv.column());
             };
             GameState::play(&mut game, mv);
         }

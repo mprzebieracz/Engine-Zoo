@@ -1,12 +1,11 @@
-use super::action::decode_v1_action;
 use super::az::{ChessHistoryState, HistoryFrame};
-use super::legacy;
 use super::notation;
 use super::position::{ChessPosition, Status};
 use super::repetition::RepetitionTracker;
 use crate::setup::ChessSetup;
 use chess::{Board, BoardStatus, ChessMove, Color, MoveGen};
 use engine_core::game::{GameState, TerminalValue};
+use engine_core::notation::GameNotation;
 use std::fmt;
 use std::str::FromStr;
 
