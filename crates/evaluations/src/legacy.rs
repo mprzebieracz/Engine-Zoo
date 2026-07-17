@@ -6,7 +6,7 @@ use algorithms::alphazero::{Batcher, Mcts, MctsConfig, RepresentedEvaluator, Run
 use algorithms::search::ChessRepetitionRules;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use engine_core::game::{Game, GameState};
+use engine_core::game::GameState;
 use engine_core::notation::GameNotation;
 use games::chess::{notation, ChessUciNotation};
 use games::{ChessGame, ChessPosition};
@@ -163,34 +163,35 @@ pub fn run() -> Result<()> {
                     .with_context(|| format!("Stockfish returned illegal move {mv}"))?
             };
             let uci = ChessUciNotation.format_move(&state, action);
-            san_moves.push(game.san_for_action(game.parse_move(&uci).unwrap()));
+            san_moves.push(notation::san(game.board(), action));
             uci_moves.push(uci.clone());
-            state.play(action);
-            game.step(game.parse_move(&uci).unwrap());
+            game.play(action);
+            state = game.position_state();
             ply += 1;
         }
-        let result = if !game.is_terminal() || game.reward() == 0.0 {
-            draws += 1;
-            "1/2-1/2"
-        }
-        else if (ply - 1).is_multiple_of(2) == model_white {
-            wins += 1;
-            if model_white {
-                "1-0"
+        let result =
+            if !GameState::is_terminal(&game) || game.terminal_value().unwrap().as_f32() == 0.0 {
+                draws += 1;
+                "1/2-1/2"
+            }
+            else if (ply - 1).is_multiple_of(2) == model_white {
+                wins += 1;
+                if model_white {
+                    "1-0"
+                }
+                else {
+                    "0-1"
+                }
             }
             else {
-                "0-1"
-            }
-        }
-        else {
-            losses += 1;
-            if model_white {
-                "0-1"
-            }
-            else {
-                "1-0"
-            }
-        };
+                losses += 1;
+                if model_white {
+                    "0-1"
+                }
+                else {
+                    "1-0"
+                }
+            };
         let movetext = notation::movetext(&san_moves, 0, result);
         let round = (game_idx + 1).to_string();
         let stockfish_elo = args.stockfish_elo.to_string();
@@ -252,12 +253,11 @@ pub fn run() -> Result<()> {
                         )
                         .best_move()
                 };
-                let uci = ChessUciNotation.format_move(&state, action);
-                state.play(action);
-                game.step(game.parse_move(&uci).unwrap());
+                game.play(action);
+                state = game.position_state();
                 ply += 1;
             }
-            if !game.is_terminal() || game.reward() == 0.0 {
+            if !GameState::is_terminal(&game) || game.terminal_value().unwrap().as_f32() == 0.0 {
                 baseline_draws += 1;
             }
             else if (ply - 1).is_multiple_of(2) == model_white {

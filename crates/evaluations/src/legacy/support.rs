@@ -1,7 +1,9 @@
 //! Stockfish protocol support for the legacy evaluator.
 
 use anyhow::{Context, Result};
-use engine_core::game::Game;
+use engine_core::game::GameState;
+use engine_core::notation::GameNotation;
+use games::chess::{notation, ChessUciNotation};
 use games::ChessGame;
 use rand::{rngs::StdRng, Rng};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -112,16 +114,17 @@ pub(super) fn apply_opening(
 ) -> usize {
     let mut applied = 0;
     for _ in 0..plies {
-        if game.is_terminal() {
+        if game.terminal_value().is_some() {
             break;
         }
-        let legal: Vec<_> = game.legal_actions().collect();
+        let state = game.position();
+        let legal: Vec<_> = state.legal_moves().collect();
         let action = legal[rng.random_range(0..legal.len())];
         if let Some((uci_moves, san_moves)) = &mut notation {
-            san_moves.push(game.san_for_action(action));
-            uci_moves.push(game.format_action(action));
+            san_moves.push(notation::san(game.board(), action));
+            uci_moves.push(ChessUciNotation.format_move(&state, action));
         }
-        game.step(action);
+        game.play(action);
         applied += 1;
     }
     applied
