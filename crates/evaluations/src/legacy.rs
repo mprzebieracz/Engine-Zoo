@@ -2,8 +2,8 @@ mod support;
 
 use self::support::{apply_opening, Stockfish};
 use alphazero::representation::ChessV1Representation;
-use alphazero::{Batcher, Mcts, MctsConfig, RepresentedEvaluator, RunConfig};
 use alphazero::ChessRepetitionRules;
+use alphazero::{Batcher, Mcts, MctsConfig, RepresentedEvaluator, RunConfig};
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use engine_core::game::GameState;
@@ -92,10 +92,7 @@ pub fn run() -> Result<()> {
     };
     let config = RunConfig::parse_json(&fs::read_to_string(args.run_dir.join("config.json"))?)?;
     anyhow::ensure!(
-        matches!(
-            &config.model,
-            alphazero::ModelConfig::ChessScalarAzV1(_)
-        ),
+        matches!(&config.model, alphazero::ModelConfig::ChessScalarAzV1(_)),
         "{} is not a Chess scalar AlphaZero v1 run",
         args.run_dir.display()
     );
@@ -146,7 +143,7 @@ pub fn run() -> Result<()> {
             args.opening_plies,
             &mut rng,
         );
-        let mut state = game.position_state();
+        let mut state = game.position();
         let mut ply = uci_moves.len();
         while !state.is_terminal() && ply < args.max_moves {
             let model_turn = (ply.is_multiple_of(2)) == model_white;
@@ -158,7 +155,8 @@ pub fn run() -> Result<()> {
                         engine_core::agent::PolicyMode::Deterministic,
                     )
                     .best_move()
-            } else {
+            }
+            else {
                 let mv = stockfish.best_move(&uci_moves, args.stockfish_movetime_ms)?;
                 ChessUciNotation
                     .parse_move(&state, &mv)
@@ -168,25 +166,29 @@ pub fn run() -> Result<()> {
             san_moves.push(notation::san(game.board(), action));
             uci_moves.push(uci.clone());
             game.play(action);
-            state = game.position_state();
+            state = game.position();
             ply += 1;
         }
         let result =
             if !GameState::is_terminal(&game) || game.terminal_value().unwrap().as_f32() == 0.0 {
                 draws += 1;
                 "1/2-1/2"
-            } else if (ply - 1).is_multiple_of(2) == model_white {
+            }
+            else if (ply - 1).is_multiple_of(2) == model_white {
                 wins += 1;
                 if model_white {
                     "1-0"
-                } else {
+                }
+                else {
                     "0-1"
                 }
-            } else {
+            }
+            else {
                 losses += 1;
                 if model_white {
                     "0-1"
-                } else {
+                }
+                else {
                     "1-0"
                 }
             };
@@ -231,7 +233,7 @@ pub fn run() -> Result<()> {
             let model_white = game_idx.is_multiple_of(2);
             let mut game = ChessGame::default();
             let mut ply = apply_opening(&mut game, None, args.opening_plies, &mut rng);
-            let mut state = game.position_state();
+            let mut state = game.position();
             while !state.is_terminal() && ply < args.max_moves {
                 let action = if ply.is_multiple_of(2) == model_white {
                     model
@@ -241,7 +243,8 @@ pub fn run() -> Result<()> {
                             engine_core::agent::PolicyMode::Deterministic,
                         )
                         .best_move()
-                } else {
+                }
+                else {
                     baseline
                         .search(
                             &state,
@@ -251,14 +254,16 @@ pub fn run() -> Result<()> {
                         .best_move()
                 };
                 game.play(action);
-                state = game.position_state();
+                state = game.position();
                 ply += 1;
             }
             if !GameState::is_terminal(&game) || game.terminal_value().unwrap().as_f32() == 0.0 {
                 baseline_draws += 1;
-            } else if (ply - 1).is_multiple_of(2) == model_white {
+            }
+            else if (ply - 1).is_multiple_of(2) == model_white {
                 baseline_wins += 1;
-            } else {
+            }
+            else {
                 baseline_losses += 1;
             }
         }
@@ -272,7 +277,8 @@ pub fn run() -> Result<()> {
             baseline_score * 100.0 / args.baseline_games as f64,
             400.0 * (baseline_smoothed / (1.0 - baseline_smoothed)).log10(),
         ))
-    } else {
+    }
+    else {
         None
     };
     let record = ResultRecord {

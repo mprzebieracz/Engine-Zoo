@@ -3,8 +3,8 @@ use alphazero::representation::{
     ChessAzRepresentation, ChessV1Representation, Connect4AzRepresentation,
 };
 use alphazero::ChessRepetitionRules;
-use search::NoExtraRules;
 use engine_core::notation::GameNotation;
+use search::NoExtraRules;
 
 pub(super) fn create_session_inner(
     state: &AppState,
@@ -22,7 +22,8 @@ pub(super) fn create_session_inner(
             let v2_history = if let ModelConfig::ChessAzV2(v2) = cfg.model {
                 v2.validate()?;
                 Some(v2.history)
-            } else {
+            }
+            else {
                 None
             };
             LiveSession::Chess(Box::new(SessionState {
@@ -143,7 +144,8 @@ pub(super) fn play_chess_engine_turn(
     }
     let (_, cfg) = open_existing_run(run_dir, "chess")?;
     if let Some(history) = session.v2_history {
-        let ModelConfig::ChessAzV2(v2) = &cfg.model else {
+        let ModelConfig::ChessAzV2(v2) = &cfg.model
+        else {
             anyhow::bail!("session architecture no longer matches its run");
         };
         anyhow::ensure!(
@@ -159,7 +161,8 @@ pub(super) fn play_chess_engine_turn(
             Duration::from_millis(1),
             if device.is_cuda() {
                 InferencePrecision::Fp16
-            } else {
+            }
+            else {
                 InferencePrecision::Fp32
             },
         )?;
@@ -198,7 +201,7 @@ pub(super) fn play_chess_engine_turn(
         },
         ChessRepetitionRules,
     );
-    let position = session.game.position_state();
+    let position = session.game.position();
     let mv = mcts
         .search(
             &position,
@@ -237,10 +240,7 @@ pub(super) fn play_engine_turn_for(
         Duration::from_millis(1),
     )?;
     let mut mcts = Mcts::new(
-        alphazero::RepresentedEvaluator::new(
-            Connect4AzRepresentation,
-            batcher.client(),
-        ),
+        alphazero::RepresentedEvaluator::new(Connect4AzRepresentation, batcher.client()),
         MctsConfig {
             simulations: session.simulations,
             eps: 0.0,
@@ -266,10 +266,7 @@ fn v2_best_action_for<const HISTORY: usize>(
     let state = alphazero::representation::ChessAzState::from_game(game);
     let context = game.repetition_context();
     let mv = Mcts::new(
-        alphazero::RepresentedEvaluator::new(
-            ChessAzRepresentation::<HISTORY>,
-            evaluator,
-        ),
+        alphazero::RepresentedEvaluator::new(ChessAzRepresentation::<HISTORY>, evaluator),
         MctsConfig {
             simulations: simulations.max(1),
             variant: MctsVariant::Puct,

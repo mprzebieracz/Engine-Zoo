@@ -141,7 +141,7 @@ fn castling_step_moves_king_and_rook() {
     assert_eq!(g.board().piece_on(Square::H1), None);
     assert!(!g.board().castle_rights(Color::White).has_kingside());
     assert!(!g.board().castle_rights(Color::White).has_queenside());
-    assert_eq!(g.pos.halfmove_clock, 0);
+    assert_eq!(g.pos.halfmove_clock, 18);
 
     play_uci(&mut g, "e8c8");
     assert_eq!(g.board().piece_on(Square::C8), Some(Piece::King));
@@ -150,6 +150,7 @@ fn castling_step_moves_king_and_rook() {
     assert_eq!(g.board().piece_on(Square::A8), None);
     assert!(!g.board().castle_rights(Color::Black).has_kingside());
     assert!(!g.board().castle_rights(Color::Black).has_queenside());
+    assert_eq!(g.pos.halfmove_clock, 19);
 }
 
 #[test]
@@ -182,7 +183,7 @@ fn move_effect_describes_move_properties_even_when_terminal() {
     let effect = position.play_with_effect(ChessMove::from_str("a7a8").unwrap());
 
     assert_eq!(position.status, Status::Checkmate);
-    assert!(!effect.is_irreversible());
+    assert!(!effect.clears_repetition_history());
 }
 
 #[test]
@@ -216,12 +217,13 @@ fn capture_resets_halfmove_clock() {
 }
 
 #[test]
-fn castling_rights_change_resets_halfmove_clock() {
+fn castling_rights_change_keeps_the_halfmove_clock() {
     let mut g = from_fen("4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1");
     g.pos.halfmove_clock = 99;
     play_uci(&mut g, "e1f1");
-    assert_eq!(g.pos.halfmove_clock, 0);
-    assert!(!g.is_terminal());
+    assert_eq!(g.pos.halfmove_clock, 100);
+    assert!(g.is_terminal());
+    assert_eq!(g.terminal_value(), Some(TerminalValue::Draw));
 }
 
 #[test]

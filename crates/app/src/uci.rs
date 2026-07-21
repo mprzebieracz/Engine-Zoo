@@ -1,8 +1,8 @@
 use alphazero::representation::{ChessAzRepresentation, ChessV1Representation};
+use alphazero::ChessRepetitionRules;
 use alphazero::{
     Batcher, Mcts, MctsConfig, MctsVariant, ModelConfig, RepresentedEvaluator, RunDir,
 };
-use alphazero::ChessRepetitionRules;
 use anyhow::{Context, Result};
 use engine_core::agent::PolicyMode;
 use engine_core::game::GameState;
@@ -135,17 +135,19 @@ impl ChessUciEngine {
                 );
                 let sampled = self.position_moves.len() < self.settings.opening_plies;
                 let result = mcts.search(
-                    &self.game.position_state(),
+                    &self.game.position(),
                     self.game.repetition_context(),
                     if sampled {
                         PolicyMode::Explore
-                    } else {
+                    }
+                    else {
                         PolicyMode::Deterministic
                     },
                 );
                 let mv = if sampled {
                     result.sample_move(&mut rand::rng())
-                } else {
+                }
+                else {
                     result.best_move()
                 };
                 Ok(games::chess::ChessUciNotation.format_move(&self.game.position(), mv))
@@ -186,22 +188,21 @@ fn v2_action<const HISTORY: usize>(
         game.repetition_context(),
         if sampled {
             PolicyMode::Explore
-        } else {
+        }
+        else {
             PolicyMode::Deterministic
         },
     );
     let mv = if sampled {
         result.sample_move(&mut rand::rng())
-    } else {
+    }
+    else {
         result.best_move()
     };
     Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
 }
 
-fn load_config_and_model(
-    run_dir: &Path,
-    model: &str,
-) -> Result<(PathBuf, alphazero::RunConfig)> {
+fn load_config_and_model(run_dir: &Path, model: &str) -> Result<(PathBuf, alphazero::RunConfig)> {
     let config_path = run_dir.join("config.json");
     let config = alphazero::RunConfig::parse_json(
         &std::fs::read_to_string(&config_path)
@@ -217,7 +218,8 @@ fn load_config_and_model(
     let path = PathBuf::from(model);
     let weights = if path.exists() {
         path
-    } else {
+    }
+    else {
         match model {
             "best" => run_dir.join("best.safetensors"),
             "candidate" => run_dir.join("candidate.safetensors"),

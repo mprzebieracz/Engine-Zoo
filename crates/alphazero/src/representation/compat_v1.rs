@@ -130,7 +130,7 @@ mod tests {
     }
 
     fn golden(game: &ChessGame) {
-        let state = game.position_state();
+        let state = game.position();
         let r = ChessV1Representation;
         let mut actual = vec![0.0; 19 * 64];
         r.encode_state(&state, &mut actual);
@@ -152,7 +152,8 @@ mod tests {
         ] {
             let game = if fen == "startpos" {
                 ChessGame::default()
-            } else {
+            }
+            else {
                 ChessGame::from_fen(fen).unwrap()
             };
             golden(&game);
@@ -160,7 +161,7 @@ mod tests {
         let mut game = ChessGame::default();
         for _ in 0..24 {
             golden(&game);
-            let mv = game.position_state().legal_moves().next().unwrap();
+            let mv = game.position().legal_moves().next().unwrap();
             game.play(mv);
         }
     }
@@ -171,7 +172,7 @@ mod tests {
             "1r3r1k/P1P1P3/8/8/8/8/8/K7 w - - 0 1",
             "k7/8/8/8/8/8/p1p1p3/1R3R1K b - - 0 1",
         ] {
-            let state = ChessGame::from_fen(fen).unwrap().position_state();
+            let state = ChessGame::from_fen(fen).unwrap().position();
             let mut pieces = HashSet::new();
             for mv in state
                 .legal_moves()
@@ -201,7 +202,7 @@ mod tests {
             ("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 2", &["e5d6"][..]),
             ("4k3/8/8/8/3Pp3/8/8/4K3 b - d3 0 2", &["e4d3"][..]),
         ] {
-            let state = ChessGame::from_fen(fen).unwrap().position_state();
+            let state = ChessGame::from_fen(fen).unwrap().position();
             for text in moves {
                 check_move(&state, ChessMove::from_str(text).unwrap());
             }
@@ -213,10 +214,10 @@ mod tests {
         let r = ChessV1Representation;
         let a = ChessGame::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
             .unwrap()
-            .position_state();
+            .position();
         let b = ChessGame::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 3")
             .unwrap()
-            .position_state();
+            .position();
         assert_eq!(a.board(), b.board());
         assert_ne!(r.encoded_state_key(&a), r.encoded_state_key(&b));
         let mut encoded_a = vec![0.0; 19 * 64];
@@ -231,10 +232,10 @@ mod tests {
 
     #[test]
     fn rejects_actions_from_the_wrong_position() {
-        let source = ChessGame::default().position_state();
+        let source = ChessGame::default().position();
         let other = ChessGame::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1")
             .unwrap()
-            .position_state();
+            .position();
         let r = ChessV1Representation;
         let mv = ChessMove::from_str("e2e4").unwrap();
         let action = r.move_to_action(&source, mv);
