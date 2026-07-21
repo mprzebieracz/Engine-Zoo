@@ -51,7 +51,7 @@ npm run dev
 Serving an agent for the web UI:
 
 ```bash
-scripts/serve_agent.sh \
+python3 scripts/serve_agent.py \
   --game chess \
   --run-dir data/runs/chess-puct-real \
   --model best \
