@@ -1,4 +1,3 @@
-use super::az::{ChessHistoryState, HistoryFrame};
 use super::notation;
 use super::position::{ChessPosition, Status};
 use super::repetition::RepetitionTracker;
@@ -14,7 +13,9 @@ pub struct ChessGame {
     pub(super) pos: ChessPosition,
     /// Zobrist hash occurrence counts since the last irreversible move.
     pub(super) repetitions: RepetitionTracker,
-    pub(super) history: [Option<HistoryFrame>; 8],
+    /// Recent authoritative positions. Consumers that need a bounded history
+    /// snapshot (such as a neural representation) copy it at their boundary.
+    pub(super) history: [Option<(ChessPosition, u8)>; 8],
 }
 
 impl ChessGame {
@@ -39,11 +40,9 @@ impl ChessGame {
         self.pos
     }
 
-    /// Returns the latest real game frames for neural evaluation.
-    pub fn history_state<const HISTORY: usize>(&self) -> ChessHistoryState<HISTORY> {
-        let mut state = ChessHistoryState::new(self.pos);
-        state.frames.copy_from_slice(&self.history[..HISTORY]);
-        state
+    /// Recent positions, newest first, with their preceding repetition count.
+    pub fn recent_positions(&self) -> impl Iterator<Item = (ChessPosition, u8)> + '_ {
+        self.history.iter().copied().flatten()
     }
 
     pub fn position_state(&self) -> ChessPosition {
@@ -106,10 +105,7 @@ impl ChessGame {
             repetitions: RepetitionTracker::new(board.get_hash()),
             history: [None; 8],
         };
-        game.history[0] = Some(HistoryFrame {
-            position: game.pos,
-            repetitions_before: 0,
-        });
+        game.history[0] = Some((game.pos, 0));
         Ok(game)
     }
 
@@ -138,13 +134,12 @@ impl ChessGame {
             self.after_reversible_move();
         }
         self.history.rotate_right(1);
-        self.history[0] = Some(HistoryFrame {
-            position: self.pos,
-            repetitions_before: self
-                .repetitions
+        self.history[0] = Some((
+            self.pos,
+            self.repetitions
                 .current_count(self.pos.hash())
                 .saturating_sub(1),
-        });
+        ));
     }
 }
 
@@ -167,10 +162,7 @@ impl Default for ChessGame {
             repetitions: RepetitionTracker::new(ChessPosition::default().hash()),
             history: [None; 8],
         };
-        game.history[0] = Some(HistoryFrame {
-            position: game.pos,
-            repetitions_before: 0,
-        });
+        game.history[0] = Some((game.pos, 0));
         game
     }
 }

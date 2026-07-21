@@ -14,7 +14,7 @@ use alphazero::{
 use alphazero::ChessRepetitionRules;
 use engine_core::agent::PolicyMode;
 use engine_core::{GameState, TerminalValue};
-use games::{ChessGame, ChessHistoryState, ChessPosition};
+use games::{ChessGame, ChessPosition};
 use rand::Rng;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -242,9 +242,9 @@ fn play_chess_game(
 
 fn play_chess_az_v2_game<const HISTORY: usize>(
     mcts: &mut Mcts<
-        ChessHistoryState<HISTORY>,
+        alphazero::representation::ChessAzState<HISTORY>,
         RepresentedEvaluator<
-            ChessHistoryState<HISTORY>,
+            alphazero::representation::ChessAzState<HISTORY>,
             ChessAzRepresentation<HISTORY>,
             BatcherClient,
         >,
@@ -269,11 +269,11 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
         if should_stop() {
             return None;
         }
-        let search_state = game.history_state::<HISTORY>();
+        let search_state = alphazero::representation::ChessAzState::from_game(&game);
         let mut encoded = vec![
             0.0;
             <ChessAzRepresentation<HISTORY> as AlphaZeroRepresentation<
-                ChessHistoryState<HISTORY>,
+                alphazero::representation::ChessAzState<HISTORY>,
             >>::state_size()
         ];
         ChessAzRepresentation::<HISTORY>.encode_state(&search_state, &mut encoded);

@@ -119,14 +119,13 @@ impl AlphaZeroRepresentation<ChessPosition> for ChessV1Representation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use games::{encode_v1_action, ChessGame};
+    use games::ChessGame;
     use std::collections::HashSet;
     use std::str::FromStr;
 
     fn check_move(state: &ChessPosition, mv: ChessMove) {
         let r = ChessV1Representation;
         let action = r.move_to_action(state, mv);
-        assert_eq!(action.as_u32(), encode_v1_action(mv));
         assert_eq!(r.action_to_move(state, action), Some(mv));
     }
 
@@ -138,7 +137,6 @@ mod tests {
         let mut actions = HashSet::new();
         for mv in state.legal_moves() {
             let action = r.move_to_action(&state, mv);
-            assert_eq!(action.as_u32(), encode_v1_action(mv));
             assert!(actions.insert(action));
             assert_eq!(r.action_to_move(&state, action), Some(mv));
         }
@@ -240,7 +238,6 @@ mod tests {
         let r = ChessV1Representation;
         let mv = ChessMove::from_str("e2e4").unwrap();
         let action = r.move_to_action(&source, mv);
-        assert_eq!(action.as_u32(), encode_v1_action(mv));
         assert_eq!(r.action_to_move(&source, action), Some(mv));
         assert_eq!(r.action_to_move(&other, action), None);
     }

@@ -1,6 +1,6 @@
 use super::{Action, AlphaZeroRepresentation};
 use chess::{Board, ChessMove, Color, File, Piece, Rank, Square};
-use games::ChessHistoryState;
+use super::chess_v2_state::ChessAzState;
 
 const DIRS: [(i32, i32); 8] = [
     (-1, 0),
@@ -140,12 +140,12 @@ fn decode_move(board: &Board, action: Action) -> Option<ChessMove> {
     Some(ChessMove::new(from, to, promo))
 }
 
-impl<const HISTORY: usize> AlphaZeroRepresentation<ChessHistoryState<HISTORY>>
+impl<const HISTORY: usize> AlphaZeroRepresentation<ChessAzState<HISTORY>>
     for ChessAzRepresentation<HISTORY>
 {
     const STATE_SHAPE: [usize; 3] = [14 * HISTORY + 7, 8, 8];
     const ACTION_SIZE: usize = 4672;
-    fn encode_state(&self, state: &ChessHistoryState<HISTORY>, out: &mut [f32]) {
+    fn encode_state(&self, state: &ChessAzState<HISTORY>, out: &mut [f32]) {
         assert_eq!(out.len(), Self::state_size());
         out.fill(0.0);
         let current = state.position();
@@ -187,14 +187,14 @@ impl<const HISTORY: usize> AlphaZeroRepresentation<ChessHistoryState<HISTORY>>
         out[b + 320..b + 384].fill((current.halfmove_clock() as f32 / 100.0).min(1.0));
         out[b + 384..b + 448].fill((f32::from(current.ply() / 2 + 1) / 200.0).min(1.0));
     }
-    fn move_to_action(&self, state: &ChessHistoryState<HISTORY>, mv: ChessMove) -> Action {
+    fn move_to_action(&self, state: &ChessAzState<HISTORY>, mv: ChessMove) -> Action {
         encode_move(state.board(), mv)
     }
-    fn action_to_move(&self, state: &ChessHistoryState<HISTORY>, a: Action) -> Option<ChessMove> {
+    fn action_to_move(&self, state: &ChessAzState<HISTORY>, a: Action) -> Option<ChessMove> {
         let mv = decode_move(state.board(), a)?;
         state.board().legal(mv).then_some(mv)
     }
-    fn encoded_state_key(&self, state: &ChessHistoryState<HISTORY>) -> u64 {
+    fn encoded_state_key(&self, state: &ChessAzState<HISTORY>) -> u64 {
         let mut k = 0x9E37_79B9_7F4A_7C15;
         state.for_each_frame(|i, p, r| {
             let v = p.map_or(0, |x| x.hash() ^ (u64::from(r) << 61));
@@ -214,16 +214,16 @@ fn mix(k: u64, v: u64) -> u64 {
 mod tests {
     use super::*;
     use engine_core::GameState;
-    use games::{ChessGame, ChessHistoryState};
+    use games::ChessGame;
     use std::collections::HashSet;
     use std::str::FromStr;
 
-    fn check<const H: usize>(state: ChessHistoryState<H>) {
+    fn check<const H: usize>(state: ChessAzState<H>) {
         let r = ChessAzRepresentation::<H>;
         let mut actual = vec![
             0.0;
             <ChessAzRepresentation<H> as AlphaZeroRepresentation<
-                ChessHistoryState<H>,
+                ChessAzState<H>,
             >>::state_size()
         ];
         r.encode_state(&state, &mut actual);
@@ -244,17 +244,17 @@ mod tests {
             "r3k2r/ppp1bppp/2n1p3/8/2BPP3/2N2N2/PPP2PPP/R1BQ1RK1 w kq - 0 9",
         ] {
             let game = ChessGame::from_fen(fen).unwrap();
-            check(game.history_state::<1>());
-            check(game.history_state::<4>());
-            check(game.history_state::<8>());
+            check(ChessAzState::<1>::from_game(&game));
+            check(ChessAzState::<4>::from_game(&game));
+            check(ChessAzState::<8>::from_game(&game));
         }
 
         let mut game = ChessGame::default();
         let mut seed = 0xA17E_5EED_u32;
         for _ in 0..48 {
-            check(game.history_state::<1>());
-            check(game.history_state::<4>());
-            check(game.history_state::<8>());
+            check(ChessAzState::<1>::from_game(&game));
+            check(ChessAzState::<4>::from_game(&game));
+            check(ChessAzState::<8>::from_game(&game));
             let moves: Vec<_> = chess::MoveGen::new_legal(game.board()).collect();
             if moves.is_empty() {
                 break;
@@ -265,13 +265,50 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_copies_authoritative_history_and_repetition_features() {
+        let mut game = ChessGame::default();
+        for text in ["b1c3", "b8c6", "g1f3", "g8f6"] {
+            game.play(chess::ChessMove::from_str(text).unwrap());
+        }
+
+        for (history, expected_frames) in [(1, 1), (4, 4), (8, 5)] {
+            let frames = match history {
+                1 => frames(ChessAzState::<1>::from_game(&game)),
+                4 => frames(ChessAzState::<4>::from_game(&game)),
+                8 => frames(ChessAzState::<8>::from_game(&game)),
+                _ => unreachable!(),
+            };
+            assert_eq!(frames.len(), expected_frames);
+            assert_eq!(frames[0].0.hash(), game.position().hash());
+        }
+
+        let mut repeated = ChessGame::default();
+        for text in ["b1c3", "b8c6", "c3b1", "c6b8"] {
+            repeated.play(chess::ChessMove::from_str(text).unwrap());
+        }
+        let frames = frames(ChessAzState::<8>::from_game(&repeated));
+        assert_eq!(frames[0].1, 1);
+        assert_eq!(frames[1].1, 0);
+    }
+
+    fn frames<const H: usize>(state: ChessAzState<H>) -> Vec<(games::ChessPosition, u8)> {
+        let mut frames = Vec::new();
+        state.for_each_frame(|_, position, repetitions_before| {
+            if let Some(position) = position {
+                frames.push((position, repetitions_before));
+            }
+        });
+        frames
+    }
+
+    #[test]
     fn promotions_castling_and_en_passant_cover_both_colors() {
         for fen in [
             "1r3r1k/P1P1P3/8/8/8/8/8/K7 w - - 0 1",
             "k7/8/8/8/8/8/p1p1p3/1R3R1K b - - 0 1",
         ] {
             let pos = ChessGame::from_fen(fen).unwrap().position();
-            let state = ChessHistoryState::<1>::new(pos);
+            let state = ChessAzState::<1>::new(pos);
             let r = ChessAzRepresentation::<1>;
             let mut pieces = HashSet::new();
             for mv in state
@@ -302,7 +339,7 @@ mod tests {
             ("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 2", &["e5d6"][..]),
             ("4k3/8/8/8/3Pp3/8/8/4K3 b - d3 0 2", &["e4d3"][..]),
         ] {
-            let state = ChessGame::from_fen(fen).unwrap().history_state::<1>();
+            let state = ChessAzState::<1>::from_game(&ChessGame::from_fen(fen).unwrap());
             let r = ChessAzRepresentation::<1>;
             for text in moves {
                 let mv = chess::ChessMove::from_str(text).unwrap();
@@ -316,10 +353,9 @@ mod tests {
 
     #[test]
     fn rejects_actions_from_the_wrong_position() {
-        let source = ChessHistoryState::<1>::default();
-        let other = ChessGame::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1")
-            .unwrap()
-            .history_state::<1>();
+        let source = ChessAzState::<1>::default();
+        let other_game = ChessGame::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let other = ChessAzState::<1>::from_game(&other_game);
         let r = ChessAzRepresentation::<1>;
         let action = r.move_to_action(&source, chess::ChessMove::from_str("e2e4").unwrap());
         assert_eq!(r.action_to_move(&other, action), None);
@@ -329,14 +365,14 @@ mod tests {
     #[test]
     fn key_changes_for_clock_and_history_features() {
         let r = ChessAzRepresentation::<4>;
-        let clock_a =
+        let clock_a_game =
             ChessGame::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-                .unwrap()
-                .history_state::<4>();
-        let clock_b =
+                .unwrap();
+        let clock_b_game =
             ChessGame::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 4 3")
-                .unwrap()
-                .history_state::<4>();
+                .unwrap();
+        let clock_a = ChessAzState::<4>::from_game(&clock_a_game);
+        let clock_b = ChessAzState::<4>::from_game(&clock_b_game);
         check(clock_a);
         check(clock_b);
         assert_ne!(r.encoded_state_key(&clock_a), r.encoded_state_key(&clock_b));
@@ -345,7 +381,7 @@ mod tests {
         for text in ["g1f3", "g8f6", "f3g1", "f6g8"] {
             game.play(chess::ChessMove::from_str(text).unwrap());
         }
-        let populated = game.history_state::<4>();
+        let populated = ChessAzState::<4>::from_game(&game);
         check(populated);
         assert_eq!(populated.position().hash(), clock_b.position().hash());
         assert_eq!(

@@ -182,7 +182,7 @@ fn v2_action<const HISTORY: usize>(
         ChessRepetitionRules,
     );
     let result = mcts.search(
-        &game.history_state::<HISTORY>(),
+        &alphazero::representation::ChessAzState::from_game(&game),
         game.repetition_context(),
         if sampled {
             PolicyMode::Explore

@@ -249,19 +249,27 @@ impl SearchRules<FeatureRepetitionGame> for FeatureRules {
         = ()
     where
         FeatureRepetitionGame: 'a;
-    type PathState = ();
+    type PathState = Vec<u8>;
     type NodeMeta = ();
 
-    fn reset_path<'a>(&self, _: Self::Context<'a>, _: &FeatureRepetitionGame, _: &mut ()) {}
+    fn reset_path<'a>(
+        &self,
+        _: Self::Context<'a>,
+        _: &FeatureRepetitionGame,
+        path: &mut Self::PathState,
+    ) {
+        path.clear();
+    }
 
     fn enter_state<'a>(
         &self,
         _: Self::Context<'a>,
         state: &mut FeatureRepetitionGame,
-        _: &mut (),
+        path: &mut Self::PathState,
         _: &mut (),
     ) -> RuleResult {
-        state.repetitions_before = u8::from(state.ply > 0);
+        state.repetitions_before = path.len() as u8;
+        path.push(state.ply);
         RuleResult::Continue
     }
 }
@@ -274,22 +282,25 @@ impl SearchRules<CycleGame> for CycleRules {
         = ()
     where
         CycleGame: 'a;
-    type PathState = ();
+    type PathState = Vec<u8>;
     type NodeMeta = ();
 
-    fn reset_path<'a>(&self, _: Self::Context<'a>, _: &CycleGame, _: &mut ()) {}
+    fn reset_path<'a>(&self, _: Self::Context<'a>, _: &CycleGame, path: &mut Self::PathState) {
+        path.clear();
+    }
 
     fn enter_state<'a>(
         &self,
         _: Self::Context<'a>,
         state: &mut CycleGame,
-        _: &mut (),
+        path: &mut Self::PathState,
         _: &mut (),
     ) -> RuleResult {
-        if state.ply >= 2 {
+        if state.ply == 2 && path.contains(&0) {
             state.repetition_draw = true;
             RuleResult::Terminal(TerminalValue::Draw)
         } else {
+            path.push(state.ply % 2);
             RuleResult::Continue
         }
     }

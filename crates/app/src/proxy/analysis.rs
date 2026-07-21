@@ -1,6 +1,6 @@
 use super::*;
 use alphazero::representation::{
-    ChessAzRepresentation, ChessV1Representation, Connect4AzRepresentation,
+    ChessAzRepresentation, ChessAzState, ChessV1Representation, Connect4AzRepresentation,
 };
 use alphazero::ChessRepetitionRules;
 use search::NoExtraRules;
@@ -9,19 +9,19 @@ use engine_core::notation::GameNotation;
 
 struct ChessHistoryNotation;
 
-impl<const HISTORY: usize> GameNotation<ChessHistoryState<HISTORY>> for ChessHistoryNotation {
+impl<const HISTORY: usize> GameNotation<ChessAzState<HISTORY>> for ChessHistoryNotation {
     fn parse_move(
         &self,
-        state: &ChessHistoryState<HISTORY>,
+        state: &ChessAzState<HISTORY>,
         text: &str,
-    ) -> Option<<ChessHistoryState<HISTORY> as engine_core::game::GameState>::Move> {
+    ) -> Option<<ChessAzState<HISTORY> as engine_core::game::GameState>::Move> {
         notation::ChessUciNotation.parse_move(&state.position(), text)
     }
 
     fn format_move(
         &self,
-        state: &ChessHistoryState<HISTORY>,
-        mv: <ChessHistoryState<HISTORY> as engine_core::game::GameState>::Move,
+        state: &ChessAzState<HISTORY>,
+        mv: <ChessAzState<HISTORY> as engine_core::game::GameState>::Move,
     ) -> String {
         notation::ChessUciNotation.format_move(&state.position(), mv)
     }
@@ -192,9 +192,9 @@ fn analyze_connect4(
 /// recoverable preceding frames, so the unavailable feature history is padded.
 fn chess_az_state_snapshot<const HISTORY: usize>(
     position: &ChessSetup,
-) -> Result<(ChessGame, ChessHistoryState<HISTORY>)> {
+) -> Result<(ChessGame, ChessAzState<HISTORY>)> {
     let game = ChessGame::from_setup(position)?;
-    let state = game.history_state::<HISTORY>();
+    let state = ChessAzState::from_game(&game);
     Ok((game, state))
 }
 

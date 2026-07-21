@@ -219,9 +219,12 @@ impl RunDir {
             RunConfig::parse_json(&fs::read_to_string(&cfg_path)?)
                 .with_context(|| format!("parsing {}", cfg_path.display()))?
         } else {
-            fs::create_dir_all(run.checkpoints_dir())?;
             let cfg = make_config();
-            fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
+            cfg.validate()?;
+            fs::create_dir_all(run.checkpoints_dir())?;
+            let tmp_path = run.root.join("config.json.tmp");
+            fs::write(&tmp_path, serde_json::to_string_pretty(&cfg)?)?;
+            fs::rename(tmp_path, &cfg_path)?;
             cfg
         };
         cfg.validate()?;
@@ -379,6 +382,20 @@ mod tests {
         assert!(json["model"]["config"].get("input_channels").is_none());
         assert!(json.get("game").is_none());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_new_runs_leave_no_config_or_checkpoint_directory() {
+        let root = test_root("invalid-new-run");
+        let err = RunDir::open_or_create(&root, || RunConfig {
+            format_version: 0,
+            model: config().model,
+        });
+
+        assert!(err.is_err());
+        assert!(!root.join("config.json").exists());
+        assert!(!root.join("checkpoints").exists());
+        assert!(!root.exists());
     }
 
     #[test]
