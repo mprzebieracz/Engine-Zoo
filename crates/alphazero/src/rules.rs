@@ -34,12 +34,14 @@ impl<G: ChessRepetitionState> SearchRules<G> for ChessRepetitionRules {
     ) -> RuleResult {
         let hash = if meta.initialized {
             meta.hash
-        } else {
+        }
+        else {
             state.repetition_hash()
         };
         let repetitions_before = if meta.initialized {
             meta.repetitions_before_current
-        } else {
+        }
+        else {
             let mut count = context.occurrences_before_root(hash);
             for seen in path.iter().rev().take(state.reversible_plies()) {
                 count = count.saturating_add(u8::from(*seen == hash));
@@ -101,9 +103,7 @@ mod tests {
 
     fn play_cycle(game: &mut ChessGame) {
         for mv in ["b1c3", "b8c6", "c3b1", "c6b8"] {
-            let mv = ChessUciNotation
-                .parse_move(&game.position_state(), mv)
-                .unwrap();
+            let mv = ChessUciNotation.parse_move(&game.position(), mv).unwrap();
             game.play(mv);
         }
     }
@@ -122,15 +122,13 @@ mod tests {
         let mut game = ChessGame::default();
         let non_root_hash = {
             let mv = ChessUciNotation
-                .parse_move(&game.position_state(), "b1c3")
+                .parse_move(&game.position(), "b1c3")
                 .unwrap();
             game.play(mv);
             game.position().hash()
         };
         for mv in ["b8c6", "c3b1", "c6b8"] {
-            let mv = ChessUciNotation
-                .parse_move(&game.position_state(), mv)
-                .unwrap();
+            let mv = ChessUciNotation.parse_move(&game.position(), mv).unwrap();
             game.play(mv);
         }
         let context = game.repetition_context();

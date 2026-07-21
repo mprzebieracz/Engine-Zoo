@@ -13,12 +13,13 @@ pub(super) enum Status {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct MoveEffect {
-    irreversible: bool,
+    resets_halfmove_clock: bool,
+    clears_repetition_history: bool,
 }
 
 impl MoveEffect {
-    pub(super) fn is_irreversible(self) -> bool {
-        self.irreversible
+    pub(super) fn clears_repetition_history(self) -> bool {
+        self.clears_repetition_history
     }
 }
 
@@ -74,40 +75,45 @@ impl ChessPosition {
 
         let source = mv.get_source();
         let dest = mv.get_dest();
+
         let moved_piece = self.board.piece_on(source);
+
         let is_pawn = moved_piece == Some(Piece::Pawn);
         let is_capture = self.board.piece_on(dest).is_some();
-        let is_en_passant_capture = is_pawn && !is_capture && self.board.en_passant() == Some(dest);
-        let castle_rights_before =
-            matches!(moved_piece, Some(Piece::King | Piece::Rook)).then(|| {
-                (
-                    self.board.castle_rights(Color::White),
-                    self.board.castle_rights(Color::Black),
-                )
-            });
+
+        let castle_rights_before = (
+            self.board.castle_rights(Color::White),
+            self.board.castle_rights(Color::Black),
+        );
 
         self.board = self.board.make_move_new(mv);
         self.ply += 1;
 
-        let castle_rights_changed = castle_rights_before.is_some_and(|(white_cr, black_cr)| {
-            self.board.castle_rights(Color::White) != white_cr
-                || self.board.castle_rights(Color::Black) != black_cr
-        });
-        let irreversible = is_pawn || is_capture || is_en_passant_capture || castle_rights_changed;
+        let castle_rights_after = (
+            self.board.castle_rights(Color::White),
+            self.board.castle_rights(Color::Black),
+        );
+
+        let castle_rights_changed = castle_rights_before != castle_rights_after;
+
+        let effect = MoveEffect {
+            resets_halfmove_clock: is_pawn || is_capture,
+            clears_repetition_history: is_pawn || is_capture || castle_rights_changed,
+        };
 
         match self.board.status() {
             BoardStatus::Checkmate => {
                 self.status = Status::Checkmate;
-                return MoveEffect { irreversible };
+                return effect;
             }
             BoardStatus::Stalemate => {
                 self.status = Status::Stalemate;
-                return MoveEffect { irreversible };
+                return effect;
             }
             BoardStatus::Ongoing => {}
         }
 
-        if irreversible {
+        if effect.resets_halfmove_clock {
             self.halfmove_clock = 0;
         }
         else {
@@ -116,7 +122,8 @@ impl ChessPosition {
                 self.status = Status::DrawFiftyMoveRule;
             }
         }
-        MoveEffect { irreversible }
+
+        effect
     }
 }
 

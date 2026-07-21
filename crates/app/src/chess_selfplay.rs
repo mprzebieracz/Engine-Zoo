@@ -7,11 +7,11 @@
 use alphazero::representation::{
     AlphaZeroRepresentation, ChessAzRepresentation, ChessV1Representation,
 };
+use alphazero::ChessRepetitionRules;
 use alphazero::{
     select_temperature_action, Batcher, BatcherClient, EvalTable, Mcts, MctsVariant, ReplayBuffer,
     RepresentedEvaluator, SelfPlayConfig, SelfPlayStats, Transition,
 };
-use alphazero::ChessRepetitionRules;
 use engine_core::agent::PolicyMode;
 use engine_core::{GameState, TerminalValue};
 use games::{ChessGame, ChessPosition};
@@ -53,10 +53,12 @@ pub fn self_play_chess(
                 while finished.load(Ordering::Relaxed) < cfg.num_games {
                     let Some(completed) = play_chess_game(&mut mcts, cfg, || {
                         finished.load(Ordering::Relaxed) >= cfg.num_games
-                    }) else {
+                    })
+                    else {
                         break;
                     };
-                    let Ok(done_before) = claim_completed_game(finished, cfg.num_games) else {
+                    let Ok(done_before) = claim_completed_game(finished, cfg.num_games)
+                    else {
                         break;
                     };
                     replay.add(completed.trajectory);
@@ -105,10 +107,12 @@ pub fn self_play_chess_az_v2<const HISTORY: usize>(
                 while finished.load(Ordering::Relaxed) < cfg.num_games {
                     let Some(completed) = play_chess_az_v2_game::<HISTORY>(&mut mcts, cfg, || {
                         finished.load(Ordering::Relaxed) >= cfg.num_games
-                    }) else {
+                    })
+                    else {
                         break;
                     };
-                    let Ok(done_before) = claim_completed_game(finished, cfg.num_games) else {
+                    let Ok(done_before) = claim_completed_game(finished, cfg.num_games)
+                    else {
                         break;
                     };
                     replay.add(completed.trajectory);
@@ -154,7 +158,7 @@ fn play_chess_game(
         if should_stop() {
             return None;
         }
-        let search_state = game.position_state();
+        let search_state = game.position();
         let mut state = vec![
             0.0;
             <ChessV1Representation as AlphaZeroRepresentation<ChessPosition>>::state_size()
@@ -166,16 +170,19 @@ fn play_chess_game(
             let profile = if full_search {
                 stats.full_searches += 1;
                 profiles.full
-            } else {
+            }
+            else {
                 stats.fast_searches += 1;
                 profiles.fast
             };
             mcts.set_gumbel_profile(profile);
-        } else {
+        }
+        else {
             let simulations = if full_search {
                 stats.full_searches += 1;
                 cfg.mcts.simulations
-            } else {
+            }
+            else {
                 stats.fast_searches += 1;
                 cfg.fast_simulations.max(1)
             };
@@ -189,11 +196,13 @@ fn play_chess_game(
         );
         let action = if let Some(temperature) = cfg.chess_v2_temperature {
             select_temperature_action(&result, temperature.at_ply(trajectory.len()), &mut rng)
-        } else if matches!(mcts.config().variant, MctsVariant::Gumbel { .. })
+        }
+        else if matches!(mcts.config().variant, MctsVariant::Gumbel { .. })
             || trajectory.len() >= cfg.temperature_moves
         {
             result.best_move()
-        } else {
+        }
+        else {
             result.sample_move(&mut rng)
         };
         let search_value = result.value;
@@ -219,7 +228,8 @@ fn play_chess_game(
             && search_value < cfg.resignation_threshold
         {
             resignation_streak += 1;
-        } else {
+        }
+        else {
             resignation_streak = 0;
         }
         if resignation_streak >= cfg.resignation_consecutive_moves.max(1) {
@@ -283,16 +293,19 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
             let profile = if full_search {
                 stats.full_searches += 1;
                 profiles.full
-            } else {
+            }
+            else {
                 stats.fast_searches += 1;
                 profiles.fast
             };
             mcts.set_gumbel_profile(profile);
-        } else {
+        }
+        else {
             let simulations = if full_search {
                 stats.full_searches += 1;
                 cfg.mcts.simulations
-            } else {
+            }
+            else {
                 stats.fast_searches += 1;
                 cfg.fast_simulations.max(1)
             };
@@ -331,7 +344,8 @@ fn play_chess_az_v2_game<const HISTORY: usize>(
             && search_value < cfg.resignation_threshold
         {
             resignation_streak += 1;
-        } else {
+        }
+        else {
             resignation_streak = 0;
         }
         if resignation_streak >= cfg.resignation_consecutive_moves.max(1) {

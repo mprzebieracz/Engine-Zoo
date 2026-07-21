@@ -1,16 +1,14 @@
 use alphazero::representation::{
     AlphaZeroRepresentation, ChessV1Representation, Connect4AzRepresentation,
 };
-use alphazero::{
-    Batcher, Mcts, MctsConfig, MctsVariant, NetworkConfig, RepresentedEvaluator,
-};
-use search::SearchRules;
+use alphazero::{Batcher, Mcts, MctsConfig, MctsVariant, NetworkConfig, RepresentedEvaluator};
 use anyhow::{Context, Result};
 use engine_core::agent::{Agent, PolicyMode};
 use engine_core::game::GameState;
 use engine_core::notation::GameNotation;
 use games::chess::notation::ChessUciNotation;
 use games::{ChessGame, ChessPosition, ChessRepetitionContext, Connect4, Connect4Notation};
+use search::SearchRules;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -107,16 +105,16 @@ impl InteractiveGame for ChessGame {
     type Rules = alphazero::ChessRepetitionRules;
 
     fn search_state(&self) -> Self::SearchState {
-        self.position_state()
+        self.position()
     }
     fn search_context(&self) -> ChessRepetitionContext<'_> {
         self.repetition_context()
     }
     fn parse_native_move(&self, text: &str) -> Option<Self::Move> {
-        ChessUciNotation.parse_move(&self.position_state(), text)
+        ChessUciNotation.parse_move(&self.position(), text)
     }
     fn format_native_move(&self, mv: Self::Move) -> String {
-        ChessUciNotation.format_move(&self.position_state(), mv)
+        ChessUciNotation.format_move(&self.position(), mv)
     }
 }
 
@@ -170,7 +168,8 @@ impl<G: InteractiveGame> Agent<G> for AlphaZeroAgent<G> {
         let result = self.mcts.search(&state, game.search_context(), mode);
         if matches!(variant, MctsVariant::Puct) && mode == PolicyMode::Explore {
             result.sample_move(&mut rand::rng())
-        } else {
+        }
+        else {
             result.best_move()
         }
     }

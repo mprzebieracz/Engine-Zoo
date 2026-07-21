@@ -32,6 +32,7 @@ impl ChessGame {
         }
         Ok(game)
     }
+
     pub fn board(&self) -> &Board {
         &self.pos.board
     }
@@ -45,9 +46,6 @@ impl ChessGame {
         self.history.iter().copied().flatten()
     }
 
-    pub fn position_state(&self) -> ChessPosition {
-        self.pos
-    }
     pub fn repetition_context(&self) -> ChessRepetitionContext<'_> {
         ChessRepetitionContext {
             tracker: &self.repetitions,
@@ -67,22 +65,26 @@ impl ChessGame {
     pub fn from_fen(fen: &str) -> anyhow::Result<Self> {
         let board = Board::from_str(fen).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let parts: Vec<_> = fen.split_whitespace().collect();
+
         let halfmove_clock = parts
             .get(4)
             .ok_or_else(|| anyhow::anyhow!("FEN is missing the halfmove clock"))?
             .parse::<u16>()
             .map_err(|e| anyhow::anyhow!("invalid FEN halfmove clock: {e}"))?;
+
         let fullmove = parts
             .get(5)
             .ok_or_else(|| anyhow::anyhow!("FEN is missing the fullmove number"))?
             .parse::<u16>()
             .map_err(|e| anyhow::anyhow!("invalid FEN fullmove number: {e}"))?;
         anyhow::ensure!(fullmove > 0, "FEN fullmove number must be positive");
+
         let ply = fullmove
             .checked_sub(1)
             .and_then(|moves| moves.checked_mul(2))
             .and_then(|ply| ply.checked_add(u16::from(board.side_to_move() == Color::Black)))
             .ok_or_else(|| anyhow::anyhow!("FEN fullmove number exceeds supported game length"))?;
+
         let status = match board.status() {
             BoardStatus::Ongoing => {
                 if halfmove_clock >= 100 {
@@ -95,6 +97,7 @@ impl ChessGame {
             BoardStatus::Checkmate => Status::Checkmate,
             BoardStatus::Stalemate => Status::Stalemate,
         };
+
         let mut game = ChessGame {
             pos: ChessPosition {
                 board,
@@ -105,7 +108,9 @@ impl ChessGame {
             repetitions: RepetitionTracker::new(board.get_hash()),
             history: [None; 8],
         };
+
         game.history[0] = Some((game.pos, 0));
+
         Ok(game)
     }
 
@@ -127,7 +132,7 @@ impl ChessGame {
     pub fn play(&mut self, mv: ChessMove) {
         assert!(self.pos.board.legal(mv), "illegal chess move {mv}");
         let effect = self.pos.play_with_effect(mv);
-        if effect.is_irreversible() {
+        if effect.clears_repetition_history() {
             self.after_irreversible_move();
         }
         else {

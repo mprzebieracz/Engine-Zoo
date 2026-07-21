@@ -3,9 +3,9 @@ use alphazero::representation::{
     ChessAzRepresentation, ChessAzState, ChessV1Representation, Connect4AzRepresentation,
 };
 use alphazero::ChessRepetitionRules;
-use search::NoExtraRules;
 use engine_core::game::{GameState, TerminalValue};
 use engine_core::notation::GameNotation;
+use search::NoExtraRules;
 
 struct ChessHistoryNotation;
 
@@ -122,7 +122,7 @@ fn analyze_chess_legacy(
         cfg.wait_for_count,
         cfg.timeout,
     )?;
-    let position = game.position_state();
+    let position = game.position();
     let network = analyze_game_net(
         position,
         batcher.client(),
@@ -171,10 +171,7 @@ fn analyze_connect4(
         return Ok(network);
     }
     let mut mcts = Mcts::new(
-        alphazero::RepresentedEvaluator::new(
-            Connect4AzRepresentation,
-            batcher.client(),
-        ),
+        alphazero::RepresentedEvaluator::new(Connect4AzRepresentation, batcher.client()),
         cfg.mcts,
         NoExtraRules,
     );
@@ -201,7 +198,8 @@ fn chess_az_state_snapshot<const HISTORY: usize>(
 fn inference_precision(device: Device) -> InferencePrecision {
     if device.is_cuda() {
         InferencePrecision::Fp16
-    } else {
+    }
+    else {
         InferencePrecision::Fp32
     }
 }
@@ -249,10 +247,7 @@ fn analyze_chess_az_v2<const HISTORY: usize>(
     // deterministic PUCT for stable, comparable browser results.
     mcts_cfg.variant = MctsVariant::Puct;
     let mut mcts = Mcts::new(
-        alphazero::RepresentedEvaluator::new(
-            ChessAzRepresentation::<HISTORY>,
-            batcher.client(),
-        ),
+        alphazero::RepresentedEvaluator::new(ChessAzRepresentation::<HISTORY>, batcher.client()),
         mcts_cfg,
         ChessRepetitionRules,
     );
