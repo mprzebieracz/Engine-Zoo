@@ -1,9 +1,11 @@
 use engine_core::GameState;
 
 pub mod chess_v2;
+mod chess_v2_state;
 pub mod compat_v1;
 pub mod connect4;
 pub use chess_v2::ChessAzRepresentation;
+pub use chess_v2_state::ChessAzState;
 pub use compat_v1::ChessV1Representation;
 pub use connect4::Connect4AzRepresentation;
 

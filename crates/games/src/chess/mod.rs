@@ -1,19 +1,11 @@
-//! Chess game states and policy encodings.
+//! Native chess rules, state, repetition, and notation.
 
-mod action;
-mod az;
 mod game;
-mod legacy;
 pub mod notation;
 mod position;
 mod repetition;
 mod zobrist;
 
-pub use action::{
-    decode_v1_action, decode_v2_action, encode_v1_action, encode_v2_action, AzActionError,
-    AZ_ACTION_SIZE,
-};
-pub use az::ChessHistoryState;
 pub use game::{ChessGame, ChessRepetitionContext};
 pub use notation::ChessUciNotation;
 pub use position::ChessPosition;
@@ -33,7 +25,7 @@ pub trait ChessRepetitionState: GameState<Move = chess::ChessMove> {
 }
 
 #[cfg(test)]
-use chess::{Board, BoardStatus, ChessMove, Color, MoveGen, Piece, Square};
+use chess::{Board, BoardStatus, ChessMove, Color, Piece, Square};
 
 #[cfg(test)]
 mod tests;

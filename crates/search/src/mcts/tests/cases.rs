@@ -223,11 +223,60 @@ fn repetition_counts_the_root_when_a_branch_returns_to_it() {
 
     mcts.search(&CycleGame::default(), (), PolicyMode::Deterministic);
 
-    // Root and its child require inference. The root had already occurred
-    // once before this search, so the grandchild's root hash is the third
-    // overall occurrence and must be backed up as a draw without inference.
+    // Root and its child require inference. Returning to the root is a draw,
+    // so the grandchild must be backed up without inference.
     assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
     assert_eq!(mcts.virtual_loss_total(), 0);
+}
+
+#[test]
+fn consecutive_searches_reset_repetition_path_before_root_evaluation() {
+    let encoded = Arc::new(Mutex::new(Vec::new()));
+    let mut mcts = Mcts::<FeatureRepetitionGame, _, _>::new(
+        FeatureRecordingEvaluator {
+            encoded: encoded.clone(),
+        },
+        MctsConfig {
+            simulations: 1,
+            eps: 0.0,
+            ..Default::default()
+        },
+        FeatureRules,
+    );
+
+    mcts.search(
+        &FeatureRepetitionGame::default(),
+        (),
+        PolicyMode::Deterministic,
+    );
+    mcts.search(
+        &FeatureRepetitionGame::default(),
+        (),
+        PolicyMode::Deterministic,
+    );
+
+    let encoded = encoded.lock().unwrap();
+    assert_eq!(encoded[0], 0.0);
+    assert_eq!(encoded[2], 0.0, "stale path leaked into the next root");
+}
+
+#[test]
+fn gumbel_forced_child_keeps_root_in_repetition_path() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut mcts = Mcts::new(
+        RecordingEvaluator::uniform(calls.clone()),
+        MctsConfig {
+            variant: MctsVariant::Gumbel { sampled_actions: 1 },
+            simulations: 2,
+            eps: 0.0,
+            ..Default::default()
+        },
+        CycleRules,
+    );
+
+    mcts.search(&CycleGame::default(), (), PolicyMode::Deterministic);
+
+    assert_eq!(*calls.lock().unwrap(), vec![1, 1]);
 }
 
 #[test]

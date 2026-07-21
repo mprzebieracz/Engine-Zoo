@@ -1,5 +1,7 @@
 use super::*;
-use alphazero::representation::{AlphaZeroRepresentation, ChessAzRepresentation};
+use alphazero::representation::{
+    AlphaZeroRepresentation, ChessAzRepresentation, ChessAzState, ChessV1Representation,
+};
 use engine_core::game::{GameState, TerminalValue};
 use engine_core::notation::GameNotation;
 
@@ -45,7 +47,7 @@ pub(super) fn session_view_chess(session: &SessionState<ChessGame>) -> serde_jso
 }
 
 fn v2_legal_moves<const HISTORY: usize>(game: &ChessGame) -> Vec<serde_json::Value> {
-    let state = game.history_state::<HISTORY>();
+    let state = ChessAzState::from_game(game);
     let representation = ChessAzRepresentation::<HISTORY>;
     state
         .legal_moves()
@@ -80,7 +82,7 @@ pub(super) fn session_view_chess_for(session: &SessionState<ChessGame>) -> serde
         .game
         .legal_moves()
         .map(|mv| {
-            let action = games::encode_v1_action(mv);
+            let action = ChessV1Representation.move_to_action(&session.game.position(), mv).as_u32();
             json!({
                 "action": action,
                 "move": games::chess::ChessUciNotation.format_move(&session.game.position(), mv),

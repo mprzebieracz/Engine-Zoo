@@ -16,7 +16,7 @@ use engine_core::agent::PolicyMode;
 use engine_core::game::GameState;
 use games::chess::notation;
 use games::setup::{ChessSetup, Connect4Setup, GameSetup};
-use games::{decode_v2_action, ChessGame, ChessHistoryState, Connect4};
+use games::{ChessGame, Connect4};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
@@ -172,6 +172,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alphazero::AlphaZeroRepresentation;
     use engine_core::notation::GameNotation;
 
     #[test]
@@ -190,9 +191,9 @@ mod tests {
         };
 
         let game = ChessGame::from_setup(&position).unwrap();
-        assert_eq!(game.history_state::<1>().board(), game.board());
-        assert_eq!(game.history_state::<4>().board(), game.board());
-        assert_eq!(game.history_state::<8>().board(), game.board());
+        assert_eq!(alphazero::representation::ChessAzState::<1>::from_game(&game).board(), game.board());
+        assert_eq!(alphazero::representation::ChessAzState::<4>::from_game(&game).board(), game.board());
+        assert_eq!(alphazero::representation::ChessAzState::<8>::from_game(&game).board(), game.board());
     }
 
     #[test]
@@ -202,7 +203,7 @@ mod tests {
             moves: Vec::new(),
         };
         let game = ChessGame::from_setup(&position).unwrap();
-        assert_eq!(game.history_state::<4>().board(), game.board());
+        assert_eq!(alphazero::representation::ChessAzState::<4>::from_game(&game).board(), game.board());
     }
 
     fn assert_v2_session<const HISTORY: usize>() {
@@ -220,7 +221,12 @@ mod tests {
         let mv = games::chess::ChessUciNotation
             .parse_move(&session.game.position(), "e2e4")
             .unwrap();
-        let expected_action = games::encode_v2_action(session.game.board(), mv);
+        let expected_action = alphazero::representation::ChessAzRepresentation::<HISTORY>
+            .move_to_action(
+                &alphazero::representation::ChessAzState::from_game(&session.game),
+                mv,
+            )
+            .as_u32();
         let initial_board = *session.game.board();
         let view = session_view_chess(&session);
         let rendered = view["legal_moves"]
@@ -235,7 +241,7 @@ mod tests {
         assert_ne!(*session.game.board(), initial_board);
         assert_eq!(
             session.game.board(),
-            session.game.history_state::<HISTORY>().board()
+            alphazero::representation::ChessAzState::<HISTORY>::from_game(&session.game).board()
         );
         assert_eq!(session.moves, ["e2e4"]);
         assert_eq!(session.v2_history, Some(HISTORY));

@@ -4,7 +4,6 @@ use alphazero::representation::{
 };
 use alphazero::ChessRepetitionRules;
 use search::NoExtraRules;
-use anyhow::Context;
 use engine_core::notation::GameNotation;
 
 pub(super) fn create_session_inner(
@@ -164,14 +163,12 @@ pub(super) fn play_chess_engine_turn(
                 InferencePrecision::Fp32
             },
         )?;
-        let action = match history {
+        let mv = match history {
             1 => v2_best_action_for::<1>(batcher.client(), &session.game, session.simulations)?,
             4 => v2_best_action_for::<4>(batcher.client(), &session.game, session.simulations)?,
             8 => v2_best_action_for::<8>(batcher.client(), &session.game, session.simulations)?,
             history => anyhow::bail!("unsupported chess history {history}"),
         };
-        let mv =
-            decode_v2_action(session.game.board(), action).context("decoding v2 engine action")?;
         let uci = games::chess::ChessUciNotation.format_move(&session.game.position(), mv);
         let san = games::chess::notation::san(session.game.board(), mv);
         session.game.play(mv);
@@ -265,8 +262,8 @@ fn v2_best_action_for<const HISTORY: usize>(
     evaluator: alphazero::BatcherClient,
     game: &ChessGame,
     simulations: usize,
-) -> Result<u32> {
-    let state = game.history_state::<HISTORY>();
+) -> Result<<ChessGame as GameState>::Move> {
+    let state = alphazero::representation::ChessAzState::from_game(game);
     let context = game.repetition_context();
     let mv = Mcts::new(
         alphazero::RepresentedEvaluator::new(
@@ -283,5 +280,5 @@ fn v2_best_action_for<const HISTORY: usize>(
     )
     .search(&state, context, PolicyMode::Deterministic)
     .best_move();
-    Ok(games::encode_v2_action(game.board(), mv))
+    Ok(mv)
 }

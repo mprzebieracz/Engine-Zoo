@@ -320,12 +320,8 @@ where
         game.play(action);
     }
 
-    let terminal_value = if !game.is_terminal() {
-        TerminalValue::Draw.as_f32()
-    } else {
-        game.terminal_value().map_or(0.0, TerminalValue::as_f32)
-    };
-    assign_trajectory_values(&mut trajectory, terminal_value);
+    let last_mover_value = last_mover_value(game.terminal_value(), game.is_terminal());
+    assign_trajectory_values(&mut trajectory, last_mover_value);
     let stats = SelfPlayStats {
         games: 1,
         moves: trajectory.len(),
@@ -400,6 +396,14 @@ fn assign_trajectory_values(trajectory: &mut [Transition], terminal_value: f32) 
     for t in trajectory.iter_mut().rev() {
         t.value = value;
         value = -value;
+    }
+}
+
+fn last_mover_value(terminal_value: Option<TerminalValue>, terminal: bool) -> f32 {
+    if terminal {
+        -terminal_value.map_or(0.0, TerminalValue::as_f32)
+    } else {
+        TerminalValue::Draw.as_f32()
     }
 }
 

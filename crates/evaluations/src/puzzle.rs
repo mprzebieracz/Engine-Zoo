@@ -238,7 +238,7 @@ fn evaluate_v2_puzzles<const HISTORY: usize>(
     );
     evaluate_moves(puzzles, |puzzle| {
         let game = ChessGame::from_fen(&puzzle.fen)?;
-        let state = game.history_state::<HISTORY>();
+        let state = alphazero::representation::ChessAzState::from_game(&game);
         let repetition_context = game.repetition_context();
         let mv = mcts
             .search(

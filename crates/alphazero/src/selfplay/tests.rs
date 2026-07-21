@@ -1,9 +1,10 @@
 use super::Transition;
 use super::{
-    assign_trajectory_values, select_temperature_action, ChessV2GumbelProfiles, SelfPlayConfig,
-    SelfPlayTemperature,
+    assign_trajectory_values, last_mover_value, select_temperature_action, ChessV2GumbelProfiles,
+    SelfPlayConfig, SelfPlayTemperature,
 };
 use crate::SearchResult;
+use engine_core::TerminalValue;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
@@ -28,6 +29,14 @@ fn draw_leaves_zeros() {
     let mut traj: Vec<Transition> = (0..4).map(|_| transition()).collect();
     assign_trajectory_values(&mut traj, 0.0);
     assert!(traj.iter().all(|t| t.value == 0.0));
+}
+
+#[test]
+fn terminal_value_is_converted_to_the_last_movers_perspective() {
+    assert_eq!(last_mover_value(Some(TerminalValue::Loss), true), 1.0);
+    assert_eq!(last_mover_value(Some(TerminalValue::Draw), true), 0.0);
+    assert_eq!(last_mover_value(Some(TerminalValue::Win), true), -1.0);
+    assert_eq!(last_mover_value(None, false), 0.0);
 }
 
 #[test]

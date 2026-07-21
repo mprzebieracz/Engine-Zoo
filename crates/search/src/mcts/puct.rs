@@ -23,6 +23,7 @@ where
         self.nodes.push(Node::new(None, None, 0.0, 0.0, false, 0.0));
 
         let mut root = game.clone();
+        self.rules.reset_path(context, game, &mut self.path_state);
         let _ = self.rules.enter_state(
             context,
             &mut root,

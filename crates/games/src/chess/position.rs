@@ -69,10 +69,6 @@ impl ChessPosition {
         self.halfmove_clock as usize
     }
 
-    pub(crate) fn set_repetition_draw(&mut self) {
-        self.status = Status::DrawRepetition;
-    }
-
     pub(super) fn play_with_effect(&mut self, mv: ChessMove) -> MoveEffect {
         debug_assert!(self.board.legal(mv), "illegal move {mv} in {}", self.board);
 
@@ -161,22 +157,6 @@ impl Default for ChessPosition {
             ply: 0,
             status: Status::Ongoing,
             halfmove_clock: 0,
-        }
-    }
-}
-
-impl ChessPosition {
-    pub(crate) fn is_terminal(&self) -> bool {
-        self.status != Status::Ongoing
-    }
-
-    pub(crate) fn reward(&self) -> f32 {
-        // Checkmate: the player to move has been mated.
-        if self.status == Status::Checkmate {
-            -1.0
-        }
-        else {
-            0.0
         }
     }
 }

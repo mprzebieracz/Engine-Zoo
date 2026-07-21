@@ -26,6 +26,13 @@ where
     {
         let mut current = game.clone();
         self.rules.reset_path(context, game, &mut self.path_state);
+        {
+            let root = &mut self.nodes[0];
+            let rule = self
+                .rules
+                .enter_state(context, &mut current, &mut self.path_state, &mut root.meta);
+            self.cache_terminal(0, &current, rule);
+        }
         if node != 0 {
             current.play(
                 self.nodes[node as usize]
@@ -34,12 +41,14 @@ where
             );
         }
         loop {
-            let rule = {
-                let n = &mut self.nodes[node as usize];
-                self.rules
-                    .enter_state(context, &mut current, &mut self.path_state, &mut n.meta)
-            };
-            self.cache_terminal(node, &current, rule);
+            if node != 0 {
+                let rule = {
+                    let n = &mut self.nodes[node as usize];
+                    self.rules
+                        .enter_state(context, &mut current, &mut self.path_state, &mut n.meta)
+                };
+                self.cache_terminal(node, &current, rule);
+            }
             if !self.nodes[node as usize].expanded || self.nodes[node as usize].terminal {
                 break;
             }
