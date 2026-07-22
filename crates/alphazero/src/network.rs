@@ -1,156 +1,332 @@
-use super::representation::AlphaZeroRepresentation;
-use engine_core::GameState;
 use serde::{Deserialize, Serialize};
 use tch::{nn, Kind, Tensor};
 
-mod chess_v2;
-mod legacy;
+#[path = "network/legacy.rs"]
+mod classic_residual;
+#[path = "network/chess_v2.rs"]
+mod se_residual;
 
-pub use chess_v2::ChessAzV2Net;
-pub use legacy::LegacyAlphaZeroNet;
+pub use classic_residual::ClassicResidualNet;
+pub use se_residual::SeResidualNet;
 
-/// Backwards-compatible name for the legacy network.
-pub type AlphaZeroNet = LegacyAlphaZeroNet;
-
-/// Configuration for the original scalar-value AlphaZero network.
-///
-/// This format is retained so existing chess and Connect4 checkpoints remain
-/// usable. New chess-v2 runs use [`ChessAzV2Config`] instead.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NetConfig {
-    pub input_channels: i64,
-    pub height: i64,
-    pub width: i64,
-    pub num_res_blocks: i64,
-    pub num_filters: i64,
-    pub action_size: i64,
-}
-
-impl NetConfig {
-    pub fn for_representation<G: GameState, R: AlphaZeroRepresentation<G>>(
-        num_res_blocks: i64,
-        num_filters: i64,
-    ) -> Self {
-        let [input_channels, height, width] = R::STATE_SHAPE.map(|size| size as i64);
-        Self {
-            input_channels,
-            height,
-            width,
-            num_res_blocks,
-            num_filters,
-            action_size: R::ACTION_SIZE as i64,
-        }
-    }
-
-    pub fn state_size(&self) -> usize {
-        (self.input_channels * self.height * self.width) as usize
-    }
-}
-
-/// Fixed configuration of the chess AlphaZero v2 network.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChessAzV2Config {
-    #[serde(default = "default_history")]
-    pub history: usize,
+#[serde(rename_all = "kebab-case")]
+pub enum GameSpec {
+    Connect4,
+    Chess,
 }
 
-const fn default_history() -> usize {
-    4
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChessHistoryLength {
+    One,
+    Four,
+    Eight,
 }
 
-impl Default for ChessAzV2Config {
-    fn default() -> Self {
-        Self {
-            history: default_history(),
-        }
-    }
-}
-
-impl ChessAzV2Config {
-    pub const CHANNELS: i64 = 128;
-    pub const RESIDUAL_BLOCKS: usize = 12;
-    pub const SE_HIDDEN: i64 = 16;
-    pub const POLICY_PLANES: i64 = 73;
-    pub const ACTION_SIZE: i64 = 8 * 8 * Self::POLICY_PLANES;
-
-    pub fn validate(self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            matches!(self.history, 1 | 4 | 8),
-            "chess az v2 history must be one of 1, 4, or 8, got {}",
-            self.history
-        );
-        Ok(())
-    }
-
-    pub fn input_channels(self) -> i64 {
-        (14 * self.history + 7) as i64
-    }
-    pub fn state_size(self) -> usize {
-        (self.input_channels() * 8 * 8) as usize
-    }
-}
-
-/// The network format selected by a run. It is deliberately explicit: tensor
-/// shapes are never used to guess which checkpoint format is being loaded.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "architecture", content = "config", rename_all = "kebab-case")]
-pub enum NetworkConfig {
-    Legacy(NetConfig),
-    ChessAzV2(ChessAzV2Config),
-}
-
-impl NetworkConfig {
-    pub fn state_size(&self) -> usize {
+impl ChessHistoryLength {
+    pub const fn as_usize(self) -> usize {
         match self {
-            Self::Legacy(cfg) => cfg.state_size(),
-            Self::ChessAzV2(cfg) => cfg.state_size(),
+            Self::One => 1,
+            Self::Four => 4,
+            Self::Eight => 8,
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RepresentationSpec {
+    Connect4Canonical,
+    ChessClassic,
+    ChessCanonical { history: ChessHistoryLength },
+}
+
+impl RepresentationSpec {
+    pub fn state_shape(&self) -> [i64; 3] {
+        match self {
+            Self::Connect4Canonical => [1, 6, 7],
+            Self::ChessClassic => [19, 8, 8],
+            Self::ChessCanonical { history } => [(14 * history.as_usize() + 7) as i64, 8, 8],
+        }
+    }
+
+    pub const fn action_size(&self) -> usize {
+        match self {
+            Self::Connect4Canonical => 7,
+            Self::ChessClassic => 64 * 64 * 5,
+            Self::ChessCanonical { .. } => 4672,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSpec {
+    pub game: GameSpec,
+    pub representation: RepresentationSpec,
+    pub network: NetworkSpec,
+}
+
+impl ModelSpec {
+    pub fn connect4_basic(blocks: usize, channels: i64) -> Self {
+        Self {
+            game: GameSpec::Connect4,
+            representation: RepresentationSpec::Connect4Canonical,
+            network: NetworkSpec::Residual(ResidualNetworkConfig {
+                trunk: ResidualTrunkConfig::Basic { blocks, channels },
+                policy_head: PolicyHeadConfig::Dense { channels: 2 },
+                value_head: ValueHeadConfig::Scalar { hidden: channels },
+            }),
+        }
+    }
+
+    pub fn chess_se(history: ChessHistoryLength, value_head: ValueHeadConfig) -> Self {
+        Self {
+            game: GameSpec::Chess,
+            representation: RepresentationSpec::ChessCanonical { history },
+            network: NetworkSpec::Residual(ResidualNetworkConfig {
+                trunk: ResidualTrunkConfig::SqueezeExcitation {
+                    blocks: 12,
+                    channels: 128,
+                    se_hidden: 16,
+                },
+                policy_head: PolicyHeadConfig::ConvolutionalPlanes { planes: 73 },
+                value_head,
+            }),
+        }
+    }
+
+    pub fn chess_classic(blocks: usize, channels: i64) -> Self {
+        Self {
+            game: GameSpec::Chess,
+            representation: RepresentationSpec::ChessClassic,
+            network: NetworkSpec::Residual(ResidualNetworkConfig {
+                trunk: ResidualTrunkConfig::Basic { blocks, channels },
+                policy_head: PolicyHeadConfig::Dense { channels: 2 },
+                value_head: ValueHeadConfig::Scalar { hidden: channels },
+            }),
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        match (&self.game, &self.representation) {
+            (GameSpec::Connect4, RepresentationSpec::Connect4Canonical)
+            | (GameSpec::Chess, RepresentationSpec::ChessClassic)
+            | (GameSpec::Chess, RepresentationSpec::ChessCanonical { .. }) => {}
+            _ => anyhow::bail!("game and representation do not match"),
+        }
+        self.network.validate(&self.representation)
     }
 
     pub fn state_shape(&self) -> [i64; 3] {
+        self.representation.state_shape()
+    }
+
+    pub const fn action_size(&self) -> usize {
+        self.representation.action_size()
+    }
+
+    pub fn chess_history(&self) -> Option<ChessHistoryLength> {
+        match self.representation {
+            RepresentationSpec::ChessCanonical { history } => Some(history),
+            RepresentationSpec::Connect4Canonical | RepresentationSpec::ChessClassic => None,
+        }
+    }
+
+    pub const fn is_chess_classic(&self) -> bool {
+        matches!(self.representation, RepresentationSpec::ChessClassic)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "architecture", content = "config", rename_all = "kebab-case")]
+pub enum NetworkSpec {
+    Residual(ResidualNetworkConfig),
+}
+
+impl NetworkSpec {
+    fn validate(&self, representation: &RepresentationSpec) -> anyhow::Result<()> {
         match self {
-            Self::Legacy(cfg) => [cfg.input_channels, cfg.height, cfg.width],
-            Self::ChessAzV2(cfg) => [cfg.input_channels(), 8, 8],
+            Self::Residual(config) => config.validate(representation),
         }
     }
 }
 
-pub enum NetworkOutput {
-    Legacy { policy: Tensor, value: Tensor },
-    ChessAzV2 { policy: Tensor, wdl: Tensor },
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResidualNetworkConfig {
+    pub trunk: ResidualTrunkConfig,
+    pub policy_head: PolicyHeadConfig,
+    pub value_head: ValueHeadConfig,
+}
+
+impl ResidualNetworkConfig {
+    fn validate(&self, representation: &RepresentationSpec) -> anyhow::Result<()> {
+        self.trunk.validate()?;
+        self.policy_head.validate()?;
+        self.value_head.validate()?;
+        match (representation, &self.trunk, &self.policy_head) {
+            (
+                RepresentationSpec::Connect4Canonical,
+                ResidualTrunkConfig::Basic { .. },
+                PolicyHeadConfig::Dense { .. },
+            ) => {}
+            (
+                RepresentationSpec::ChessCanonical { .. },
+                ResidualTrunkConfig::SqueezeExcitation { .. },
+                PolicyHeadConfig::ConvolutionalPlanes { planes: 73 },
+            ) => {}
+            (
+                RepresentationSpec::ChessClassic,
+                ResidualTrunkConfig::Basic { channels, .. },
+                PolicyHeadConfig::Dense { channels: 2 },
+            ) if matches!(&self.value_head, ValueHeadConfig::Scalar { hidden } if *hidden == *channels) => {}
+            (
+                RepresentationSpec::ChessCanonical { .. },
+                _,
+                PolicyHeadConfig::ConvolutionalPlanes { planes },
+            ) => anyhow::bail!("chess canonical policy requires exactly 73 planes, got {planes}"),
+            (RepresentationSpec::ChessCanonical { .. }, _, _) => anyhow::bail!(
+                "chess canonical representation requires an SE trunk and convolutional policy"
+            ),
+            (RepresentationSpec::ChessClassic, _, _) => anyhow::bail!(
+                "chess classic representation requires the basic trunk, a two-channel dense policy, and a scalar value head matching the trunk width"
+            ),
+            (RepresentationSpec::Connect4Canonical, _, _) => anyhow::bail!(
+                "connect4 canonical representation requires a basic trunk and dense policy"
+            ),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResidualTrunkConfig {
+    Basic {
+        blocks: usize,
+        channels: i64,
+    },
+    SqueezeExcitation {
+        blocks: usize,
+        channels: i64,
+        se_hidden: i64,
+    },
+}
+
+impl ResidualTrunkConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Basic { blocks, channels } => {
+                positive("blocks", *blocks as i64).and(positive("channels", *channels))
+            }
+            Self::SqueezeExcitation {
+                blocks,
+                channels,
+                se_hidden,
+            } => positive("blocks", *blocks as i64)
+                .and(positive("channels", *channels))
+                .and(positive("se_hidden", *se_hidden)),
+        }
+    }
+
+    pub const fn channels(&self) -> i64 {
+        match self {
+            Self::Basic { channels, .. } | Self::SqueezeExcitation { channels, .. } => *channels,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PolicyHeadConfig {
+    Dense { channels: i64 },
+    ConvolutionalPlanes { planes: i64 },
+}
+
+impl PolicyHeadConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        positive(
+            "policy head channels",
+            match self {
+                Self::Dense { channels } => *channels,
+                Self::ConvolutionalPlanes { planes } => *planes,
+            },
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ValueHeadConfig {
+    Scalar { hidden: i64 },
+    Wdl { hidden: i64 },
+}
+
+impl ValueHeadConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        positive(
+            "value head hidden",
+            match self {
+                Self::Scalar { hidden } | Self::Wdl { hidden } => *hidden,
+            },
+        )
+    }
+}
+
+fn positive(name: &str, value: i64) -> anyhow::Result<()> {
+    anyhow::ensure!(value > 0, "{name} must be positive");
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct RawNetworkOutput {
+    pub policy_logits: Tensor,
+    pub value: RawValueOutput,
+}
+
+#[derive(Debug)]
+pub enum RawValueOutput {
+    Scalar(Tensor),
+    WdlLogits(Tensor),
+}
+
+impl RawValueOutput {
+    pub fn expected_value(&self) -> Tensor {
+        match self {
+            Self::Scalar(value) => value.shallow_clone(),
+            Self::WdlLogits(logits) => {
+                let probabilities = logits.softmax(1, Kind::Float);
+                probabilities.narrow(1, 0, 1) - probabilities.narrow(1, 2, 1)
+            }
+        }
+    }
 }
 
 pub enum Network {
-    Legacy(LegacyAlphaZeroNet),
-    ChessAzV2(ChessAzV2Net),
+    ClassicResidual(ClassicResidualNet),
+    SeResidual(SeResidualNet),
 }
 
 impl Network {
-    pub fn new(p: &nn::Path, cfg: &NetworkConfig) -> Self {
-        match cfg {
-            NetworkConfig::Legacy(cfg) => Self::Legacy(LegacyAlphaZeroNet::new(p, cfg)),
-            NetworkConfig::ChessAzV2(cfg) => Self::ChessAzV2(ChessAzV2Net::new(p, *cfg)),
-        }
+    pub fn new(path: &nn::Path, spec: &ModelSpec) -> anyhow::Result<Self> {
+        spec.validate()?;
+        let NetworkSpec::Residual(config) = &spec.network;
+        Ok(match config.trunk {
+            ResidualTrunkConfig::Basic { .. } => {
+                Self::ClassicResidual(ClassicResidualNet::new(path, spec, config))
+            }
+            ResidualTrunkConfig::SqueezeExcitation { .. } => {
+                Self::SeResidual(SeResidualNet::new(path, spec, config))
+            }
+        })
     }
 
-    pub fn forward_t(&self, xs: &Tensor, train: bool) -> NetworkOutput {
+    pub fn forward_t(&self, states: &Tensor, train: bool) -> RawNetworkOutput {
         match self {
-            Self::Legacy(net) => {
-                let (policy, value) = net.forward_t(xs, train);
-                NetworkOutput::Legacy { policy, value }
-            }
-            Self::ChessAzV2(net) => {
-                let (policy, wdl) = net.forward_t(xs, train);
-                NetworkOutput::ChessAzV2 { policy, wdl }
-            }
+            Self::ClassicResidual(net) => net.forward_t(states, train),
+            Self::SeResidual(net) => net.forward_t(states, train),
         }
     }
-}
-
-/// Converts `[win, draw, loss]` logits to the scalar value consumed by MCTS.
-pub fn wdl_scalar(wdl_logits: &Tensor) -> Tensor {
-    let probabilities = wdl_logits.softmax(1, Kind::Float);
-    probabilities.narrow(1, 0, 1) - probabilities.narrow(1, 2, 1)
 }
 
 #[cfg(test)]
@@ -158,27 +334,72 @@ mod tests {
     use super::*;
     use tch::{nn, Device, Kind};
 
-    #[test]
-    fn chess_v2_shapes_and_wdl_value_are_valid() {
-        let vs = nn::VarStore::new(Device::Cpu);
-        let cfg = ChessAzV2Config::default();
-        let net = ChessAzV2Net::new(&vs.root(), cfg);
-        let input = Tensor::zeros([2, cfg.input_channels(), 8, 8], (Kind::Float, Device::Cpu));
-        let (policy, wdl) = net.forward_t(&input, false);
-        assert_eq!(policy.size(), [2, 73, 8, 8]);
-        assert_eq!(wdl.size(), [2, 3]);
-        let value = wdl_scalar(&wdl);
-        assert_eq!(value.size(), [2, 1]);
-        assert!(value.isfinite().all().int64_value(&[]) != 0);
+    fn chess(value_head: ValueHeadConfig) -> ModelSpec {
+        ModelSpec {
+            game: GameSpec::Chess,
+            representation: RepresentationSpec::ChessCanonical {
+                history: ChessHistoryLength::Four,
+            },
+            network: NetworkSpec::Residual(ResidualNetworkConfig {
+                trunk: ResidualTrunkConfig::SqueezeExcitation {
+                    blocks: 1,
+                    channels: 8,
+                    se_hidden: 2,
+                },
+                policy_head: PolicyHeadConfig::ConvolutionalPlanes { planes: 73 },
+                value_head,
+            }),
+        }
     }
 
     #[test]
-    fn chess_v2_accepts_supported_history_lengths() {
-        for history in [1, 4, 8] {
-            let cfg = ChessAzV2Config { history };
-            cfg.validate().unwrap();
-            assert_eq!(cfg.input_channels(), (14 * history + 7) as i64);
+    fn chess_outputs_are_flat_and_semantic() {
+        for value_head in [
+            ValueHeadConfig::Scalar { hidden: 8 },
+            ValueHeadConfig::Wdl { hidden: 8 },
+        ] {
+            let spec = chess(value_head);
+            let vs = nn::VarStore::new(Device::Cpu);
+            let net = Network::new(&vs.root(), &spec).unwrap();
+            let output = net.forward_t(
+                &Tensor::zeros([2, 63, 8, 8], (Kind::Float, Device::Cpu)),
+                false,
+            );
+            assert_eq!(output.policy_logits.size(), [2, 4672]);
+            assert_eq!(output.value.expected_value().size(), [2, 1]);
         }
-        assert!(ChessAzV2Config { history: 2 }.validate().is_err());
+    }
+
+    #[test]
+    fn chess_classic_preserves_the_scalar_checkpoint_shape() {
+        let spec = ModelSpec::chess_classic(1, 8);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let net = Network::new(&vs.root(), &spec).unwrap();
+        let output = net.forward_t(
+            &Tensor::zeros([2, 19, 8, 8], (Kind::Float, Device::Cpu)),
+            false,
+        );
+        assert_eq!(output.policy_logits.size(), [2, 20_480]);
+        assert_eq!(output.value.expected_value().size(), [2, 1]);
+        let names = vs.variables();
+        for name in [
+            "conv_in.weight",
+            "blocks.0.conv1.weight",
+            "policy_fc.weight",
+            "value_fc2.weight",
+        ] {
+            assert!(
+                names.contains_key(name),
+                "missing classic checkpoint key {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_representation_network_pair() {
+        let mut spec = chess(ValueHeadConfig::Wdl { hidden: 8 });
+        let NetworkSpec::Residual(network) = &mut spec.network;
+        network.policy_head = PolicyHeadConfig::ConvolutionalPlanes { planes: 72 };
+        assert!(spec.validate().is_err());
     }
 }

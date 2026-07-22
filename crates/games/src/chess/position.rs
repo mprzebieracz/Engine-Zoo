@@ -9,6 +9,7 @@ pub(super) enum Status {
     Stalemate,
     DrawRepetition,
     DrawFiftyMoveRule,
+    DrawInsufficientMaterial,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +38,10 @@ impl ChessPosition {
     }
 
     pub fn legal_moves(&self) -> impl Iterator<Item = ChessMove> + '_ {
-        chess::MoveGen::new_legal(&self.board)
+        (self.status == Status::Ongoing)
+            .then(|| chess::MoveGen::new_legal(&self.board))
+            .into_iter()
+            .flatten()
     }
 
     pub fn play(&mut self, mv: ChessMove) {
@@ -48,9 +52,10 @@ impl ChessPosition {
         match self.status {
             Status::Ongoing => None,
             Status::Checkmate => Some(TerminalValue::Loss),
-            Status::Stalemate | Status::DrawRepetition | Status::DrawFiftyMoveRule => {
-                Some(TerminalValue::Draw)
-            }
+            Status::Stalemate
+            | Status::DrawRepetition
+            | Status::DrawFiftyMoveRule
+            | Status::DrawInsufficientMaterial => Some(TerminalValue::Draw),
         }
     }
 
@@ -101,29 +106,67 @@ impl ChessPosition {
             clears_repetition_history: is_pawn || is_capture || castle_rights_changed,
         };
 
-        match self.board.status() {
-            BoardStatus::Checkmate => {
-                self.status = Status::Checkmate;
-                return effect;
-            }
-            BoardStatus::Stalemate => {
-                self.status = Status::Stalemate;
-                return effect;
-            }
-            BoardStatus::Ongoing => {}
-        }
-
         if effect.resets_halfmove_clock {
             self.halfmove_clock = 0;
-        }
-        else {
+        } else {
             self.halfmove_clock += 1;
-            if self.halfmove_clock >= 100 {
-                self.status = Status::DrawFiftyMoveRule;
-            }
         }
 
+        self.refresh_status_without_repetition();
+
         effect
+    }
+
+    /// Resolves automatic terminals other than authoritative repetition.
+    ///
+    /// This project deliberately adjudicates claimable fifty-move draws in
+    /// self-play. Checkmate and stalemate still take precedence over that
+    /// adjudication, as they do over every other draw status here.
+    pub(super) fn refresh_status_without_repetition(&mut self) {
+        self.status = match self.board.status() {
+            BoardStatus::Checkmate => Status::Checkmate,
+            BoardStatus::Stalemate => Status::Stalemate,
+            BoardStatus::Ongoing if self.has_insufficient_material() => {
+                Status::DrawInsufficientMaterial
+            }
+            BoardStatus::Ongoing if self.halfmove_clock >= 100 => Status::DrawFiftyMoveRule,
+            BoardStatus::Ongoing => Status::Ongoing,
+        };
+    }
+
+    /// The canonical automatic subset of FIDE dead positions we support:
+    /// bare kings, a single bishop or knight, and one bishop per side on the
+    /// same colour complex. This intentionally does not attempt the general
+    /// dead-position problem.
+    fn has_insufficient_material(&self) -> bool {
+        if [Piece::Pawn, Piece::Rook, Piece::Queen]
+            .into_iter()
+            .any(|piece| self.board.pieces(piece).popcnt() != 0)
+        {
+            return false;
+        }
+
+        let bishops = *self.board.pieces(Piece::Bishop);
+        let knights = self.board.pieces(Piece::Knight).popcnt();
+        let minor_count = bishops.popcnt() + knights;
+
+        if minor_count <= 1 {
+            return true;
+        }
+
+        if knights != 0
+            || bishops.popcnt() != 2
+            || (bishops & self.board.color_combined(Color::White)).popcnt() != 1
+            || (bishops & self.board.color_combined(Color::Black)).popcnt() != 1
+        {
+            return false;
+        }
+
+        let first = bishops.into_iter().next().expect("two bishops exist");
+        let colour = (first.get_file().to_index() + first.get_rank().to_index()) % 2;
+        bishops.into_iter().all(|square| {
+            (square.get_file().to_index() + square.get_rank().to_index()) % 2 == colour
+        })
     }
 }
 
@@ -189,8 +232,7 @@ impl fmt::Display for ChessPosition {
             "{} to move",
             if self.board.side_to_move() == Color::White {
                 "White"
-            }
-            else {
+            } else {
                 "Black"
             }
         )

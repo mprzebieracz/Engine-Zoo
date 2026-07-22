@@ -1,7 +1,7 @@
 mod support;
 
 use self::support::{apply_opening, Stockfish};
-use alphazero::representation::ChessV1Representation;
+use alphazero::representation::ChessClassicRepresentation;
 use alphazero::ChessRepetitionRules;
 use alphazero::{Batcher, Mcts, MctsConfig, RepresentedEvaluator, RunConfig};
 use anyhow::{bail, Context, Result};
@@ -105,7 +105,7 @@ pub fn run() -> Result<()> {
         Duration::from_millis(2),
     )?;
     let mut model = Mcts::<ChessPosition, _, _>::new(
-        RepresentedEvaluator::new(ChessV1Representation, batcher.client()),
+        RepresentedEvaluator::new(ChessClassicRepresentation, batcher.client()),
         MctsConfig {
             simulations: args.simulations,
             eps: 0.0,
@@ -155,8 +155,7 @@ pub fn run() -> Result<()> {
                         engine_core::agent::PolicyMode::Deterministic,
                     )
                     .best_move()
-            }
-            else {
+            } else {
                 let mv = stockfish.best_move(&uci_moves, args.stockfish_movetime_ms)?;
                 ChessUciNotation
                     .parse_move(&state, &mv)
@@ -173,22 +172,18 @@ pub fn run() -> Result<()> {
             if !GameState::is_terminal(&game) || game.terminal_value().unwrap().as_f32() == 0.0 {
                 draws += 1;
                 "1/2-1/2"
-            }
-            else if (ply - 1).is_multiple_of(2) == model_white {
+            } else if (ply - 1).is_multiple_of(2) == model_white {
                 wins += 1;
                 if model_white {
                     "1-0"
-                }
-                else {
+                } else {
                     "0-1"
                 }
-            }
-            else {
+            } else {
                 losses += 1;
                 if model_white {
                     "0-1"
-                }
-                else {
+                } else {
                     "1-0"
                 }
             };
@@ -220,7 +215,7 @@ pub fn run() -> Result<()> {
         let baseline_batcher =
             Batcher::new_with_network(&network, path, device, 1, Duration::from_millis(2))?;
         let mut baseline = Mcts::<ChessPosition, _, _>::new(
-            RepresentedEvaluator::new(ChessV1Representation, baseline_batcher.client()),
+            RepresentedEvaluator::new(ChessClassicRepresentation, baseline_batcher.client()),
             MctsConfig {
                 simulations: args.simulations,
                 eps: 0.0,
@@ -243,8 +238,7 @@ pub fn run() -> Result<()> {
                             engine_core::agent::PolicyMode::Deterministic,
                         )
                         .best_move()
-                }
-                else {
+                } else {
                     baseline
                         .search(
                             &state,
@@ -259,11 +253,9 @@ pub fn run() -> Result<()> {
             }
             if !GameState::is_terminal(&game) || game.terminal_value().unwrap().as_f32() == 0.0 {
                 baseline_draws += 1;
-            }
-            else if (ply - 1).is_multiple_of(2) == model_white {
+            } else if (ply - 1).is_multiple_of(2) == model_white {
                 baseline_wins += 1;
-            }
-            else {
+            } else {
                 baseline_losses += 1;
             }
         }
@@ -277,8 +269,7 @@ pub fn run() -> Result<()> {
             baseline_score * 100.0 / args.baseline_games as f64,
             400.0 * (baseline_smoothed / (1.0 - baseline_smoothed)).log10(),
         ))
-    }
-    else {
+    } else {
         None
     };
     let record = ResultRecord {

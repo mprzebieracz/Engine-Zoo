@@ -75,8 +75,9 @@ pub fn run_dir(game: GameKind, run_dir: Option<PathBuf>) -> PathBuf {
 
 pub fn resolve_model(run_dir: &Path, model: &str) -> PathBuf {
     match model {
-        "best" => run_dir.join("best.safetensors"),
-        "candidate" => run_dir.join("candidate.safetensors"),
+        "latest" => named_model_path(run_dir, "latest", Some("best")),
+        "best" => named_model_path(run_dir, "best", None),
+        "candidate" => named_model_path(run_dir, "candidate", None),
         other => {
             if let Ok(idx) = other.parse::<u32>() {
                 run_dir
@@ -96,23 +97,43 @@ pub fn resolve_model(run_dir: &Path, model: &str) -> PathBuf {
     }
 }
 
-pub fn open_existing_run(root: &Path, expected_game: &str) -> Result<(RunDir, RunConfig)> {
+fn named_model_path(run_dir: &Path, name: &str, fallback: Option<&str>) -> PathBuf {
+    let current = run_dir
+        .join("checkpoints")
+        .join(format!("{name}.safetensors"));
+    if current.is_file() {
+        return current;
+    }
+    let classic = run_dir.join(format!("{name}.safetensors"));
+    if classic.is_file() || fallback.is_none() {
+        return classic;
+    }
+    run_dir.join(format!("{}.safetensors", fallback.unwrap()))
+}
+
+pub fn open_existing_run(root: &Path, expected_game: &str) -> Result<(RunDir, ExperimentConfig)> {
     anyhow::ensure!(
-        root.join("config.json").is_file(),
+        root.join("experiment.json").is_file() || root.join("config.json").is_file(),
         "no run found at {}; train first or pass --run-dir",
         root.display()
     );
-    let (run, cfg) = RunDir::open_or_create(root, || {
+    let (run, cfg, _) = RunDir::open_or_create(root, || {
         panic!(
             "no run found at {}; train first or pass --run-dir",
             root.display()
         )
     })?;
     anyhow::ensure!(
-        cfg.model.game_name() == expected_game,
+        matches!(
+            (&cfg.model.game, expected_game),
+            (alphazero::GameSpec::Connect4, "connect4") | (alphazero::GameSpec::Chess, "chess")
+        ),
         "run dir {} holds a {} run, not {}",
         root.display(),
-        cfg.model.game_name(),
+        match cfg.model.game {
+            alphazero::GameSpec::Connect4 => "connect4",
+            alphazero::GameSpec::Chess => "chess",
+        },
         expected_game
     );
     Ok((run, cfg))
@@ -126,7 +147,7 @@ pub fn game_name(game: GameKind) -> &'static str {
 }
 
 pub(super) fn default_model() -> String {
-    "best".into()
+    "latest".into()
 }
 
 pub(super) fn default_simulations() -> usize {

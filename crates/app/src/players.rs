@@ -1,13 +1,10 @@
-use alphazero::representation::{
-    AlphaZeroRepresentation, ChessV1Representation, Connect4AzRepresentation,
-};
-use alphazero::{Batcher, Mcts, MctsConfig, MctsVariant, NetworkConfig, RepresentedEvaluator};
+use alphazero::representation::{AlphaZeroRepresentation, Connect4AzRepresentation};
+use alphazero::{Batcher, BatcherConfig, Mcts, ModelSpec, RepresentedEvaluator, SearchConfig};
 use anyhow::{Context, Result};
 use engine_core::agent::{Agent, PolicyMode};
 use engine_core::game::GameState;
 use engine_core::notation::GameNotation;
-use games::chess::notation::ChessUciNotation;
-use games::{ChessGame, ChessPosition, ChessRepetitionContext, Connect4, Connect4Notation};
+use games::{Connect4, Connect4Notation};
 use search::SearchRules;
 use std::io::Write;
 use std::path::Path;
@@ -97,27 +94,6 @@ impl InteractiveGame for Connect4 {
     }
 }
 
-impl InteractiveGame for ChessGame {
-    const NAME: &'static str = "chess";
-
-    type SearchState = ChessPosition;
-    type Representation = ChessV1Representation;
-    type Rules = alphazero::ChessRepetitionRules;
-
-    fn search_state(&self) -> Self::SearchState {
-        self.position()
-    }
-    fn search_context(&self) -> ChessRepetitionContext<'_> {
-        self.repetition_context()
-    }
-    fn parse_native_move(&self, text: &str) -> Option<Self::Move> {
-        ChessUciNotation.parse_move(&self.position(), text)
-    }
-    fn format_native_move(&self, mv: Self::Move) -> String {
-        ChessUciNotation.format_move(&self.position(), mv)
-    }
-}
-
 type NativeMcts<G> = Mcts<
     <G as InteractiveGame>::SearchState,
     RepresentedEvaluator<
@@ -135,23 +111,23 @@ pub struct AlphaZeroAgent<G: InteractiveGame> {
 
 impl<G: InteractiveGame> AlphaZeroAgent<G> {
     pub fn new(
-        cfg: &NetworkConfig,
+        model: &ModelSpec,
         weights: &Path,
         device: Device,
         simulations: usize,
         wait_for_count: usize,
         timeout: Duration,
     ) -> Result<Self> {
-        let batcher =
-            Batcher::new_with_network(cfg, weights, device, wait_for_count.max(1), timeout)
-                .with_context(|| format!("loading AlphaZero agent from {}", weights.display()))?;
+        let batcher = Batcher::new_with_model(
+            model.clone(),
+            weights,
+            device,
+            batcher_config(wait_for_count, timeout),
+        )
+        .with_context(|| format!("loading AlphaZero agent from {}", weights.display()))?;
         let mcts = Mcts::new(
             RepresentedEvaluator::new(G::Representation::default(), batcher.client()),
-            MctsConfig {
-                simulations,
-                eps: 0.0,
-                ..Default::default()
-            },
+            puct_search(simulations),
             G::Rules::default(),
         );
         Ok(AlphaZeroAgent {
@@ -163,15 +139,34 @@ impl<G: InteractiveGame> AlphaZeroAgent<G> {
 
 impl<G: InteractiveGame> Agent<G> for AlphaZeroAgent<G> {
     fn select_move(&mut self, game: &G, mode: PolicyMode) -> G::Move {
-        let variant = self.mcts.config().variant;
+        let is_puct = matches!(self.mcts.config(), SearchConfig::Puct(_));
         let state = game.search_state();
-        let result = self.mcts.search(&state, game.search_context(), mode);
-        if matches!(variant, MctsVariant::Puct) && mode == PolicyMode::Explore {
+        let result = self
+            .mcts
+            .search(&state, game.search_context(), mode)
+            .expect("AlphaZero inference failed");
+        if is_puct && mode == PolicyMode::Explore {
             result.sample_move(&mut rand::rng())
-        }
-        else {
+        } else {
             result.best_move()
         }
+    }
+}
+
+fn puct_search(simulations: usize) -> SearchConfig {
+    let mut search = search::PuctConfig::default();
+    search.common.simulations = simulations.max(1);
+    search.common.leaf_batch_size = 1;
+    search.root_noise = None;
+    SearchConfig::Puct(search)
+}
+
+fn batcher_config(wait_for_count: usize, timeout: Duration) -> BatcherConfig {
+    BatcherConfig {
+        preferred_batch_size: wait_for_count.max(1),
+        max_batch_size: 256,
+        max_wait: timeout,
+        max_queued_states: 4096,
     }
 }
 

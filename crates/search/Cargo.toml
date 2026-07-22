@@ -8,6 +8,11 @@ description = "Generic game-tree search for engine-zoo"
 engine_core = { path = "../core" }
 rand.workspace = true
 rand_distr.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
 games = { path = "../games" }
+
+[[bench]]
+name = "connect4_mcts"
+harness = false

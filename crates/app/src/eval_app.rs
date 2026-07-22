@@ -236,8 +236,7 @@ fn remote_analyze_request(server: &str, req: &AnalyzeRequest) -> Result<Analysis
         .or_else(|_| client.post(&url).json(req).send())?;
     let response = if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
         client.post(&url).json(req).send()?
-    }
-    else {
+    } else {
         response
     };
     let status = response.status();

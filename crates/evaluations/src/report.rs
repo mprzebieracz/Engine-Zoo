@@ -69,8 +69,7 @@ impl Score {
         let games = self.games();
         if games == 0 {
             0.0
-        }
-        else {
+        } else {
             self.points() / games as f64
         }
     }

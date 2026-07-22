@@ -1,65 +1,66 @@
-use super::Transition;
 use super::{
-    assign_trajectory_values, last_mover_value, select_temperature_action, ChessV2GumbelProfiles,
-    SelfPlayConfig, SelfPlayTemperature,
+    select_temperature_action, GameRequest, SearchBudget, SearchBudgetSchedule, TemperaturePhase,
+    TemperatureSchedule,
 };
-use crate::SearchResult;
-use engine_core::TerminalValue;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use search::{PositionValue, SearchResult};
 
-fn transition() -> Transition {
-    Transition {
-        state: Vec::new(),
-        policy: Vec::new(),
-        value: 0.0,
+#[test]
+fn game_id_and_purpose_produce_independent_deterministic_seeds() {
+    let first = GameRequest {
+        game_id: 3,
+        worker_id: 0,
+        seed: 7,
+    };
+    let second = GameRequest {
+        game_id: 4,
+        worker_id: 0,
+        seed: 7,
+    };
+    assert_eq!(first.seed_for(11), first.seed_for(11));
+    assert_ne!(first.seed_for(11), second.seed_for(11));
+    assert_ne!(first.seed_for(11), first.seed_for(12));
+}
+
+#[test]
+fn randomized_budget_choice_is_reproducible_and_keeps_fast_weight() {
+    let schedule = SearchBudgetSchedule::PlayoutCapRandomization {
+        full: SearchBudget::Gumbel {
+            simulations: 32,
+            max_considered_actions: 8,
+        },
+        fast: SearchBudget::Gumbel {
+            simulations: 8,
+            max_considered_actions: 4,
+        },
+        full_probability: 0.25,
+        fast_policy_weight: 0.0,
+    };
+    let mut left = SmallRng::seed_from_u64(9);
+    let mut right = SmallRng::seed_from_u64(9);
+    for _ in 0..20 {
+        assert_eq!(schedule.choose(&mut left), schedule.choose(&mut right));
     }
 }
 
 #[test]
-fn values_alternate_backwards() {
-    let mut traj: Vec<Transition> = (0..5).map(|_| transition()).collect();
-    assign_trajectory_values(&mut traj, 1.0);
-    let values: Vec<f32> = traj.iter().map(|t| t.value).collect();
-    assert_eq!(values, vec![1.0, -1.0, 1.0, -1.0, 1.0]);
-}
-
-#[test]
-fn draw_leaves_zeros() {
-    let mut traj: Vec<Transition> = (0..4).map(|_| transition()).collect();
-    assign_trajectory_values(&mut traj, 0.0);
-    assert!(traj.iter().all(|t| t.value == 0.0));
-}
-
-#[test]
-fn terminal_value_is_converted_to_the_last_movers_perspective() {
-    assert_eq!(last_mover_value(Some(TerminalValue::Loss), true), 1.0);
-    assert_eq!(last_mover_value(Some(TerminalValue::Draw), true), 0.0);
-    assert_eq!(last_mover_value(Some(TerminalValue::Win), true), -1.0);
-    assert_eq!(last_mover_value(None, false), 0.0);
-}
-
-#[test]
-fn chess_v2_defaults_use_paired_gumbel_budgets_and_temperature_schedule() {
-    let cfg = SelfPlayConfig::chess_v2_defaults();
-    assert_eq!(
-        cfg.chess_v2_gumbel_profiles,
-        Some(ChessV2GumbelProfiles::DEFAULT)
-    );
-    assert_eq!(cfg.full_simulation_probability, 0.5);
-    assert_eq!(
-        cfg.chess_v2_temperature,
-        Some(SelfPlayTemperature::default())
-    );
-    assert!(cfg.validate_chess_v2().is_ok());
-}
-
-#[test]
-fn temperature_schedule_transitions_to_argmax() {
-    let schedule = SelfPlayTemperature::default();
+fn temperature_schedule_uses_argmax_after_final_phase() {
+    let schedule = TemperatureSchedule {
+        phases: vec![
+            TemperaturePhase {
+                until_ply_exclusive: 2,
+                temperature: 1.0,
+            },
+            TemperaturePhase {
+                until_ply_exclusive: 4,
+                temperature: 0.5,
+            },
+        ],
+    };
     assert_eq!(schedule.at_ply(0), Some(1.0));
-    assert_eq!(schedule.at_ply(20), Some(0.5));
-    assert_eq!(schedule.at_ply(40), None);
+    assert_eq!(schedule.at_ply(2), Some(0.5));
+    assert_eq!(schedule.at_ply(4), None);
 }
 
 #[test]
@@ -67,10 +68,9 @@ fn temperature_sampling_returns_the_sparse_action_id() {
     let result = SearchResult {
         policy: vec![(42, 1.0)],
         selected_move: 42,
-        value: 0.0,
+        root_value: PositionValue::DRAW,
+        diagnostics: Default::default(),
     };
     let mut rng = SmallRng::seed_from_u64(7);
-    for _ in 0..100 {
-        assert_eq!(select_temperature_action(&result, Some(0.5), &mut rng), 42);
-    }
+    assert_eq!(select_temperature_action(&result, Some(0.5), &mut rng), 42);
 }

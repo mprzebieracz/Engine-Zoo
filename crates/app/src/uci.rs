@@ -1,13 +1,15 @@
-use alphazero::representation::{ChessAzRepresentation, ChessV1Representation};
+use alphazero::representation::{ChessAzRepresentation, ChessClassicRepresentation};
 use alphazero::ChessRepetitionRules;
 use alphazero::{
-    Batcher, Mcts, MctsConfig, MctsVariant, ModelConfig, RepresentedEvaluator, RunDir,
+    Batcher, BatcherConfig, ChessHistoryLength, ExperimentConfig, GameSpec, Mcts, ModelSpec,
+    RepresentedEvaluator, RunDir, SearchConfig,
 };
 use anyhow::{Context, Result};
 use engine_core::agent::PolicyMode;
 use engine_core::game::GameState;
 use engine_core::notation::GameNotation;
-use games::{ChessGame, ChessPosition};
+use games::ChessGame;
+use search::NoExtraRules;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tch::Device;
@@ -50,7 +52,7 @@ pub struct ChessUciEngine {
 }
 
 struct LoadedModel {
-    model: ModelConfig,
+    model: ModelSpec,
 }
 
 impl Default for ChessUciEngine {
@@ -103,12 +105,11 @@ impl ChessUciEngine {
             return Ok(());
         }
         let (weights, cfg) = load_config_and_model(&self.settings.run_dir, &self.settings.model)?;
-        let batcher = Batcher::new_with_network(
-            &cfg.network_config(),
+        let batcher = Batcher::new_with_model(
+            cfg.model.clone(),
             &weights,
             self.settings.device,
-            1,
-            Duration::from_millis(1),
+            batcher_config(),
         )?;
         self.batcher = Some(batcher);
         self.loaded = Some(LoadedModel { model: cfg.model });
@@ -122,52 +123,56 @@ impl ChessUciEngine {
         self.ensure_model()?;
         let simulations = simulations.unwrap_or(self.settings.simulations).max(1);
         let evaluator = self.batcher.as_ref().expect("model loaded").client();
-        match &self.loaded.as_ref().expect("model loaded").model {
-            ModelConfig::ChessScalarAzV1(_) => {
-                let mut mcts = Mcts::<ChessPosition, _, _>::new(
-                    RepresentedEvaluator::new(ChessV1Representation, evaluator),
-                    MctsConfig {
-                        simulations,
-                        eps: 0.0,
-                        ..Default::default()
-                    },
-                    ChessRepetitionRules,
-                );
-                let sampled = self.position_moves.len() < self.settings.opening_plies;
-                let result = mcts.search(
-                    &self.game.position(),
-                    self.game.repetition_context(),
-                    if sampled {
-                        PolicyMode::Explore
-                    }
-                    else {
-                        PolicyMode::Deterministic
-                    },
-                );
-                let mv = if sampled {
-                    result.sample_move(&mut rand::rng())
-                }
-                else {
-                    result.best_move()
-                };
-                Ok(games::chess::ChessUciNotation.format_move(&self.game.position(), mv))
+        let model = &self.loaded.as_ref().expect("model loaded").model;
+        let sampled = self.position_moves.len() < self.settings.opening_plies;
+        let bestmove = match model.chess_history() {
+            Some(ChessHistoryLength::One) => {
+                chess_action::<1>(evaluator, &self.game, simulations, sampled)
             }
-            ModelConfig::ChessAzV2(v2) => {
-                let sampled = self.position_moves.len() < self.settings.opening_plies;
-                let bestmove = match v2.history {
-                    1 => v2_action::<1>(evaluator, &self.game, simulations, sampled),
-                    4 => v2_action::<4>(evaluator, &self.game, simulations, sampled),
-                    8 => v2_action::<8>(evaluator, &self.game, simulations, sampled),
-                    history => anyhow::bail!("unsupported chess history {history}"),
-                }?;
-                Ok(bestmove)
+            Some(ChessHistoryLength::Four) => {
+                chess_action::<4>(evaluator, &self.game, simulations, sampled)
             }
-            ModelConfig::Connect4ScalarAz(_) => anyhow::bail!("run is not a chess model"),
-        }
+            Some(ChessHistoryLength::Eight) => {
+                chess_action::<8>(evaluator, &self.game, simulations, sampled)
+            }
+            None if model.is_chess_classic() => {
+                classic_chess_action(evaluator, &self.game, simulations, sampled)
+            }
+            None => anyhow::bail!("run is not a chess model"),
+        }?;
+        Ok(bestmove)
     }
 }
 
-fn v2_action<const HISTORY: usize>(
+fn classic_chess_action(
+    evaluator: alphazero::BatcherClient,
+    game: &ChessGame,
+    simulations: usize,
+    sampled: bool,
+) -> Result<String> {
+    let mut mcts = Mcts::<_, _, _>::new(
+        RepresentedEvaluator::new(ChessClassicRepresentation, evaluator),
+        puct_search(simulations),
+        NoExtraRules,
+    );
+    let result = mcts.search(
+        &game.position(),
+        (),
+        if sampled {
+            PolicyMode::Explore
+        } else {
+            PolicyMode::Deterministic
+        },
+    )?;
+    let mv = if sampled {
+        result.sample_move(&mut rand::rng())
+    } else {
+        result.best_move()
+    };
+    Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
+}
+
+fn chess_action<const HISTORY: usize>(
     evaluator: alphazero::BatcherClient,
     game: &ChessGame,
     simulations: usize,
@@ -175,59 +180,45 @@ fn v2_action<const HISTORY: usize>(
 ) -> Result<String> {
     let mut mcts = Mcts::<_, _, _>::new(
         RepresentedEvaluator::new(ChessAzRepresentation::<HISTORY>, evaluator),
-        MctsConfig {
-            simulations,
-            variant: MctsVariant::Puct,
-            eps: 0.0,
-            ..Default::default()
-        },
+        puct_search(simulations),
         ChessRepetitionRules,
     );
     let result = mcts.search(
-        &alphazero::representation::ChessAzState::from_game(&game),
+        &alphazero::representation::ChessAzState::from_game(game),
         game.repetition_context(),
         if sampled {
             PolicyMode::Explore
-        }
-        else {
+        } else {
             PolicyMode::Deterministic
         },
-    );
+    )?;
     let mv = if sampled {
         result.sample_move(&mut rand::rng())
-    }
-    else {
+    } else {
         result.best_move()
     };
     Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
 }
 
-fn load_config_and_model(run_dir: &Path, model: &str) -> Result<(PathBuf, alphazero::RunConfig)> {
-    let config_path = run_dir.join("config.json");
-    let config = alphazero::RunConfig::parse_json(
-        &std::fs::read_to_string(&config_path)
-            .with_context(|| format!("reading {}", config_path.display()))?,
-    )
-    .with_context(|| format!("parsing {}", config_path.display()))?;
-    config.validate()?;
+fn load_config_and_model(run_dir: &Path, model: &str) -> Result<(PathBuf, ExperimentConfig)> {
+    let (run, config, state) = RunDir::open_or_create(run_dir, || {
+        panic!("no experiment found at {}", run_dir.display())
+    })?;
     anyhow::ensure!(
-        config.model.game_name() == "chess",
-        "run is for {}, not chess",
-        config.model.game_name()
+        config.model.game == GameSpec::Chess,
+        "run is not a chess model"
     );
     let path = PathBuf::from(model);
     let weights = if path.exists() {
         path
-    }
-    else {
+    } else {
         match model {
-            "best" => run_dir.join("best.safetensors"),
-            "candidate" => run_dir.join("candidate.safetensors"),
-            "latest" => RunDir::open_or_create(run_dir, || config.clone())?
-                .0
-                .latest_checkpoint()
-                .map(|(_, p)| p)
-                .context("no numbered checkpoint found")?,
+            "best" => checkpoint_path(&run, "best"),
+            "candidate" => checkpoint_path(&run, "candidate"),
+            "latest" => run
+                .latest_checkpoint(&state)
+                .or_else(|| existing_classic_checkpoint(run.root(), "best"))
+                .context("no latest checkpoint found")?,
             name if name.starts_with("ckpt_") => run_dir.join("checkpoints").join(name),
             name => run_dir.join(name),
         }
@@ -238,6 +229,41 @@ fn load_config_and_model(run_dir: &Path, model: &str) -> Result<(PathBuf, alphaz
         weights.display()
     );
     Ok((weights, config))
+}
+
+fn checkpoint_path(run: &RunDir, name: &str) -> PathBuf {
+    let current = match name {
+        "best" => run.best_path(),
+        "candidate" => run.candidate_path(),
+        _ => unreachable!("only named checkpoint aliases are supported"),
+    };
+    if current.is_file() {
+        current
+    } else {
+        run.root().join(format!("{name}.safetensors"))
+    }
+}
+
+fn existing_classic_checkpoint(run_dir: &Path, name: &str) -> Option<PathBuf> {
+    let path = run_dir.join(format!("{name}.safetensors"));
+    path.is_file().then_some(path)
+}
+
+fn puct_search(simulations: usize) -> SearchConfig {
+    let mut search = search::PuctConfig::default();
+    search.common.simulations = simulations.max(1);
+    search.common.leaf_batch_size = 1;
+    search.root_noise = None;
+    SearchConfig::Puct(search)
+}
+
+fn batcher_config() -> BatcherConfig {
+    BatcherConfig {
+        preferred_batch_size: 1,
+        max_batch_size: 256,
+        max_wait: Duration::from_millis(1),
+        max_queued_states: 4096,
+    }
 }
 
 #[cfg(test)]

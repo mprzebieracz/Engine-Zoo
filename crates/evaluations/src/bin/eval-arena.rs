@@ -3,7 +3,7 @@ use checkpoint_eval::fastchess::{FastchessCommand, Openings};
 use checkpoint_eval::match_suite::run_match;
 use checkpoint_eval::model_engine::{infer_run_dir, ModelEngine};
 use checkpoint_eval::report::{EvaluationSpec, SearchSpec, SCHEMA_VERSION};
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
@@ -26,12 +26,6 @@ struct Args {
     /// Optional paired EPD opening set.
     #[arg(long)]
     openings: Option<PathBuf>,
-    /// Optional guard against selecting a checkpoint from the wrong run. When
-    /// omitted, the architecture is read from each run's config.json.
-    #[arg(long, value_enum)]
-    candidate_architecture: Option<Architecture>,
-    #[arg(long, value_enum)]
-    baseline_architecture: Option<Architecture>,
     #[arg(long)]
     output_dir: PathBuf,
     #[arg(long, default_value_t = 800)]
@@ -63,40 +57,15 @@ struct Args {
     opening_plies: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum Architecture {
-    Legacy,
-    ChessAzV2,
-}
-
-fn architecture_for_run(run_dir: &Path) -> Result<Architecture> {
-    let config = alphazero::RunConfig::parse_json(&std::fs::read_to_string(
-        run_dir.join("config.json"),
-    )?)?;
-    Ok(architecture_from_config(&config))
-}
-
-fn architecture_from_config(config: &alphazero::RunConfig) -> Architecture {
-    match &config.model {
-        alphazero::ModelConfig::ChessScalarAzV1(_) => Architecture::Legacy,
-        alphazero::ModelConfig::ChessAzV2(_) => Architecture::ChessAzV2,
-        alphazero::ModelConfig::Connect4ScalarAz(_) => Architecture::Legacy,
-    }
-}
-
-fn validate_architecture(
-    run_dir: &Path,
-    requested: Option<Architecture>,
-    side: &str,
-) -> Result<()> {
-    let actual = architecture_for_run(run_dir)?;
-    if let Some(requested) = requested {
-        anyhow::ensure!(
-            requested == actual,
-            "{side} architecture does not match its checkpoint config ({})",
-            run_dir.display()
-        );
-    }
+fn validate_chess_run(run_dir: &Path) -> Result<()> {
+    let (_, config, _) = alphazero::RunDir::open_or_create(run_dir, || {
+        panic!("no experiment found at {}", run_dir.display())
+    })?;
+    anyhow::ensure!(
+        config.model.game == alphazero::GameSpec::Chess,
+        "{} is not a chess run",
+        run_dir.display()
+    );
     Ok(())
 }
 
@@ -125,8 +94,8 @@ fn main() -> Result<()> {
         .run_dir
         .clone()
         .unwrap_or_else(|| infer_run_dir(&args.baseline));
-    validate_architecture(&candidate_run_dir, args.candidate_architecture, "candidate")?;
-    validate_architecture(&baseline_run_dir, args.baseline_architecture, "baseline")?;
+    validate_chess_run(&candidate_run_dir)?;
+    validate_chess_run(&baseline_run_dir)?;
     let candidate_simulations = args.candidate_simulations.unwrap_or(args.simulations);
     let baseline_simulations = args.baseline_simulations.unwrap_or(args.simulations);
     anyhow::ensure!(
@@ -201,38 +170,4 @@ fn main() -> Result<()> {
         report.smoothed_elo_delta
     );
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alphazero::{
-        ChessAzV2Config, ChessScalarAzV1Config, ModelConfig, RunConfig, RUN_CONFIG_FORMAT_VERSION,
-    };
-
-    fn config(model: ModelConfig) -> RunConfig {
-        RunConfig {
-            format_version: RUN_CONFIG_FORMAT_VERSION,
-            model,
-        }
-    }
-
-    fn scalar() -> ModelConfig {
-        ModelConfig::ChessScalarAzV1(ChessScalarAzV1Config {
-            num_res_blocks: 1,
-            num_filters: 1,
-        })
-    }
-
-    #[test]
-    fn detects_checkpoint_architecture_from_its_run_config() {
-        assert_eq!(
-            architecture_from_config(&config(scalar())),
-            Architecture::Legacy
-        );
-        assert_eq!(
-            architecture_from_config(&config(ModelConfig::ChessAzV2(ChessAzV2Config::default()))),
-            Architecture::ChessAzV2
-        );
-    }
 }

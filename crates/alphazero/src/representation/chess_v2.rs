@@ -1,6 +1,6 @@
+use super::chess_v2_state::ChessAzState;
 use super::{Action, AlphaZeroRepresentation};
 use chess::{Board, ChessMove, Color, File, Piece, Rank, Square};
-use super::chess_v2_state::ChessAzState;
 
 const DIRS: [(i32, i32); 8] = [
     (-1, 0),

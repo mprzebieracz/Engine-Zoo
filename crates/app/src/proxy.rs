@@ -1,9 +1,6 @@
+use alphazero::{analyze_game_mcts, analyze_game_net, Analysis, AnalyzeConfig, AnalyzeMode};
 use alphazero::{
-    Batcher, InferencePrecision, Mcts, MctsConfig, MctsVariant, ModelConfig, NetworkConfig,
-    RunConfig, RunDir,
-};
-use alphazero::{
-    analyze_game_mcts, analyze_game_net, Analysis, AnalyzeConfig, AnalyzeMode,
+    Batcher, BatcherConfig, ExperimentConfig, InferencePrecision, Mcts, RunDir, SearchConfig,
 };
 use anyhow::Result;
 use axum::extract::State;
@@ -43,6 +40,23 @@ use crate::evaluation_jobs::{CreateJob, EvaluationService};
 use crate::visualization::render_chess_play_page;
 
 const BATCH_TIMEOUT: Duration = Duration::from_millis(2);
+
+fn puct_search(simulations: usize) -> SearchConfig {
+    let mut search = search::PuctConfig::default();
+    search.common.simulations = simulations.max(1);
+    search.common.leaf_batch_size = 1;
+    search.root_noise = None;
+    SearchConfig::Puct(search)
+}
+
+fn batcher_config(wait_for_count: usize, timeout: Duration) -> BatcherConfig {
+    BatcherConfig {
+        preferred_batch_size: wait_for_count.max(1),
+        max_batch_size: 256,
+        max_wait: timeout,
+        max_queued_states: 4096,
+    }
+}
 
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -114,7 +128,7 @@ struct SessionState<G: GameState> {
     human_turn: bool,
     simulations: usize,
     wait_for_count: usize,
-    v2_history: Option<usize>,
+    chess_history: Option<alphazero::ChessHistoryLength>,
 }
 
 pub async fn serve(cfg: ServeConfig) -> Result<()> {
@@ -184,29 +198,41 @@ mod tests {
     }
 
     #[test]
-    fn v2_analysis_state_replays_request_history_for_all_supported_lengths() {
+    fn chess_analysis_state_replays_request_history_for_all_supported_lengths() {
         let position = ChessSetup {
             fen: None,
             moves: vec!["e2e4".into(), "e7e5".into(), "g1f3".into(), "b8c6".into()],
         };
 
         let game = ChessGame::from_setup(&position).unwrap();
-        assert_eq!(alphazero::representation::ChessAzState::<1>::from_game(&game).board(), game.board());
-        assert_eq!(alphazero::representation::ChessAzState::<4>::from_game(&game).board(), game.board());
-        assert_eq!(alphazero::representation::ChessAzState::<8>::from_game(&game).board(), game.board());
+        assert_eq!(
+            alphazero::representation::ChessAzState::<1>::from_game(&game).board(),
+            game.board()
+        );
+        assert_eq!(
+            alphazero::representation::ChessAzState::<4>::from_game(&game).board(),
+            game.board()
+        );
+        assert_eq!(
+            alphazero::representation::ChessAzState::<8>::from_game(&game).board(),
+            game.board()
+        );
     }
 
     #[test]
-    fn v2_analysis_state_accepts_a_fen_without_history() {
+    fn chess_analysis_state_accepts_a_fen_without_history() {
         let position = ChessSetup {
             fen: Some("8/8/8/8/8/8/8/K6k b - - 0 1".into()),
             moves: Vec::new(),
         };
         let game = ChessGame::from_setup(&position).unwrap();
-        assert_eq!(alphazero::representation::ChessAzState::<4>::from_game(&game).board(), game.board());
+        assert_eq!(
+            alphazero::representation::ChessAzState::<4>::from_game(&game).board(),
+            game.board()
+        );
     }
 
-    fn assert_v2_session<const HISTORY: usize>() {
+    fn assert_chess_session<const HISTORY: usize>() {
         let mut session = SessionState {
             id: 1,
             game: ChessGame::default(),
@@ -216,7 +242,12 @@ mod tests {
             human_turn: true,
             simulations: 1,
             wait_for_count: 1,
-            v2_history: Some(HISTORY),
+            chess_history: Some(match HISTORY {
+                1 => alphazero::ChessHistoryLength::One,
+                4 => alphazero::ChessHistoryLength::Four,
+                8 => alphazero::ChessHistoryLength::Eight,
+                _ => unreachable!(),
+            }),
         };
         let mv = games::chess::ChessUciNotation
             .parse_move(&session.game.position(), "e2e4")
@@ -244,14 +275,22 @@ mod tests {
             alphazero::representation::ChessAzState::<HISTORY>::from_game(&session.game).board()
         );
         assert_eq!(session.moves, ["e2e4"]);
-        assert_eq!(session.v2_history, Some(HISTORY));
+        assert_eq!(
+            session.chess_history,
+            Some(match HISTORY {
+                1 => alphazero::ChessHistoryLength::One,
+                4 => alphazero::ChessHistoryLength::Four,
+                8 => alphazero::ChessHistoryLength::Eight,
+                _ => unreachable!(),
+            })
+        );
     }
 
     #[test]
-    fn v2_session_views_and_native_moves_preserve_all_history_lengths() {
-        assert_v2_session::<1>();
-        assert_v2_session::<4>();
-        assert_v2_session::<8>();
+    fn chess_session_views_and_native_moves_preserve_all_history_lengths() {
+        assert_chess_session::<1>();
+        assert_chess_session::<4>();
+        assert_chess_session::<8>();
     }
 
     #[test]

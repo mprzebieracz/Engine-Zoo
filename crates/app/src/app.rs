@@ -1,6 +1,6 @@
 use crate::players::{AgentSpec, AlphaZeroAgent, HumanAgent, PlayerAgent};
 use crate::proxy::{open_existing_run, resolve_model, run_dir, serve, GameKind, ServeConfig};
-use alphazero::ModelConfig;
+use alphazero::GameSpec;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use engine_core::agent::{Agent, PolicyMode};
@@ -75,7 +75,9 @@ pub async fn run() -> Result<()> {
 fn play_cmd(args: PlayArgs) -> Result<()> {
     match args.game {
         GameKind::Connect4 => run_game::<Connect4>(args),
-        GameKind::Chess => run_game::<ChessGame>(args),
+        GameKind::Chess => anyhow::bail!(
+            "interactive chess uses a history-aware representation; use UCI or the session API"
+        ),
     }
 }
 
@@ -150,18 +152,16 @@ fn build_agent<G: crate::players::InteractiveGame>(
         AgentSpec::AlphaZero { model } => {
             let (_, cfg) = open_existing_run(run_dir, interactive_game_name::<G>())?;
             let weights = resolve_model(run_dir, model);
-            let compatible = match (&cfg.model, interactive_game_name::<G>()) {
-                (ModelConfig::Connect4ScalarAz(_), "connect4")
-                | (ModelConfig::ChessScalarAzV1(_), "chess") => true,
-                (ModelConfig::ChessAzV2(_), "chess") => false,
-                _ => false,
-            };
+            let compatible = matches!(
+                (&cfg.model.game, interactive_game_name::<G>()),
+                (GameSpec::Connect4, "connect4")
+            );
             anyhow::ensure!(
                 compatible,
-                "interactive play supports Connect4 scalar AlphaZero and Chess scalar AlphaZero v1; use serve/UCI for Chess v2"
+                "interactive play only supports Connect4; use UCI or the session API for Chess"
             );
             Ok(PlayerAgent::AlphaZero(Box::new(AlphaZeroAgent::<G>::new(
-                &cfg.network_config(),
+                &cfg.model,
                 &weights,
                 device,
                 simulations,

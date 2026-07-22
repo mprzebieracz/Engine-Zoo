@@ -6,7 +6,7 @@ mod position;
 mod repetition;
 mod zobrist;
 
-pub use game::{ChessGame, ChessRepetitionContext};
+pub use game::{ChessAdjudication, ChessGame, ChessRepetitionContext};
 pub use notation::ChessUciNotation;
 pub use position::ChessPosition;
 #[cfg(test)]
@@ -25,7 +25,7 @@ pub trait ChessRepetitionState: GameState<Move = chess::ChessMove> {
 }
 
 #[cfg(test)]
-use chess::{Board, BoardStatus, ChessMove, Color, Piece, Square};
+use chess::{ChessMove, Color, Piece, Square};
 
 #[cfg(test)]
 mod tests;

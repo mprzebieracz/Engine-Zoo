@@ -29,8 +29,7 @@ impl Bins {
             let p = root.join("target/release").join(name);
             if p.is_file() {
                 p
-            }
-            else {
+            } else {
                 root.join("target/debug").join(name)
             }
         };
