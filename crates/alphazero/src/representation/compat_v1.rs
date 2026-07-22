@@ -1,7 +1,4 @@
-//! Compatibility representation for the original chess AlphaZero models.
-//!
-//! This is deliberately isolated from the native game and remains available while
-//! the legacy evaluator and checkpoints are migrated in a later phase.
+//! Classic chess representation used by the original scalar AlphaZero model.
 
 use super::{Action, AlphaZeroRepresentation};
 use chess::{ChessMove, Color, File, Piece, Rank, Square};
@@ -16,10 +13,9 @@ const PIECES: [Piece; 6] = [
     Piece::King,
 ];
 
-/// Zero-sized adapter preserving the original 19-plane chess representation and
-/// 64×64×5 policy layout for old checkpoints and models.
+/// Zero-sized adapter for the 19-plane, 64×64×5 classic chess model.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ChessV1Representation;
+pub struct ChessClassicRepresentation;
 
 fn cell(side: Color, square: Square) -> (usize, usize) {
     let rank = square.get_rank().to_index();
@@ -50,7 +46,7 @@ fn square(index: usize) -> Option<Square> {
         .then(|| Square::make_square(Rank::from_index(7 - index / 8), File::from_index(index % 8)))
 }
 
-impl AlphaZeroRepresentation<ChessPosition> for ChessV1Representation {
+impl AlphaZeroRepresentation<ChessPosition> for ChessClassicRepresentation {
     const STATE_SHAPE: [usize; 3] = [19, 8, 8];
     const ACTION_SIZE: usize = 64 * 64 * 5;
 
@@ -124,14 +120,14 @@ mod tests {
     use std::str::FromStr;
 
     fn check_move(state: &ChessPosition, mv: ChessMove) {
-        let r = ChessV1Representation;
+        let r = ChessClassicRepresentation;
         let action = r.move_to_action(state, mv);
         assert_eq!(r.action_to_move(state, action), Some(mv));
     }
 
     fn golden(game: &ChessGame) {
         let state = game.position();
-        let r = ChessV1Representation;
+        let r = ChessClassicRepresentation;
         let mut actual = vec![0.0; 19 * 64];
         r.encode_state(&state, &mut actual);
         let mut actions = HashSet::new();
@@ -152,8 +148,7 @@ mod tests {
         ] {
             let game = if fen == "startpos" {
                 ChessGame::default()
-            }
-            else {
+            } else {
                 ChessGame::from_fen(fen).unwrap()
             };
             golden(&game);
@@ -211,7 +206,7 @@ mod tests {
 
     #[test]
     fn key_includes_encoded_ply_for_identical_boards() {
-        let r = ChessV1Representation;
+        let r = ChessClassicRepresentation;
         let a = ChessGame::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
             .unwrap()
             .position();
@@ -236,7 +231,7 @@ mod tests {
         let other = ChessGame::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1")
             .unwrap()
             .position();
-        let r = ChessV1Representation;
+        let r = ChessClassicRepresentation;
         let mv = ChessMove::from_str("e2e4").unwrap();
         let action = r.move_to_action(&source, mv);
         assert_eq!(r.action_to_move(&source, action), Some(mv));

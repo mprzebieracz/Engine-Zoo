@@ -24,8 +24,7 @@ pub enum UciCommand {
 
 pub fn parse_command(line: &str) -> UciCommand {
     let mut words = line.split_whitespace();
-    let Some(command) = words.next()
-    else {
+    let Some(command) = words.next() else {
         return UciCommand::Unknown;
     };
     match command.to_ascii_lowercase().as_str() {
@@ -61,20 +60,17 @@ fn parse_setoption(words: Vec<&str>) -> UciCommand {
 }
 
 fn parse_position(words: Vec<&str>) -> UciCommand {
-    let Some(first) = words.first().copied()
-    else {
+    let Some(first) = words.first().copied() else {
         return UciCommand::Unknown;
     };
     let (fen, moves_at) = if first.eq_ignore_ascii_case(STARTPOS) {
         (None, 1)
-    }
-    else if first.eq_ignore_ascii_case("fen") {
+    } else if first.eq_ignore_ascii_case("fen") {
         if words.len() < 7 {
             return UciCommand::Unknown;
         }
         (Some(words[1..7].join(" ")), 7)
-    }
-    else {
+    } else {
         return UciCommand::Unknown;
     };
     let moves = if words.get(moves_at) == Some(&"moves") {
@@ -82,11 +78,9 @@ fn parse_position(words: Vec<&str>) -> UciCommand {
             .iter()
             .map(|s| (*s).to_owned())
             .collect()
-    }
-    else if moves_at == words.len() {
+    } else if moves_at == words.len() {
         Vec::new()
-    }
-    else {
+    } else {
         return UciCommand::Unknown;
     };
     UciCommand::Position { fen, moves }

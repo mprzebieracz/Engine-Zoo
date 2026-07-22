@@ -6,12 +6,12 @@ pub mod compat_v1;
 pub mod connect4;
 pub use chess_v2::ChessAzRepresentation;
 pub use chess_v2_state::ChessAzState;
-pub use compat_v1::ChessV1Representation;
+pub use compat_v1::ChessClassicRepresentation;
 pub use connect4::Connect4AzRepresentation;
 
 /// Index into the fixed policy vector of one AlphaZero representation.
 /// This is not a native game move.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Action(u32);
 
 impl Action {

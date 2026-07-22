@@ -1,11 +1,13 @@
-use alphazero::representation::{ChessAzRepresentation, ChessV1Representation};
-use alphazero::{Batcher, Mcts, MctsConfig, ModelConfig, RepresentedEvaluator};
+use alphazero::representation::{ChessAzRepresentation, ChessClassicRepresentation};
 use alphazero::ChessRepetitionRules;
-use search::NoExtraRules;
+use alphazero::{
+    Batcher, BatcherConfig, ChessHistoryLength, GameSpec, Mcts, RepresentedEvaluator, SearchConfig,
+};
 use anyhow::{Context, Result};
 use engine_core::notation::GameNotation;
 use games::chess::ChessUciNotation;
 use games::ChessGame;
+use search::NoExtraRules;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -177,59 +179,62 @@ pub fn evaluate_checkpoint(
     run_dir: &Path,
     checkpoint: &Path,
     device: Device,
-    mcts_config: MctsConfig,
+    mcts_config: SearchConfig,
 ) -> Result<(Vec<PuzzleResult>, PuzzleSummary)> {
-    let config = alphazero::RunConfig::parse_json(
-        &std::fs::read_to_string(run_dir.join("config.json"))
-            .with_context(|| format!("reading {}", run_dir.join("config.json").display()))?,
-    )
-    .with_context(|| format!("parsing {}/config.json", run_dir.display()))?;
+    let (_, config, _) = alphazero::RunDir::open_or_create(run_dir, || {
+        panic!("no experiment found at {}", run_dir.display())
+    })?;
     anyhow::ensure!(
-        config.model.game_name() == "chess",
+        config.model.game == GameSpec::Chess,
         "{} is not a chess run",
         run_dir.display()
     );
-    let network = config.network_config();
     let batcher =
-        Batcher::new_with_network(&network, checkpoint, device, 1, Duration::from_millis(2))?;
-    match config.model {
-        ModelConfig::ChessScalarAzV1(_) => {
-            evaluate_legacy_puzzles(puzzles, batcher.client(), mcts_config)
+        Batcher::new_with_model(config.model.clone(), checkpoint, device, batcher_config())?;
+    match config.model.chess_history() {
+        Some(ChessHistoryLength::One) => {
+            evaluate_chess_puzzles::<1>(puzzles, batcher.client(), mcts_config)
         }
-        ModelConfig::ChessAzV2(v2) => match v2.history {
-            1 => evaluate_v2_puzzles::<1>(puzzles, batcher.client(), mcts_config),
-            4 => evaluate_v2_puzzles::<4>(puzzles, batcher.client(), mcts_config),
-            8 => evaluate_v2_puzzles::<8>(puzzles, batcher.client(), mcts_config),
-            history => anyhow::bail!("unsupported chess-az-v2 history length {history}"),
-        },
-        ModelConfig::Connect4ScalarAz(_) => unreachable!("validated chess run"),
+        Some(ChessHistoryLength::Four) => {
+            evaluate_chess_puzzles::<4>(puzzles, batcher.client(), mcts_config)
+        }
+        Some(ChessHistoryLength::Eight) => {
+            evaluate_chess_puzzles::<8>(puzzles, batcher.client(), mcts_config)
+        }
+        None if config.model.is_chess_classic() => {
+            evaluate_classic_chess_puzzles(puzzles, batcher.client(), mcts_config)
+        }
+        None => unreachable!("validated chess run"),
     }
 }
 
-fn evaluate_legacy_puzzles(
+fn evaluate_classic_chess_puzzles(
     puzzles: &[Puzzle],
     evaluator: alphazero::BatcherClient,
-    mcts_config: MctsConfig,
+    mcts_config: SearchConfig,
 ) -> Result<(Vec<PuzzleResult>, PuzzleSummary)> {
     let mut mcts = Mcts::new(
-        RepresentedEvaluator::new(ChessV1Representation, evaluator),
+        RepresentedEvaluator::new(ChessClassicRepresentation, evaluator),
         mcts_config,
         NoExtraRules,
     );
     evaluate_moves(puzzles, |puzzle| {
         let game = ChessGame::from_fen(&puzzle.fen)?;
-        let state = game.position();
         let mv = mcts
-            .search(&state, (), engine_core::agent::PolicyMode::Deterministic)
+            .search(
+                &game.position(),
+                (),
+                engine_core::agent::PolicyMode::Deterministic,
+            )?
             .best_move();
         Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
     })
 }
 
-fn evaluate_v2_puzzles<const HISTORY: usize>(
+fn evaluate_chess_puzzles<const HISTORY: usize>(
     puzzles: &[Puzzle],
     evaluator: alphazero::BatcherClient,
-    mcts_config: MctsConfig,
+    mcts_config: SearchConfig,
 ) -> Result<(Vec<PuzzleResult>, PuzzleSummary)> {
     let mut mcts = Mcts::new(
         RepresentedEvaluator::new(ChessAzRepresentation::<HISTORY>, evaluator),
@@ -245,10 +250,19 @@ fn evaluate_v2_puzzles<const HISTORY: usize>(
                 &state,
                 repetition_context,
                 engine_core::agent::PolicyMode::Deterministic,
-            )
+            )?
             .best_move();
         Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
     })
+}
+
+fn batcher_config() -> BatcherConfig {
+    BatcherConfig {
+        preferred_batch_size: 1,
+        max_batch_size: 128,
+        max_wait: Duration::from_millis(2),
+        max_queued_states: 1024,
+    }
 }
 
 #[cfg(test)]
@@ -335,27 +349,14 @@ mod tests {
     }
 
     #[test]
-    fn v2_runs_select_the_explicit_v2_network_format() {
-        let legacy = alphazero::RunConfig {
-            format_version: alphazero::RUN_CONFIG_FORMAT_VERSION,
-            model: alphazero::ModelConfig::ChessScalarAzV1(
-                alphazero::ChessScalarAzV1Config {
-                    num_res_blocks: 1,
-                    num_filters: 1,
-                },
-            ),
-        };
-        assert!(matches!(
-            legacy.network_config(),
-            alphazero::NetworkConfig::Legacy(_)
-        ));
-        let v2 = alphazero::RunConfig {
-            format_version: alphazero::RUN_CONFIG_FORMAT_VERSION,
-            model: alphazero::ModelConfig::ChessAzV2(Default::default()),
-        };
-        assert!(matches!(
-            v2.network_config(),
-            alphazero::NetworkConfig::ChessAzV2(_)
-        ));
+    fn chess_run_exposes_its_history_through_the_model_spec() {
+        let model = alphazero::ModelSpec::chess_se(
+            alphazero::ChessHistoryLength::Four,
+            alphazero::ValueHeadConfig::Wdl { hidden: 128 },
+        );
+        assert_eq!(
+            model.chess_history(),
+            Some(alphazero::ChessHistoryLength::Four)
+        );
     }
 }

@@ -1,10 +1,12 @@
-use engine_core::game::{GameState, TerminalValue};
+use crate::PositionValue;
+use engine_core::game::GameState;
 
 /// Result of applying rules external to the game state's local terminal test.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RuleResult {
     Continue,
-    Terminal(TerminalValue),
+    /// Value from the player-to-move perspective of the entered state.
+    Terminal(PositionValue),
 }
 
 /// Adjudication and per-search state used while traversing an MCTS tree.
@@ -58,6 +60,7 @@ impl<G: GameState> SearchRules<G> for NoExtraRules {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::game::TerminalValue;
 
     #[derive(Clone, Copy, Debug, Default)]
     struct State;

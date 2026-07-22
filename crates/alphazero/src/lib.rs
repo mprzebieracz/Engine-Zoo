@@ -2,8 +2,8 @@
 
 mod analysis;
 mod batcher;
-mod checkpoint;
 mod evaluator;
+pub mod experiment;
 mod network;
 mod replay;
 pub mod representation;
@@ -15,27 +15,36 @@ pub use analysis::{
     analyze_game_mcts, analyze_game_mcts_with_repetitions, analyze_game_net, Analysis,
     AnalyzeConfig, AnalyzeMode,
 };
-pub use batcher::{Batcher, BatcherClient, BatcherStats, InferencePrecision};
-pub use checkpoint::{
-    ChessScalarAzV1Config, Connect4ScalarAzConfig, ModelConfig, RunConfig, RunDir,
-    RUN_CONFIG_FORMAT_VERSION,
+pub use batcher::{
+    Batcher, BatcherClient, BatcherConfig, BatcherError, BatcherStats, CombinedEncodedBatch,
+    InferenceBackend, InferencePrecision, TchInferenceBackend,
 };
 pub use evaluator::{EncodedEvalBatch, EncodedEvaluator, RepresentedEvaluator};
-pub use network::{
-    wdl_scalar, AlphaZeroNet, ChessAzV2Config, ChessAzV2Net, LegacyAlphaZeroNet, NetConfig,
-    Network, NetworkConfig, NetworkOutput,
+pub use experiment::{
+    ExperimentConfig, ReplayConfig, RunDir, RunState, EXPERIMENT_FORMAT_VERSION,
+    STATE_FORMAT_VERSION,
 };
-pub use replay::{ReplayBatch, ReplayBuffer, SparsePolicyBatch, Transition};
+pub use network::{
+    ChessHistoryLength, ClassicResidualNet, GameSpec, ModelSpec, Network, NetworkSpec,
+    PolicyHeadConfig, RawNetworkOutput, RawValueOutput, RepresentationSpec, ResidualNetworkConfig,
+    ResidualTrunkConfig, SeResidualNet, ValueHeadConfig,
+};
+pub use replay::{
+    Outcome, ReplayBatch, ReplayBuffer, ReplaySample, SampleMetadata, SearchKind, SparsePolicy,
+    SparsePolicyBatch, TrainingWeights,
+};
 pub use representation::{Action, AlphaZeroRepresentation};
 pub use rules::{ChessNodeMeta, ChessRepetitionRules};
 pub use search::{
-    EvalTable, EvalTableStats, Evaluation, GumbelSearchProfile, Mcts, MctsConfig, MctsVariant,
-    NoExtraRules, PolicyValueEvaluator, RuleResult, SearchResult, SearchRules,
+    CommonSearchConfig, CompletedQConfig, DirichletConfig, EvalTable, EvalTableStats, Evaluation,
+    EvaluationError, FpuConfig, GumbelConfig, InFlightConfig, Mcts, NoExtraRules,
+    PolicyValueEvaluator, PuctConfig, PuctSelectionConfig, RuleResult, SearchConfig,
+    SearchDiagnostics, SearchError, SearchResult, SearchRules,
 };
 pub use selfplay::{
-    select_temperature_action, self_play, ChessV2GumbelProfiles, SelfPlayConfig, SelfPlayStats,
-    SelfPlayTemperature,
+    select_temperature_action, ChessSelfPlayWorkerFactory, CompletedGame, GameRequest,
+    GenericSelfPlayWorkerFactory, GumbelMoveSelection, ResignationConfig, SearchBudget,
+    SearchBudgetSchedule, SelfPlayConfig, SelfPlayCoordinator, SelfPlayStats, SelfPlayWorker,
+    SelfPlayWorkerFactory, TemperaturePhase, TemperatureSchedule,
 };
-pub use trainer::{
-    build_optimizer, train, train_chess_az_v2, wdl_cross_entropy, TrainConfig, TrainMetrics,
-};
+pub use trainer::{build_optimizer, train, wdl_cross_entropy, TrainConfig, TrainMetrics};

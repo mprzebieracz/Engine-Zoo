@@ -154,8 +154,7 @@ pub fn render_bench_report(report: &BenchReport<'_>) -> String {
     let correct = report.rows.iter().filter(|r| r.correct).count();
     let accuracy = if total == 0 {
         0.0
-    }
-    else {
+    } else {
         correct as f64 / total as f64
     };
     let rows = report
@@ -253,8 +252,7 @@ fn render_report_row(index: usize, row: &BenchReportRow) -> String {
     let status = if row.correct { "pass" } else { "fail" };
     let expected = if row.expected.is_empty() {
         "none".to_owned()
-    }
-    else {
+    } else {
         row.expected.join(", ")
     };
     let category = row.category.as_deref().unwrap_or("uncategorized");
@@ -315,8 +313,7 @@ fn render_ascii_board(board: &str) -> String {
     let mut cells = String::new();
     for line in board.lines().take(8) {
         let mut parts = line.split_whitespace();
-        let Some(rank) = parts.next()
-        else {
+        let Some(rank) = parts.next() else {
             continue;
         };
         for (file, piece) in parts.take(8).enumerate() {

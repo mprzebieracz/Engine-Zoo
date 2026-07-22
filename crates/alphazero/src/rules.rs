@@ -1,6 +1,5 @@
-use engine_core::game::TerminalValue;
 use games::{ChessRepetitionContext, ChessRepetitionState};
-use search::{RuleResult, SearchRules};
+use search::{PositionValue, RuleResult, SearchRules};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ChessRepetitionRules;
@@ -34,14 +33,12 @@ impl<G: ChessRepetitionState> SearchRules<G> for ChessRepetitionRules {
     ) -> RuleResult {
         let hash = if meta.initialized {
             meta.hash
-        }
-        else {
+        } else {
             state.repetition_hash()
         };
         let repetitions_before = if meta.initialized {
             meta.repetitions_before_current
-        }
-        else {
+        } else {
             let mut count = context.occurrences_before_root(hash);
             for seen in path.iter().rev().take(state.reversible_plies()) {
                 count = count.saturating_add(u8::from(*seen == hash));
@@ -52,7 +49,7 @@ impl<G: ChessRepetitionState> SearchRules<G> for ChessRepetitionRules {
             count
         };
         state.set_current_repetitions_before(repetitions_before);
-        let result = (repetitions_before >= 2).then_some(RuleResult::Terminal(TerminalValue::Draw));
+        let result = (repetitions_before >= 2).then_some(RuleResult::Terminal(PositionValue::DRAW));
         path.push(hash);
         result.unwrap_or(RuleResult::Continue)
     }
@@ -186,7 +183,7 @@ mod tests {
                 &mut path,
                 &mut ChessNodeMeta::default()
             ),
-            RuleResult::Terminal(TerminalValue::Draw)
+            RuleResult::Terminal(PositionValue::DRAW)
         );
         assert_eq!(third.repetitions_before, 2);
         assert_eq!(path, [10, 20, 10, 20, 10]);

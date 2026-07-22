@@ -1,7 +1,7 @@
 use crate::representation::AlphaZeroRepresentation;
 use crate::ChessRepetitionRules;
 use crate::RepresentedEvaluator;
-use crate::{EncodedEvaluator, Mcts, MctsConfig};
+use crate::{EncodedEvaluator, Mcts, SearchConfig};
 use anyhow::Result;
 use engine_core::agent::PolicyMode;
 use engine_core::game::GameState;
@@ -40,7 +40,7 @@ pub struct Analysis {
 
 pub struct AnalyzeConfig {
     pub mode: AnalyzeMode,
-    pub mcts: MctsConfig,
+    pub mcts: SearchConfig,
     pub wait_for_count: usize,
     pub timeout: Duration,
 }
@@ -63,7 +63,7 @@ where
         std::slice::from_ref(&game),
         &legal,
         &[0, legal.len() as u32],
-    );
+    )?;
     anyhow::ensure!(eval.len() == 1, "evaluator returned {} results", eval.len());
     let probs = softmax(&eval[0].logits);
     let policy: Vec<MoveScore> = legal
@@ -75,7 +75,7 @@ where
             p,
         })
         .collect();
-    let mut analysis = with_best(eval[0].value, policy.clone());
+    let mut analysis = with_best(eval[0].value.as_f32(), policy.clone());
     analysis.network_policy = policy;
     Ok(analysis)
 }
@@ -96,7 +96,7 @@ where
     Rep: AlphaZeroRepresentation<G>,
     Notation: GameNotation<G>,
 {
-    let result = mcts.search(&game, context, PolicyMode::Deterministic);
+    let result = mcts.search(&game, context, PolicyMode::Deterministic)?;
     let legal: Vec<_> = game.legal_moves().collect();
     let policy: Vec<MoveScore> = legal
         .into_iter()
@@ -106,10 +106,10 @@ where
             p: result.probability(action),
         })
         .collect();
-    let mut analysis = with_best(result.value, policy.clone());
+    let mut analysis = with_best(result.root_value.as_f32(), policy.clone());
     analysis.network_value = network.value;
     analysis.network_policy = network.policy;
-    analysis.mcts_value = Some(result.value);
+    analysis.mcts_value = Some(result.root_value.as_f32());
     analysis.mcts_policy = policy;
     Ok(analysis)
 }

@@ -49,12 +49,14 @@ fn main() -> Result<()> {
         &args.run_dir,
         &args.checkpoint,
         device(&args.device)?,
-        alphazero::MctsConfig {
-            simulations: args.simulations,
-            leaf_batch_size: args.leaf_batch_size,
-            eps: 0.0,
+        alphazero::SearchConfig::Puct(alphazero::PuctConfig {
+            common: alphazero::CommonSearchConfig {
+                simulations: args.simulations,
+                leaf_batch_size: args.leaf_batch_size,
+            },
+            root_noise: None,
             ..Default::default()
-        },
+        }),
     )?;
     if let Some(parent) = args.output.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;

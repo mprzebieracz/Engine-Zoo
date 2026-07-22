@@ -75,8 +75,7 @@ impl Stockfish {
         self.ready()?;
         let position = if moves.is_empty() {
             "position startpos".to_owned()
-        }
-        else {
+        } else {
             format!("position startpos moves {}", moves.join(" "))
         };
         self.send(&position)?;

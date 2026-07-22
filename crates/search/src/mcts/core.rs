@@ -1,5 +1,5 @@
 use super::cache::EvalTable;
-use super::{MctsConfig, MctsVariant, Node};
+use super::{CommonSearchConfig, GumbelConfig, Node, SearchConfig};
 use crate::{PolicyValueEvaluator, SearchRules};
 use engine_core::game::GameState;
 use rand::rngs::SmallRng;
@@ -9,24 +9,15 @@ use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct CoreConfig {
-    pub(super) c_init: f32,
-    pub(super) c_base: f32,
     pub(super) simulations: usize,
     pub(super) leaf_batch_size: usize,
-    pub(super) eps: f32,
-    pub(super) alpha: f32,
-    pub(super) fpu_reduction: f32,
 }
-impl CoreConfig {
-    pub(super) fn from_mcts(c: MctsConfig) -> Self {
+
+impl From<CommonSearchConfig> for CoreConfig {
+    fn from(config: CommonSearchConfig) -> Self {
         Self {
-            c_init: c.c_init,
-            c_base: c.c_base,
-            simulations: c.simulations,
-            leaf_batch_size: c.leaf_batch_size,
-            eps: c.eps,
-            alpha: c.alpha,
-            fpu_reduction: c.fpu_reduction,
+            simulations: config.simulations,
+            leaf_batch_size: config.leaf_batch_size,
         }
     }
 }
@@ -39,6 +30,7 @@ where
 {
     pub(super) inner: MctsKind<G, E, R>,
 }
+
 pub(super) enum MctsKind<G, E, R>
 where
     G: GameState + Clone,
@@ -46,7 +38,7 @@ where
     R: SearchRules<G>,
 {
     Puct(MctsCore<G, E, R, super::puct::Puct>),
-    Gumbel(MctsCore<G, E, R, super::gumbel::Gumbel>),
+    Gumbel(MctsCore<G, E, R, super::gumbel::FullGumbel>),
 }
 
 pub(super) struct MctsCore<G, E, R, V>
@@ -74,12 +66,14 @@ pub(super) struct PendingLeaf<G> {
     pub(super) node: u32,
     pub(super) game: G,
 }
+
 pub(super) struct LeafBatch<G> {
     pub(super) leaves: Vec<PendingLeaf<G>>,
     pub(super) pending: Vec<PendingBackup>,
     pub(super) unique_games: Vec<G>,
     pub(super) result_by_node: Vec<(u32, usize)>,
 }
+
 pub(super) struct PendingBackup {
     pub(super) node: u32,
     pub(super) result: PendingResult,
@@ -88,16 +82,18 @@ pub(super) enum PendingResult {
     Terminal,
     Evaluation(usize),
 }
+
 impl<G> LeafBatch<G> {
-    pub(super) fn with_capacity(n: usize) -> Self {
+    pub(super) fn with_capacity(capacity: usize) -> Self {
         Self {
-            leaves: Vec::with_capacity(n),
-            pending: Vec::with_capacity(n),
-            unique_games: Vec::with_capacity(n),
-            result_by_node: Vec::with_capacity(n),
+            leaves: Vec::with_capacity(capacity),
+            pending: Vec::with_capacity(capacity),
+            unique_games: Vec::with_capacity(capacity),
+            result_by_node: Vec::with_capacity(capacity),
         }
     }
 }
+
 impl<G, E, R, V> MctsCore<G, E, R, V>
 where
     G: GameState + Clone,
@@ -105,9 +101,6 @@ where
     R: SearchRules<G>,
     V: 'static,
 {
-    pub(super) fn leaf_batch_size(&self) -> usize {
-        self.cfg.leaf_batch_size
-    }
     pub(super) fn clear_tree_common(&mut self) {
         self.nodes.clear();
         self.policy_buf.clear();
@@ -120,12 +113,12 @@ where
     E: PolicyValueEvaluator<G>,
     R: SearchRules<G>,
 {
-    pub fn new(evaluator: E, cfg: MctsConfig, rules: R) -> Self {
-        cfg.validate().expect("invalid MCTS configuration");
+    pub fn new(evaluator: E, config: SearchConfig, rules: R) -> Self {
+        config.validate().expect("invalid search configuration");
         fn make_core<G, E, R, V>(
             evaluator: E,
             rules: R,
-            cfg: MctsConfig,
+            cfg: CoreConfig,
             variant: V,
         ) -> MctsCore<G, E, R, V>
         where
@@ -137,7 +130,7 @@ where
             MctsCore {
                 evaluator,
                 rules,
-                cfg: CoreConfig::from_mcts(cfg),
+                cfg,
                 nodes: Vec::new(),
                 legal_moves: Vec::new(),
                 offsets: Vec::new(),
@@ -149,22 +142,30 @@ where
                 marker: PhantomData,
             }
         }
-        Self {
-            inner: match cfg.variant {
-                MctsVariant::Puct => {
-                    MctsKind::Puct(make_core(evaluator, rules, cfg, super::puct::Puct))
-                }
-                MctsVariant::Gumbel { sampled_actions } => MctsKind::Gumbel(make_core(
+        let inner = match config {
+            SearchConfig::Puct(config) => {
+                let core = CoreConfig::from(config.common);
+                MctsKind::Puct(make_core(
                     evaluator,
                     rules,
-                    cfg,
-                    super::gumbel::Gumbel {
-                        sampled_actions,
-                        root_actions: Vec::new(),
-                    },
-                )),
-            },
-        }
+                    core,
+                    super::puct::Puct::from(config),
+                ))
+            }
+            SearchConfig::Gumbel(config) => {
+                let core = CoreConfig {
+                    simulations: config.simulations,
+                    leaf_batch_size: 1,
+                };
+                MctsKind::Gumbel(make_core(
+                    evaluator,
+                    rules,
+                    core,
+                    super::gumbel::FullGumbel::from(config),
+                ))
+            }
+        };
+        Self { inner }
     }
 
     pub fn with_eval_cache(mut self, cache: Arc<EvalTable<G::Move>>) -> Self {
@@ -175,31 +176,47 @@ where
         self
     }
 
-    pub fn config(&self) -> MctsConfig {
+    /// Replaces the default OS-seeded RNG for reproducible search experiments.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.reseed(seed);
+        self
+    }
+
+    /// Resets the search RNG without rebuilding its evaluator or cache.
+    pub fn reseed(&mut self, seed: u64) {
+        match &mut self.inner {
+            MctsKind::Puct(core) => core.rng = SmallRng::seed_from_u64(seed),
+            MctsKind::Gumbel(core) => core.rng = SmallRng::seed_from_u64(seed),
+        }
+    }
+
+    pub fn config(&self) -> SearchConfig {
         match &self.inner {
-            MctsKind::Puct(core) => core.cfg.to_mcts(MctsVariant::Puct),
-            MctsKind::Gumbel(core) => core.cfg.to_mcts(MctsVariant::Gumbel {
-                sampled_actions: core.variant.sampled_actions,
-            }),
+            MctsKind::Puct(core) => SearchConfig::Puct(core.variant.config(core.cfg)),
+            MctsKind::Gumbel(core) => SearchConfig::Gumbel(core.variant.config.clone()),
         }
     }
 
     pub fn set_simulations(&mut self, simulations: usize) {
-        assert!(simulations > 0, "MCTS simulations must be positive");
+        assert!(simulations > 0, "search simulations must be positive");
         match &mut self.inner {
             MctsKind::Puct(core) => core.cfg.simulations = simulations,
-            MctsKind::Gumbel(core) => core.cfg.simulations = simulations,
+            MctsKind::Gumbel(core) => {
+                core.cfg.simulations = simulations;
+                core.variant.config.simulations = simulations;
+            }
         }
     }
 
-    pub fn set_gumbel_profile(&mut self, profile: super::GumbelSearchProfile) {
-        profile.validate().expect("invalid Gumbel search profile");
+    pub fn set_gumbel_config(&mut self, config: GumbelConfig) -> Result<(), &'static str> {
+        config.validate()?;
         match &mut self.inner {
             MctsKind::Gumbel(core) => {
-                core.cfg.simulations = profile.simulations;
-                core.variant.sampled_actions = profile.root_candidates;
+                core.cfg.simulations = config.simulations;
+                core.variant.config = config;
+                Ok(())
             }
-            MctsKind::Puct(_) => panic!("Gumbel profile requires Gumbel MCTS"),
+            MctsKind::Puct(_) => Err("Gumbel configuration requires Full Gumbel search"),
         }
     }
 
@@ -208,25 +225,10 @@ where
         game: &G,
         context: R::Context<'_>,
         mode: engine_core::agent::PolicyMode,
-    ) -> super::SearchResult<G::Move> {
+    ) -> Result<super::SearchResult<G::Move>, super::SearchError> {
         match &mut self.inner {
             MctsKind::Puct(core) => core.search_inner(game, context, mode),
             MctsKind::Gumbel(core) => core.search_inner(game, context, mode),
-        }
-    }
-}
-
-impl CoreConfig {
-    fn to_mcts(self, variant: MctsVariant) -> MctsConfig {
-        MctsConfig {
-            c_init: self.c_init,
-            c_base: self.c_base,
-            variant,
-            simulations: self.simulations,
-            leaf_batch_size: self.leaf_batch_size,
-            eps: self.eps,
-            alpha: self.alpha,
-            fpu_reduction: self.fpu_reduction,
         }
     }
 }

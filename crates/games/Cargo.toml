@@ -11,4 +11,5 @@ engine_core = { path = "../core" }
 serde.workspace = true
 
 [dev-dependencies]
+proptest = "1"
 rand.workspace = true

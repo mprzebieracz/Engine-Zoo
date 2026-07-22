@@ -1,6 +1,6 @@
+use chess::{Board, ChessMove};
 use engine_core::game::{GameState, TerminalValue};
 use games::{ChessGame, ChessPosition, ChessRepetitionState};
-use chess::{Board, ChessMove, MoveGen};
 use std::fmt;
 
 /// Branch-local chess state used by the AlphaZero v2 representation.
@@ -34,8 +34,7 @@ impl<const HISTORY: usize> ChessAzState<HISTORY> {
     pub fn from_game(game: &ChessGame) -> Self {
         assert_supported_history::<HISTORY>();
         let mut frames = [None; HISTORY];
-        for (slot, (position, repetitions_before)) in
-            frames.iter_mut().zip(game.recent_positions())
+        for (slot, (position, repetitions_before)) in frames.iter_mut().zip(game.recent_positions())
         {
             *slot = Some(Frame {
                 position,
@@ -64,7 +63,9 @@ impl<const HISTORY: usize> ChessAzState<HISTORY> {
     }
 
     fn current(&self) -> &Frame {
-        self.frames[0].as_ref().expect("current frame always exists")
+        self.frames[0]
+            .as_ref()
+            .expect("current frame always exists")
     }
 
     fn play_native(&mut self, mv: ChessMove) {
@@ -128,7 +129,7 @@ impl<const HISTORY: usize> GameState for ChessAzState<HISTORY> {
     }
 
     fn legal_moves(&self) -> impl Iterator<Item = Self::Move> + '_ {
-        MoveGen::new_legal(self.board())
+        self.current().position.legal_moves()
     }
 
     fn play(&mut self, mv: Self::Move) {

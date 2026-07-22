@@ -1,6 +1,6 @@
 use super::representation::{Action, AlphaZeroRepresentation};
-pub use search::{Evaluation, PolicyValueEvaluator};
 use engine_core::GameState;
+pub use search::{Evaluation, EvaluationError, PolicyValueEvaluator};
 use std::marker::PhantomData;
 
 /// A batch of canonically-encoded states to evaluate, each with its legal
@@ -53,7 +53,10 @@ pub trait EncodedEvaluator: Send {
     /// Evaluates `batch` while allowing implementations to temporarily take
     /// ownership of its backing allocations. Implementations must restore a
     /// reusable batch before returning.
-    fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation>;
+    fn evaluate(
+        &mut self,
+        batch: &mut EncodedEvalBatch,
+    ) -> Result<Vec<Evaluation>, EvaluationError>;
 }
 
 /// Adapts native states and moves through a representation to an encoded evaluator.
@@ -87,7 +90,7 @@ where
         states: &[G],
         legal_moves: &[G::Move],
         offsets: &[u32],
-    ) -> Vec<Evaluation> {
+    ) -> Result<Vec<Evaluation>, EvaluationError> {
         assert_eq!(
             offsets.len(),
             states.len() + 1,
@@ -133,6 +136,7 @@ where
 mod tests {
     use super::*;
     use engine_core::TerminalValue;
+    use search::PositionValue;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Copy)]
@@ -192,7 +196,10 @@ mod tests {
     struct RecordingEvaluator(Arc<Mutex<Vec<RecordedBatch>>>);
 
     impl EncodedEvaluator for RecordingEvaluator {
-        fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> Vec<Evaluation> {
+        fn evaluate(
+            &mut self,
+            batch: &mut EncodedEvalBatch,
+        ) -> Result<Vec<Evaluation>, EvaluationError> {
             self.0.lock().unwrap().push(RecordedBatch {
                 states: batch.states.iter().map(|value| value.to_bits()).collect(),
                 actions: batch
@@ -212,7 +219,7 @@ mod tests {
                     batch.offsets.capacity(),
                 ],
             });
-            (0..batch.len())
+            Ok((0..batch.len())
                 .map(|row| {
                     let begin = batch.offsets[row] as usize;
                     let end = batch.offsets[row + 1] as usize;
@@ -221,10 +228,10 @@ mod tests {
                             .iter()
                             .map(|action| action.as_u32() as f32)
                             .collect(),
-                        value: row as f32 + 0.25,
+                        value: PositionValue::new_clamped(row as f32 + 0.25),
                     }
                 })
-                .collect()
+                .collect())
         }
     }
 
@@ -238,16 +245,18 @@ mod tests {
     fn maps_rows_preserves_order_delegates_keys_and_reuses_allocations() {
         let records = Arc::new(Mutex::new(Vec::new()));
         let mut evaluator = adapter(&records);
-        let evaluations = evaluator.evaluate(&[TestState(2), TestState(5)], &[9, 3, 8], &[0, 2, 3]);
+        let evaluations = evaluator
+            .evaluate(&[TestState(2), TestState(5)], &[9, 3, 8], &[0, 2, 3])
+            .unwrap();
 
         assert_eq!(evaluations[0].logits, [209.0, 203.0]);
-        assert_eq!(evaluations[0].value, 0.25);
+        assert_eq!(evaluations[0].value, PositionValue::new_clamped(0.25));
         assert_eq!(evaluations[1].logits, [508.0]);
-        assert_eq!(evaluations[1].value, 1.25);
+        assert_eq!(evaluations[1].value, PositionValue::WIN);
         assert_eq!(evaluator.evaluation_key(&TestState(6)), Some(42));
 
-        evaluator.evaluate(&[TestState(1)], &[4], &[0, 1]);
-        assert!(evaluator.evaluate(&[], &[], &[0]).is_empty());
+        evaluator.evaluate(&[TestState(1)], &[4], &[0, 1]).unwrap();
+        assert!(evaluator.evaluate(&[], &[], &[0]).unwrap().is_empty());
         let records = records.lock().unwrap();
         assert_eq!(
             records[0].states,
@@ -268,13 +277,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "offsets must start at zero")]
     fn rejects_nonzero_first_offset() {
-        adapter(&Arc::new(Mutex::new(Vec::new()))).evaluate(&[TestState(1)], &[2], &[1, 1]);
+        let _ = adapter(&Arc::new(Mutex::new(Vec::new()))).evaluate(&[TestState(1)], &[2], &[1, 1]);
     }
 
     #[test]
     #[should_panic(expected = "offsets must be monotonic and in range")]
     fn rejects_nonmonotonic_offsets() {
-        adapter(&Arc::new(Mutex::new(Vec::new()))).evaluate(
+        let _ = adapter(&Arc::new(Mutex::new(Vec::new()))).evaluate(
             &[TestState(1), TestState(2)],
             &[3],
             &[0, 1, 0],
@@ -284,6 +293,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "offsets must be monotonic and in range")]
     fn rejects_out_of_range_offsets() {
-        adapter(&Arc::new(Mutex::new(Vec::new()))).evaluate(&[TestState(1)], &[2], &[0, 2]);
+        let _ = adapter(&Arc::new(Mutex::new(Vec::new()))).evaluate(&[TestState(1)], &[2], &[0, 2]);
     }
 }

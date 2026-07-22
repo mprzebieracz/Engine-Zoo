@@ -2,7 +2,6 @@
 
 pub mod arena;
 pub mod fastchess;
-pub mod legacy;
 pub mod match_suite;
 pub mod model_engine;
 pub mod puzzle;

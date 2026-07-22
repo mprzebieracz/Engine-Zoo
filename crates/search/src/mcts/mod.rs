@@ -8,111 +8,269 @@ mod traversal;
 #[cfg(test)]
 mod tests;
 
+use crate::PositionValue;
 use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::error::Error;
+use std::fmt;
 
-#[cfg(test)]
-pub(crate) use cache::CachedEvaluation;
 pub use cache::{EvalTable, EvalTableStats};
 pub use core::Mcts;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MctsVariant {
-    /// Standard AlphaZero PUCT search.
-    Puct,
-    /// Gumbel AlphaZero-style root sampling with sequential halving.
-    Gumbel {
-        /// Root actions considered before sequential halving.
-        sampled_actions: usize,
-    },
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SearchConfig {
+    Puct(PuctConfig),
+    Gumbel(GumbelConfig),
 }
 
-/// The two parameters that must change together when varying a Gumbel search
-/// budget. Keeping them in one value prevents a lower simulation budget from
-/// accidentally retaining an oversized sequential-halving root set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GumbelSearchProfile {
-    pub simulations: usize,
-    pub root_candidates: usize,
-}
-
-impl GumbelSearchProfile {
-    pub const fn new(simulations: usize, root_candidates: usize) -> Self {
-        Self {
-            simulations,
-            root_candidates,
+impl SearchConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match self {
+            Self::Puct(config) => config.validate(),
+            Self::Gumbel(config) => config.validate(),
         }
     }
+}
 
-    pub fn validate(self) -> Result<(), &'static str> {
-        if self.simulations == 0 {
-            return Err("Gumbel profile simulations must be positive");
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self::Puct(PuctConfig::default())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct CommonSearchConfig {
+    pub simulations: usize,
+    pub leaf_batch_size: usize,
+}
+
+impl Default for CommonSearchConfig {
+    fn default() -> Self {
+        Self {
+            simulations: 800,
+            leaf_batch_size: 1,
         }
-        if self.root_candidates == 0 {
-            return Err("Gumbel profile root_candidates must be positive");
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PuctConfig {
+    pub common: CommonSearchConfig,
+    pub selection: PuctSelectionConfig,
+    pub fpu: FpuConfig,
+    pub in_flight: InFlightConfig,
+    pub root_noise: Option<DirichletConfig>,
+}
+
+impl Default for PuctConfig {
+    fn default() -> Self {
+        Self {
+            common: CommonSearchConfig::default(),
+            selection: PuctSelectionConfig::default(),
+            fpu: FpuConfig::default(),
+            in_flight: InFlightConfig::UnscoredVirtualVisits,
+            root_noise: Some(DirichletConfig::default()),
+        }
+    }
+}
+
+impl PuctConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.common.simulations == 0 {
+            return Err("PUCT simulations must be positive");
+        }
+        if self.common.leaf_batch_size == 0 {
+            return Err("PUCT leaf_batch_size must be positive");
+        }
+        self.selection.validate()?;
+        self.fpu.validate()?;
+        self.in_flight.validate()?;
+        if let Some(noise) = self.root_noise {
+            noise.validate()?;
         }
         Ok(())
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct MctsConfig {
-    pub c_init: f32,
-    pub c_base: f32,
-    pub variant: MctsVariant,
-    /// Simulations per search.
-    pub simulations: usize,
-    /// Leaf evaluations collected inside one tree search before calling the evaluator.
-    /// `1` preserves the original single-leaf simulation behavior.
-    pub leaf_batch_size: usize,
-    /// Dirichlet noise weight at the root (0 disables, e.g. for match play).
-    pub eps: f32,
-    pub alpha: f32,
-    /// First Play Urgency reduction. Unvisited children are valued as the
-    /// parent's current value minus this amount, from the parent's perspective.
-    pub fpu_reduction: f32,
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct PuctSelectionConfig {
+    pub pb_c_init: f32,
+    pub pb_c_base: f32,
+    pub pb_c_factor: f32,
 }
 
-impl Default for MctsConfig {
+impl Default for PuctSelectionConfig {
     fn default() -> Self {
-        MctsConfig {
-            c_init: 1.25,
-            c_base: 19652.0,
-            variant: MctsVariant::Puct,
-            simulations: 800,
-            leaf_batch_size: 1,
-            eps: 0.25,
-            alpha: 0.3,
-            fpu_reduction: 0.1,
+        Self {
+            pb_c_init: 1.25,
+            pb_c_base: 19_652.0,
+            pb_c_factor: 1.0,
         }
     }
 }
 
-impl MctsConfig {
-    /// Checks invariants required by every MCTS variant.
+impl PuctSelectionConfig {
+    fn validate(self) -> Result<(), &'static str> {
+        if !self.pb_c_init.is_finite() || self.pb_c_init < 0.0 {
+            return Err("pb_c_init must be finite and non-negative");
+        }
+        if !self.pb_c_base.is_finite() || self.pb_c_base <= 0.0 {
+            return Err("pb_c_base must be finite and positive");
+        }
+        if !self.pb_c_factor.is_finite() || self.pb_c_factor < 0.0 {
+            return Err("pb_c_factor must be finite and non-negative");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum FpuConfig {
+    Reduction {
+        reduction: f32,
+        root_reduction: Option<f32>,
+    },
+    Absolute {
+        value: PositionValue,
+        root_value: Option<PositionValue>,
+    },
+}
+
+impl Default for FpuConfig {
+    fn default() -> Self {
+        Self::Reduction {
+            reduction: 0.33,
+            root_reduction: None,
+        }
+    }
+}
+
+impl FpuConfig {
+    fn validate(self) -> Result<(), &'static str> {
+        match self {
+            Self::Reduction {
+                reduction,
+                root_reduction,
+            } if reduction.is_finite()
+                && reduction >= 0.0
+                && root_reduction.is_none_or(|value| value.is_finite() && value >= 0.0) =>
+            {
+                Ok(())
+            }
+            Self::Absolute { .. } => Ok(()),
+            _ => Err("FPU reduction must be finite and non-negative"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum InFlightConfig {
+    UnscoredVirtualVisits,
+    VirtualLoss { value: PositionValue },
+}
+
+impl InFlightConfig {
+    fn validate(self) -> Result<(), &'static str> {
+        match self {
+            Self::UnscoredVirtualVisits => Ok(()),
+            Self::VirtualLoss { value } if value.as_f32().is_finite() => Ok(()),
+            Self::VirtualLoss { .. } => Err("virtual-loss value must be finite"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct DirichletConfig {
+    pub epsilon: f32,
+    pub alpha: f32,
+}
+
+impl Default for DirichletConfig {
+    fn default() -> Self {
+        Self {
+            epsilon: 0.25,
+            alpha: 0.3,
+        }
+    }
+}
+
+impl DirichletConfig {
+    fn validate(self) -> Result<(), &'static str> {
+        if !self.epsilon.is_finite() || !(0.0..=1.0).contains(&self.epsilon) {
+            return Err("Dirichlet epsilon must be finite and in [0, 1]");
+        }
+        if !self.alpha.is_finite() || self.alpha <= 0.0 {
+            return Err("Dirichlet alpha must be finite and positive");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GumbelConfig {
+    pub simulations: usize,
+    pub max_considered_actions: usize,
+    pub gumbel_scale: f32,
+    pub qtransform: CompletedQConfig,
+}
+
+impl Default for GumbelConfig {
+    fn default() -> Self {
+        Self {
+            simulations: 128,
+            max_considered_actions: 16,
+            gumbel_scale: 1.0,
+            qtransform: CompletedQConfig::default(),
+        }
+    }
+}
+
+impl GumbelConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if !self.c_init.is_finite() || self.c_init < 0.0 {
-            return Err("c_init must be finite and non-negative");
-        }
-        if !self.c_base.is_finite() || self.c_base <= 0.0 {
-            return Err("c_base must be finite and positive");
-        }
         if self.simulations == 0 {
-            return Err("simulations must be positive");
+            return Err("Gumbel simulations must be positive");
         }
-        if self.leaf_batch_size == 0 {
-            return Err("leaf_batch_size must be positive");
+        if self.max_considered_actions == 0 {
+            return Err("Gumbel max_considered_actions must be positive");
         }
-        if !self.eps.is_finite() || !(0.0..=1.0).contains(&self.eps) {
-            return Err("eps must be finite and in [0, 1]");
+        if !self.gumbel_scale.is_finite() || self.gumbel_scale < 0.0 {
+            return Err("Gumbel scale must be finite and non-negative");
         }
-        if !self.alpha.is_finite() || (self.eps > 0.0 && self.alpha <= 0.0) {
-            return Err("alpha must be finite and positive when root noise is enabled");
+        self.qtransform.validate()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct CompletedQConfig {
+    pub value_scale: f32,
+    pub maxvisit_init: f32,
+    pub rescale_values: bool,
+    pub use_mixed_value: bool,
+    pub epsilon: f32,
+}
+
+impl Default for CompletedQConfig {
+    fn default() -> Self {
+        Self {
+            value_scale: 0.1,
+            maxvisit_init: 50.0,
+            rescale_values: true,
+            use_mixed_value: true,
+            epsilon: 1e-8,
         }
-        if !self.fpu_reduction.is_finite() || self.fpu_reduction < 0.0 {
-            return Err("fpu_reduction must be finite and non-negative");
+    }
+}
+
+impl CompletedQConfig {
+    fn validate(self) -> Result<(), &'static str> {
+        if !self.value_scale.is_finite() || self.value_scale < 0.0 {
+            return Err("completed-Q value_scale must be finite and non-negative");
         }
-        if matches!(self.variant, MctsVariant::Gumbel { sampled_actions: 0 }) {
-            return Err("Gumbel sampled_actions must be positive");
+        if !self.maxvisit_init.is_finite() || self.maxvisit_init < 0.0 {
+            return Err("completed-Q maxvisit_init must be finite and non-negative");
+        }
+        if !self.epsilon.is_finite() || self.epsilon <= 0.0 {
+            return Err("completed-Q epsilon must be finite and positive");
         }
         Ok(())
     }
@@ -123,12 +281,39 @@ impl MctsConfig {
 /// For PUCT, `policy` is the normalized root visit-count distribution. For
 /// Gumbel AlphaZero, it is the search-improved policy
 /// `softmax(root_logits + transformed_completed_q)` used as the policy target.
+#[derive(Debug)]
 pub struct SearchResult<M> {
     /// Normalized probability mass for legal root actions only.
     pub policy: Vec<(M, f32)>,
     pub selected_move: M,
-    pub value: f32,
+    /// Value from the root state's player-to-move perspective.
+    pub root_value: PositionValue,
+    pub diagnostics: SearchDiagnostics,
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SearchDiagnostics {
+    pub completed_simulations: usize,
+    pub network_evaluations: usize,
+    pub cache_hits: usize,
+    pub duplicate_leaves: usize,
+    pub max_depth: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SearchError {
+    Evaluation(crate::EvaluationError),
+}
+
+impl fmt::Display for SearchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Evaluation(error) => write!(formatter, "search evaluation failed: {error}"),
+        }
+    }
+}
+
+impl Error for SearchError {}
 
 impl<M: Copy> SearchResult<M> {
     /// The move proposed by the search.
@@ -156,31 +341,13 @@ impl<M: Copy + Eq> SearchResult<M> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct RootAction {
+pub(super) struct RootAction {
     node: u32,
     /// Raw network logit plus the one Gumbel sample reused throughout search.
     gumbel_logit: f32,
 }
 
 #[derive(Clone, Copy)]
-struct RootQTransform {
-    completed_value: f32,
-    min_value: f32,
-    inv_range: f32,
-    scale: f32,
-}
-
-impl RootQTransform {
-    fn apply(self, q: f32) -> f32 {
-        let normalized = if self.inv_range == 0.0 {
-            0.0
-        }
-        else {
-            (q - self.min_value) * self.inv_range
-        };
-        self.scale * normalized
-    }
-}
 
 /// Tree node. Children are stored sparsely (one node per legal action) and
 /// contiguously, so a node only needs the range
@@ -191,12 +358,13 @@ pub(super) struct Node<M, Meta = ()> {
     meta: Meta,
     first_child: u32,
     move_from_parent: Option<M>,
-    visits: u32,
-    virtual_loss_count: u32,
-    value_sum: f32,
+    completed_visits: u32,
+    in_flight_visits: u32,
+    value_sum_from_node_pov: f32,
     prior: f32,
     logit: f32,
-    reward: f32,
+    reward: PositionValue,
+    raw_value: PositionValue,
     num_children: u16,
     expanded: bool,
     terminal: bool,
@@ -209,19 +377,20 @@ impl<M, Meta: Default> Node<M, Meta> {
         prior: f32,
         logit: f32,
         terminal: bool,
-        reward: f32,
+        reward: PositionValue,
     ) -> Self {
         Node {
             parent,
             meta: Meta::default(),
             first_child: 0,
             move_from_parent,
-            visits: 0,
-            virtual_loss_count: 0,
-            value_sum: 0.0,
+            completed_visits: 0,
+            in_flight_visits: 0,
+            value_sum_from_node_pov: 0.0,
             prior,
             logit,
             reward,
+            raw_value: PositionValue::DRAW,
             num_children: 0,
             expanded: false,
             terminal,
@@ -229,26 +398,29 @@ impl<M, Meta: Default> Node<M, Meta> {
     }
 
     /// Mean value from this node's own player-to-move perspective.
-    fn q(&self) -> f32 {
-        if self.visits == 0 {
-            0.0
-        }
-        else {
-            self.value_sum / self.visits as f32
-        }
+    fn completed_q(&self) -> Option<PositionValue> {
+        (self.completed_visits > 0).then(|| {
+            PositionValue::new_clamped(self.value_sum_from_node_pov / self.completed_visits as f32)
+        })
     }
 
-    fn effective_visits(&self) -> u32 {
-        self.visits + self.virtual_loss_count
+    fn selection_visits(&self) -> u32 {
+        self.completed_visits + self.in_flight_visits
     }
 
-    fn effective_q(&self) -> f32 {
-        let visits = self.effective_visits();
-        if visits == 0 {
-            0.0
-        }
-        else {
-            (self.value_sum + self.virtual_loss_count as f32) / visits as f32
-        }
+    fn reserve_visit(&mut self) {
+        self.in_flight_visits += 1;
+    }
+
+    fn complete_reserved_visit(&mut self, value: PositionValue) {
+        assert!(self.in_flight_visits > 0, "in-flight visit underflow");
+        self.in_flight_visits -= 1;
+        self.completed_visits += 1;
+        self.value_sum_from_node_pov += value.as_f32();
+    }
+
+    fn cancel_reserved_visit(&mut self) {
+        assert!(self.in_flight_visits > 0, "in-flight visit underflow");
+        self.in_flight_visits -= 1;
     }
 }

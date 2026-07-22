@@ -1,21 +1,16 @@
-use super::network::{AlphaZeroNet, ChessAzV2Config, ChessAzV2Net, NetConfig};
-use super::replay::{ReplayBatch, ReplayBuffer, SparsePolicyBatch};
+use super::network::{Network, RawValueOutput};
+use super::replay::{ReplayBuffer, SparsePolicyBatch};
+use super::representation::AlphaZeroRepresentation;
+use engine_core::GameState;
 use serde::Serialize;
-use std::sync::mpsc;
-use std::thread;
 use tch::nn::{Optimizer, OptimizerConfig};
 use tch::{nn, Device, Kind, Tensor};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TrainConfig {
-    /// Micro-batch size that fits on the GPU.
     pub micro_batch_size: usize,
-    /// Requested batch size per optimizer step; trains on fewer samples if the
-    /// replay buffer is not full yet.
     pub batch_size: usize,
-    /// Optimizer steps per call to `train`.
     pub train_steps: usize,
-    /// Print training progress every N optimizer steps. Set 0 to disable.
     pub progress_every: usize,
     pub lr: f64,
     pub weight_decay: f64,
@@ -23,7 +18,7 @@ pub struct TrainConfig {
 
 impl Default for TrainConfig {
     fn default() -> Self {
-        TrainConfig {
+        Self {
             micro_batch_size: 256,
             batch_size: 4096,
             train_steps: 80,
@@ -35,7 +30,6 @@ impl Default for TrainConfig {
 }
 
 impl TrainConfig {
-    /// Checks invariants required by the training loop.
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.micro_batch_size > 0,
@@ -71,289 +65,180 @@ pub fn build_optimizer(vs: &nn::VarStore, cfg: &TrainConfig) -> anyhow::Result<O
     .build(vs, cfg.lr)?)
 }
 
-#[cfg(test)]
-/// Dense reference retained only for sparse-loss equivalence tests.
-fn dense_policy_cross_entropy(logits: &Tensor, target: &Tensor) -> Tensor {
-    let logp = logits.log_softmax(1, Kind::Float);
-    -(target * logp)
-        .sum_dim_intlist(1, false, Kind::Float)
-        .mean(Kind::Float)
+/// Trains either scalar or WDL models from one compact replay format.
+pub fn train<S, R>(
+    network: &Network,
+    optimizer: &mut Optimizer,
+    replay: &ReplayBuffer<S>,
+    representation: &R,
+    device: Device,
+    cfg: &TrainConfig,
+) -> Option<TrainMetrics>
+where
+    S: GameState + Clone,
+    R: AlphaZeroRepresentation<S>,
+{
+    cfg.validate().expect("invalid training configuration");
+    let mut policy_total = 0.0;
+    let mut value_total = 0.0;
+    let mut completed = 0;
+    let shape = representation_shape::<S, R>();
+    for _ in 0..cfg.train_steps {
+        let batch = replay.sample(cfg.batch_size, representation)?;
+        let rows = batch.outcomes.size()[0] as usize;
+        let policy_denominator = batch.policy_weights.sum(Kind::Float).double_value(&[]);
+        let value_denominator = batch.value_weights.sum(Kind::Float).double_value(&[]);
+        let mut policy_numerator = 0.0;
+        let mut value_numerator = 0.0;
+        optimizer.zero_grad();
+        for start in (0..rows).step_by(cfg.micro_batch_size) {
+            let count = (rows - start).min(cfg.micro_batch_size);
+            let states = batch
+                .states
+                .narrow(0, start as i64, count as i64)
+                .view(shape)
+                .to_device(device);
+            let outcomes = batch
+                .outcomes
+                .narrow(0, start as i64, count as i64)
+                .to_device(device);
+            let policy_weights = batch
+                .policy_weights
+                .narrow(0, start as i64, count as i64)
+                .to_device(device);
+            let value_weights = batch
+                .value_weights
+                .narrow(0, start as i64, count as i64)
+                .to_device(device);
+            let output = network.forward_t(&states, true);
+            let mut loss = None;
+            if policy_denominator > 0.0 {
+                let policies = DevicePolicyBatch::from_rows(&batch.policies, start, count, device);
+                let numerator = sparse_policy_numerator(
+                    &output.policy_logits,
+                    &policies.actions,
+                    &policies.probabilities,
+                    &policies.rows,
+                    &policy_weights,
+                );
+                policy_numerator += numerator.double_value(&[]);
+                loss = Some(numerator / policy_denominator);
+            }
+            if value_denominator > 0.0 {
+                let numerator = match output.value {
+                    RawValueOutput::Scalar(value) => {
+                        scalar_mse_numerator(&value, &outcomes, &value_weights)
+                    }
+                    RawValueOutput::WdlLogits(logits) => {
+                        wdl_cross_entropy_numerator(&logits, &outcomes, &value_weights)
+                    }
+                };
+                value_numerator += numerator.double_value(&[]);
+                let scaled = numerator / value_denominator;
+                loss = Some(match loss {
+                    Some(policy) => policy + scaled,
+                    None => scaled,
+                });
+            }
+            if let Some(loss) = loss {
+                loss.backward();
+            }
+        }
+        optimizer.step();
+        policy_total += if policy_denominator > 0.0 {
+            policy_numerator / policy_denominator
+        } else {
+            0.0
+        };
+        value_total += if value_denominator > 0.0 {
+            value_numerator / value_denominator
+        } else {
+            0.0
+        };
+        completed += 1;
+    }
+    Some(TrainMetrics {
+        policy_loss: policy_total / completed as f64,
+        value_loss: value_total / completed as f64,
+        train_steps: completed,
+    })
 }
 
-/// Cross-entropy between packed MCTS targets and network logits. Since each
-/// target row is a probability distribution, summing packed entries and
-/// dividing by the number of positions is identical to the dense formulation.
-fn sparse_policy_cross_entropy(
-    logits: &Tensor,
-    actions: &Tensor,
-    probabilities: &Tensor,
-    rows: &Tensor,
-    positions: i64,
-) -> Tensor {
-    let action_size = logits.size()[1];
-    let flat_indices = rows * action_size + actions;
-    let selected_logp = logits
-        .log_softmax(1, Kind::Float)
-        .flatten(0, -1)
-        .index_select(0, &flat_indices);
-    -(probabilities * selected_logp).sum(Kind::Float) / positions
-}
-
-/// Cross-entropy for a WDL target represented by the self-play value
-/// convention: `+1` win, `0` draw, `-1` loss.
-pub fn wdl_cross_entropy(logits: &Tensor, value: &Tensor) -> Tensor {
-    let value = value.view([-1]);
-    let target = Tensor::stack(
-        &[
-            value.eq(1).to_kind(Kind::Float),
-            value.eq(0).to_kind(Kind::Float),
-            value.eq(-1).to_kind(Kind::Float),
-        ],
-        1,
-    );
-    let logp = logits.log_softmax(1, Kind::Float);
-    -(target * logp)
-        .sum_dim_intlist(1, false, Kind::Float)
-        .mean(Kind::Float)
-}
-
-#[derive(Clone, Copy)]
-enum ValueLoss {
-    ScalarMse,
-    Wdl,
+fn representation_shape<S: GameState, R: AlphaZeroRepresentation<S>>() -> [i64; 4] {
+    let [channels, height, width] = R::STATE_SHAPE.map(|dimension| dimension as i64);
+    [-1, channels, height, width]
 }
 
 struct DevicePolicyBatch {
     actions: Tensor,
     probabilities: Tensor,
     rows: Tensor,
-    offsets: Vec<i64>,
 }
 
-impl SparsePolicyBatch {
-    fn into_device(self, device: Device) -> DevicePolicyBatch {
-        DevicePolicyBatch {
-            actions: self.actions.to_device(device),
-            probabilities: self.probabilities.to_device(device),
-            rows: self.rows.to_device(device),
-            offsets: self.offsets,
+impl DevicePolicyBatch {
+    fn from_rows(batch: &SparsePolicyBatch, start: usize, rows: usize, device: Device) -> Self {
+        let first = batch.offsets[start];
+        let end = batch.offsets[start + rows];
+        let count = end - first;
+        Self {
+            actions: batch.actions.narrow(0, first, count).to_device(device),
+            probabilities: batch
+                .probabilities
+                .narrow(0, first, count)
+                .to_device(device),
+            rows: (batch.rows.narrow(0, first, count) - start as i64).to_device(device),
         }
     }
 }
 
-struct PipelineSettings<'a> {
-    device: Device,
-    train: &'a TrainConfig,
-    state_shape: &'a [i64],
-    progress_label: &'a str,
-    value_loss: ValueLoss,
+fn sparse_policy_numerator(
+    logits: &Tensor,
+    actions: &Tensor,
+    probabilities: &Tensor,
+    rows: &Tensor,
+    weights: &Tensor,
+) -> Tensor {
+    let action_size = logits.size()[1];
+    let indices = rows * action_size + actions;
+    let selected = logits
+        .log_softmax(1, Kind::Float)
+        .flatten(0, -1)
+        .index_select(0, &indices);
+    let entry_weights = weights.index_select(0, rows);
+    -(probabilities * selected * entry_weights).sum(Kind::Float)
 }
 
-/// Shared legacy/v2 pipeline. Sampling step n+1 overlaps device work for step
-/// n, and detached metric tensors remain on device until a progress boundary.
-fn train_pipeline<F>(
-    opt: &mut Optimizer,
-    replay: &ReplayBuffer,
-    settings: PipelineSettings<'_>,
-    mut forward: F,
-) -> Option<TrainMetrics>
-where
-    F: FnMut(&Tensor) -> (Tensor, Tensor),
-{
-    let PipelineSettings {
-        device,
-        train: cfg,
-        state_shape,
-        progress_label,
-        value_loss: value_loss_kind,
-    } = settings;
-    let (req_tx, req_rx) = mpsc::sync_channel::<()>(1);
-    let (batch_tx, batch_rx) = mpsc::sync_channel::<Option<ReplayBatch>>(1);
-
-    thread::scope(|s| {
-        s.spawn(move || {
-            while req_rx.recv().is_ok() {
-                let batch = replay.sample(cfg.batch_size);
-                if batch_tx.send(batch).is_err() {
-                    break;
-                }
-            }
-        });
-
-        let _ = req_tx.send(());
-
-        let mut policy_loss_sum = Tensor::zeros([], (Kind::Float, device));
-        let mut value_loss_sum = Tensor::zeros([], (Kind::Float, device));
-        let mut samples = 0usize;
-        let mut optimizer_steps = 0usize;
-
-        for step in 0..cfg.train_steps {
-            let ReplayBatch {
-                states,
-                policies,
-                values,
-            } = match batch_rx.recv() {
-                Ok(Some(b)) => b,
-                Ok(None) | Err(_) => break,
-            };
-
-            // Pipeline: request the next batch while the GPU works on this one.
-            if step + 1 < cfg.train_steps {
-                let _ = req_tx.send(());
-            }
-
-            let batch = states.size()[0] as usize;
-            let states = states.view(state_shape).to_device(device);
-            let policies = policies.into_device(device);
-            let values = values.to_device(device);
-            let done = step + 1;
-            let report_step = cfg.progress_every > 0
-                && done != cfg.train_steps
-                && done.is_multiple_of(cfg.progress_every);
-            let mut step_policy_loss_sum =
-                report_step.then(|| Tensor::zeros([], (Kind::Float, device)));
-            let mut step_value_loss_sum =
-                report_step.then(|| Tensor::zeros([], (Kind::Float, device)));
-
-            for i in (0..batch).step_by(cfg.micro_batch_size) {
-                let chunk = (batch - i).min(cfg.micro_batch_size);
-                let row_start = i as i64;
-                let chunk = chunk as i64;
-                let s = states.narrow(0, row_start, chunk);
-                let v = values.narrow(0, row_start, chunk);
-                let entry_start = policies.offsets[i];
-                let entry_end = policies.offsets[i + chunk as usize];
-                let entry_count = entry_end - entry_start;
-                let actions = policies.actions.narrow(0, entry_start, entry_count);
-                let probabilities = policies.probabilities.narrow(0, entry_start, entry_count);
-                let rows = policies.rows.narrow(0, entry_start, entry_count) - row_start;
-
-                let (logits, value_prediction) = forward(&s);
-                let policy_loss = sparse_policy_cross_entropy(
-                    &logits.flatten(1, -1),
-                    &actions,
-                    &probabilities,
-                    &rows,
-                    chunk,
-                );
-                let value_loss = match value_loss_kind {
-                    ValueLoss::ScalarMse => value_prediction
-                        .squeeze_dim(-1)
-                        .mse_loss(&v, tch::Reduction::Mean),
-                    ValueLoss::Wdl => wdl_cross_entropy(&value_prediction, &v),
-                };
-
-                let weight = chunk as f64 / batch as f64;
-                let loss = (&policy_loss + &value_loss) * weight;
-                loss.backward();
-
-                // Losses are means over each microbatch. Weight detached values
-                // by sample count so a short final microbatch is not over-represented.
-                let weighted_policy_loss = policy_loss.detach() * chunk;
-                let weighted_value_loss = value_loss.detach() * chunk;
-                policy_loss_sum += &weighted_policy_loss;
-                value_loss_sum += &weighted_value_loss;
-                samples += chunk as usize;
-                if let Some(sum) = &mut step_policy_loss_sum {
-                    *sum += &weighted_policy_loss;
-                }
-                if let Some(sum) = &mut step_value_loss_sum {
-                    *sum += &weighted_value_loss;
-                }
-            }
-
-            opt.step();
-            opt.zero_grad();
-            optimizer_steps += 1;
-
-            if let (Some(policy), Some(value)) = (step_policy_loss_sum, step_value_loss_sum) {
-                let n = batch as f64;
-                println!(
-                    "{progress_label}: {done}/{} steps, policy_loss={:.4}, value_loss={:.4}",
-                    cfg.train_steps,
-                    (&policy / n).double_value(&[]),
-                    (&value / n).double_value(&[])
-                );
-            }
-        }
-
-        // Drop the sender so the worker's recv() unblocks and the thread exits.
-        drop(req_tx);
-
-        if samples == 0 {
-            return None;
-        }
-        let n = samples as f64;
-        let policy_loss = (&policy_loss_sum / n).double_value(&[]);
-        let value_loss = (&value_loss_sum / n).double_value(&[]);
-        if cfg.progress_every > 0 {
-            println!(
-                "{progress_label}: {optimizer_steps}/{} steps, policy_loss={policy_loss:.4}, value_loss={value_loss:.4}",
-                cfg.train_steps
-            );
-        }
-        Some(TrainMetrics {
-            policy_loss,
-            value_loss,
-            train_steps: optimizer_steps,
-        })
-    })
+fn scalar_mse_numerator(value: &Tensor, outcomes: &Tensor, weights: &Tensor) -> Tensor {
+    let targets = outcomes.eq(0).to_kind(Kind::Float) - outcomes.eq(2).to_kind(Kind::Float);
+    let errors = (value.squeeze_dim(-1) - targets).pow_tensor_scalar(2.0);
+    (&errors * weights).sum(Kind::Float)
 }
 
-/// Runs legacy policy/value training with gradient accumulation and replay
-/// prefetch. Returns `None` if replay is empty.
-pub fn train(
-    net: &AlphaZeroNet,
-    opt: &mut Optimizer,
-    replay: &ReplayBuffer,
-    device: Device,
-    net_cfg: &NetConfig,
-    cfg: &TrainConfig,
-) -> Option<TrainMetrics> {
-    cfg.validate().expect("invalid training configuration");
-    let state_shape = [-1, net_cfg.input_channels, net_cfg.height, net_cfg.width];
-    train_pipeline(
-        opt,
-        replay,
-        PipelineSettings {
-            device,
-            train: cfg,
-            state_shape: &state_shape,
-            progress_label: "train progress",
-            value_loss: ValueLoss::ScalarMse,
-        },
-        |states| net.forward_t(states, true),
+/// WDL cross entropy consumes categorical outcome targets directly; no float
+/// equality is used to reconstruct classes.
+pub fn wdl_cross_entropy(logits: &Tensor, outcomes: &Tensor, weights: &Tensor) -> Tensor {
+    weighted_mean(
+        wdl_cross_entropy_numerator(logits, outcomes, weights),
+        weights,
+        logits,
     )
 }
 
-/// Trains a chess-v2 network. Replay keeps scalar values, which are converted
-/// to WDL targets at the loss boundary so no separate replay representation is
-/// needed for the new value head.
-pub fn train_chess_az_v2(
-    net: &ChessAzV2Net,
-    opt: &mut Optimizer,
-    replay: &ReplayBuffer,
-    device: Device,
-    net_cfg: ChessAzV2Config,
-    cfg: &TrainConfig,
-) -> Option<TrainMetrics> {
-    cfg.validate().expect("invalid training configuration");
-    net_cfg
-        .validate()
-        .expect("invalid chess az v2 configuration");
-    let state_shape = [-1, net_cfg.input_channels(), 8, 8];
-    train_pipeline(
-        opt,
-        replay,
-        PipelineSettings {
-            device,
-            train: cfg,
-            state_shape: &state_shape,
-            progress_label: "train v2 progress",
-            value_loss: ValueLoss::Wdl,
-        },
-        |states| net.forward_t(states, true),
-    )
+fn wdl_cross_entropy_numerator(logits: &Tensor, outcomes: &Tensor, weights: &Tensor) -> Tensor {
+    let logp = logits.log_softmax(1, Kind::Float);
+    let selected = logp
+        .gather(1, &outcomes.view([-1, 1]), false)
+        .squeeze_dim(-1);
+    -(&selected * weights).sum(Kind::Float)
+}
+
+fn weighted_mean(numerator: Tensor, weights: &Tensor, reference: &Tensor) -> Tensor {
+    let denominator = weights.sum(Kind::Float);
+    if denominator.double_value(&[]) > 0.0 {
+        numerator / denominator
+    } else {
+        reference.sum(Kind::Float) * 0.0
+    }
 }
 
 #[cfg(test)]

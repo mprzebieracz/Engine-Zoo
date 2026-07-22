@@ -1,25 +1,29 @@
-use super::core::{LeafBatch, MctsCore};
-use super::{Node, RootAction, RootQTransform, SearchResult};
+use super::core::{LeafBatch, MctsCore, PendingLeaf};
+use super::{CompletedQConfig, GumbelConfig, Node, RootAction, SearchDiagnostics, SearchResult};
+use crate::PositionValue;
 use engine_core::agent::PolicyMode;
 use engine_core::game::GameState;
-use rand::prelude::*;
+use rand::Rng;
 
+/// Strict Full Gumbel search: root Gumbel sequential halving and Mctx's
+/// improved-policy-deficit selector at interior nodes. Every leaf is completed
+/// before another one is selected, so it never shares PUCT batching semantics.
 #[derive(Debug)]
-pub(super) struct Gumbel {
-    pub(super) sampled_actions: usize,
+pub(super) struct FullGumbel {
+    pub(super) config: GumbelConfig,
     pub(super) root_actions: Vec<RootAction>,
 }
 
-impl Gumbel {
-    /// Parameters of the completed-Q transformation. The transformed value is
-    /// `(C_VISIT + max_child_visits) * C_SCALE * normalized_q`.
-    const C_VISIT: f32 = 50.0;
-    const C_SCALE: f32 = 1.0;
-    const Q_EPSILON: f32 = 1e-8;
-    const EXPLORATION_SCALE: f32 = 1.0;
+impl From<GumbelConfig> for FullGumbel {
+    fn from(config: GumbelConfig) -> Self {
+        Self {
+            config,
+            root_actions: Vec::new(),
+        }
+    }
 }
 
-impl<G, E, R> MctsCore<G, E, R, Gumbel>
+impl<G, E, R> MctsCore<G, E, R, FullGumbel>
 where
     G: GameState + Clone,
     E: crate::PolicyValueEvaluator<G>,
@@ -29,12 +33,12 @@ where
         &mut self,
         game: &G,
         context: R::Context<'_>,
-        mode: PolicyMode,
-    ) -> SearchResult<G::Move> {
+        _mode: PolicyMode,
+    ) -> Result<SearchResult<G::Move>, super::SearchError> {
         assert!(!game.is_terminal(), "terminal roots must be rejected");
         self.clear_tree_common();
-        self.nodes.push(Node::new(None, None, 0.0, 0.0, false, 0.0));
-
+        self.nodes
+            .push(Node::new(None, None, 0.0, 0.0, false, PositionValue::DRAW));
         let mut root = game.clone();
         self.rules.reset_path(context, game, &mut self.path_state);
         let _ = self.rules.enter_state(
@@ -43,251 +47,311 @@ where
             &mut self.path_state,
             &mut self.nodes[0].meta,
         );
-        let (root_legal, root_eval) = self.evaluate_position(&root);
-        let root_value = root_eval.value;
-        self.build_policy_from(&root_legal, &root_eval, false);
+        let evaluation = self
+            .evaluate_position(&root)
+            .map_err(super::SearchError::Evaluation)?;
+        let root_value = evaluation.value;
+        self.nodes[0].raw_value = root_value;
+        self.build_policy_from(evaluation.legal(), evaluation.logits(), false, None);
         self.expand(0);
+        self.init_root_actions();
 
-        let gumbel_scale = if mode == PolicyMode::Explore {
-            Gumbel::EXPLORATION_SCALE
-        }
-        else {
-            0.0
+        let mut diagnostics = SearchDiagnostics {
+            network_evaluations: 1,
+            ..SearchDiagnostics::default()
         };
-        let winner = self.run_gumbel(game, root_value, gumbel_scale, context);
-        let selected_move = self.nodes[winner as usize]
+        let schedule = gumbel_visit_schedule(
+            self.variant.root_actions.len(),
+            self.variant.config.simulations,
+        );
+        let mut batch = LeafBatch::with_capacity(1);
+        for considered_visits in schedule {
+            let child = self
+                .best_root_action(considered_visits)
+                .expect("sequential-halving schedule must select an action");
+            let (leaf, state, depth) = self.descend(game, child, context, |core, node| {
+                core.select_interior_action(node)
+            });
+            self.reserve_path(leaf);
+            batch.leaves.push(PendingLeaf {
+                node: leaf,
+                game: state,
+            });
+            diagnostics.max_depth = diagnostics.max_depth.max(depth);
+            self.finish_leaf_batch(&mut batch, &mut diagnostics)
+                .map_err(super::SearchError::Evaluation)?;
+        }
+        let selected = self.select_root_winner();
+        let selected_move = self.nodes[selected as usize]
             .move_from_parent
-            .expect("Gumbel winner must be a root child");
-        let policy = self.root_gumbel_policy(root_value);
-
-        SearchResult {
+            .expect("root action must be a child move");
+        let policy = self.root_improved_policy();
+        let root_value = self.nodes[0].completed_q().unwrap_or(root_value);
+        Ok(SearchResult {
             policy,
             selected_move,
-            value: if self.nodes[0].visits > 0 {
-                self.nodes[0].q()
-            }
-            else {
-                root_value
-            },
-        }
+            root_value,
+            diagnostics,
+        })
     }
 
-    fn root_gumbel_policy(&self, root_value: f32) -> Vec<(G::Move, f32)> {
-        let root = &self.nodes[0];
-        let transform = self.root_q_transform(root_value);
-        let mut policy = Vec::with_capacity(usize::from(root.num_children));
-        let mut max_search_logit = f32::NEG_INFINITY;
-
-        for c in root.first_child..root.first_child + u32::from(root.num_children) {
-            let child = &self.nodes[c as usize];
-            let q = self.completed_root_child_q(c, transform);
-            max_search_logit = max_search_logit.max(child.logit + transform.apply(q));
-        }
-
-        let mut sum = 0.0f32;
-        for c in root.first_child..root.first_child + u32::from(root.num_children) {
-            let child = &self.nodes[c as usize];
-            let q = self.completed_root_child_q(c, transform);
-            let p = (child.logit + transform.apply(q) - max_search_logit).exp();
-            policy.push((
-                child
-                    .move_from_parent
-                    .expect("root child must store a move"),
-                p,
-            ));
-            sum += p;
-        }
-
-        if sum.is_finite() && sum > 0.0 {
-            for (_, probability) in &mut policy {
-                *probability /= sum;
-            }
-        }
-        else {
-            let uniform = 1.0 / root.num_children as f32;
-            for (_, probability) in &mut policy {
-                *probability = uniform;
-            }
-        }
-        policy
-    }
-
-    fn run_gumbel(
-        &mut self,
-        game: &G,
-        root_value: f32,
-        gumbel_scale: f32,
-        context: R::Context<'_>,
-    ) -> u32 {
-        self.init_gumbel_root_actions(gumbel_scale);
-        debug_assert!(!self.variant.root_actions.is_empty());
-
-        let schedule = gumbel_visit_schedule(self.variant.root_actions.len(), self.cfg.simulations);
-        let mut batch = LeafBatch::with_capacity(self.leaf_batch_size());
-        for considered_visit in schedule {
-            let transform = self.root_q_transform(root_value);
-            let child = self
-                .best_gumbel_action_with_visits(considered_visit, transform)
-                .expect("Gumbel visit schedule must always have a considered action");
-            batch
-                .leaves
-                .push(self.collect_leaf(game, Some(child), context));
-            if batch.leaves.len() >= self.leaf_batch_size() {
-                self.finish_leaf_batch(&mut batch);
-            }
-        }
-        if !batch.leaves.is_empty() {
-            self.finish_leaf_batch(&mut batch);
-        }
-
-        self.select_gumbel_winner(root_value)
-    }
-
-    fn init_gumbel_root_actions(&mut self, gumbel_scale: f32) {
+    fn init_root_actions(&mut self) {
         self.variant.root_actions.clear();
-        let root = &self.nodes[0];
-        for c in root.first_child..root.first_child + u32::from(root.num_children) {
-            let child = &self.nodes[c as usize];
-            self.variant.root_actions.push(RootAction {
-                node: c,
-                gumbel_logit: child.logit + gumbel_scale * sample_gumbel(&mut self.rng),
-            });
-        }
-
+        let nodes: Vec<_> = self.child_indices(0).collect();
+        let actions: Vec<_> = nodes
+            .into_iter()
+            .map(|node| {
+                let logit = self.nodes[node as usize].logit;
+                RootAction {
+                    node,
+                    gumbel_logit: logit
+                        + self.variant.config.gumbel_scale * sample_gumbel(&mut self.rng),
+                }
+            })
+            .collect();
+        self.variant.root_actions = actions;
         self.variant
             .root_actions
-            .sort_unstable_by(|a, b| b.gumbel_logit.total_cmp(&a.gumbel_logit));
+            .sort_unstable_by(|left, right| right.gumbel_logit.total_cmp(&left.gumbel_logit));
         let limit = self
             .variant
-            .sampled_actions
-            .max(1)
-            .min(self.cfg.simulations)
+            .config
+            .max_considered_actions
+            .min(self.variant.config.simulations)
             .min(self.variant.root_actions.len());
         self.variant.root_actions.truncate(limit);
     }
 
-    fn best_gumbel_action_with_visits(
-        &self,
-        considered_visit: u32,
-        transform: RootQTransform,
-    ) -> Option<u32> {
-        let mut best = None;
-        let mut best_score = f32::NEG_INFINITY;
-        for &action in &self.variant.root_actions {
-            if self.nodes[action.node as usize].effective_visits() != considered_visit {
-                continue;
-            }
-            let score = self.root_action_score(action, transform);
-            if score > best_score {
-                best_score = score;
-                best = Some(action.node);
-            }
-        }
-        best
+    fn best_root_action(&self, considered_visits: u32) -> Option<u32> {
+        let q = self.child_transformed_q(0);
+        self.variant
+            .root_actions
+            .iter()
+            .filter(|action| self.nodes[action.node as usize].completed_visits == considered_visits)
+            .max_by(|left, right| {
+                let left_q = q[(left.node - self.nodes[0].first_child) as usize];
+                let right_q = q[(right.node - self.nodes[0].first_child) as usize];
+                (left.gumbel_logit + left_q).total_cmp(&(right.gumbel_logit + right_q))
+            })
+            .map(|action| action.node)
     }
 
-    fn select_gumbel_winner(&self, root_value: f32) -> u32 {
-        let considered_visit = self
+    fn select_root_winner(&self) -> u32 {
+        let visits = self
             .variant
             .root_actions
             .iter()
-            .map(|action| self.nodes[action.node as usize].visits)
+            .map(|action| self.nodes[action.node as usize].completed_visits)
             .max()
-            .expect("non-terminal root must contain a legal action");
-        let transform = self.root_q_transform(root_value);
-        self.best_gumbel_action_with_visits(considered_visit, transform)
-            .expect("at least one Gumbel action must have the maximum visit count")
+            .expect("root must have candidates");
+        self.best_root_action(visits)
+            .expect("root candidate at maximum completed visits")
     }
 
-    fn root_action_score(&self, action: RootAction, transform: RootQTransform) -> f32 {
-        let q = self.completed_root_child_q(action.node, transform);
-        action.gumbel_logit + transform.apply(q)
+    fn select_interior_action(&self, node: u32) -> Option<u32> {
+        let transformed_q = self.child_transformed_q(node);
+        let logits: Vec<f32> = self
+            .child_indices(node)
+            .map(|child| self.nodes[child as usize].logit)
+            .collect();
+        let target = softmax(
+            &logits
+                .iter()
+                .zip(&transformed_q)
+                .map(|(logit, q)| logit + q)
+                .collect::<Vec<_>>(),
+        );
+        let total_visits: u32 = self
+            .child_indices(node)
+            .map(|child| self.nodes[child as usize].completed_visits)
+            .sum();
+        self.child_indices(node)
+            .enumerate()
+            .max_by(|(left_index, left), (right_index, right)| {
+                let left_deficit = target[*left_index]
+                    - self.nodes[*left as usize].completed_visits as f32
+                        / (1 + total_visits) as f32;
+                let right_deficit = target[*right_index]
+                    - self.nodes[*right as usize].completed_visits as f32
+                        / (1 + total_visits) as f32;
+                left_deficit.total_cmp(&right_deficit)
+            })
+            .map(|(_, child)| child)
     }
 
-    fn completed_root_child_q(&self, child: u32, transform: RootQTransform) -> f32 {
-        if self.nodes[child as usize].effective_visits() == 0 {
-            transform.completed_value
-        }
-        else {
-            -self.nodes[child as usize].effective_q()
-        }
+    fn root_improved_policy(&self) -> Vec<(G::Move, f32)> {
+        let transformed_q = self.child_transformed_q(0);
+        let logits: Vec<f32> = self
+            .child_indices(0)
+            .enumerate()
+            .map(|(index, child)| self.nodes[child as usize].logit + transformed_q[index])
+            .collect();
+        let probabilities = softmax(&logits);
+        self.child_indices(0)
+            .zip(probabilities)
+            .map(|(child, probability)| {
+                (
+                    self.nodes[child as usize]
+                        .move_from_parent
+                        .expect("root child must have move"),
+                    probability,
+                )
+            })
+            .collect()
     }
 
-    fn root_q_transform(&self, root_value: f32) -> RootQTransform {
-        let root = &self.nodes[0];
-        let mut total_visits = 0u32;
-        let mut visited_prior_sum = 0.0f32;
-        let mut prior_weighted_q = 0.0f32;
-        let mut max_visits = 0u32;
+    fn child_transformed_q(&self, node: u32) -> Vec<f32> {
+        let parent = &self.nodes[node as usize];
+        let q_values: Vec<_> = self
+            .child_indices(node)
+            .map(|child| {
+                self.nodes[child as usize]
+                    .completed_q()
+                    .map(PositionValue::flipped)
+            })
+            .collect();
+        let visits: Vec<_> = self
+            .child_indices(node)
+            .map(|child| self.nodes[child as usize].completed_visits)
+            .collect();
+        let priors: Vec<_> = self
+            .child_indices(node)
+            .map(|child| self.nodes[child as usize].prior)
+            .collect();
+        transform_completed_q(
+            parent.raw_value,
+            &q_values,
+            &visits,
+            &priors,
+            self.variant.config.qtransform,
+        )
+    }
 
-        for c in root.first_child..root.first_child + u32::from(root.num_children) {
-            let child = &self.nodes[c as usize];
-            max_visits = max_visits.max(child.effective_visits());
-            if child.effective_visits() > 0 {
-                let prior = child.prior.max(f32::MIN_POSITIVE);
-                total_visits += child.effective_visits();
-                visited_prior_sum += prior;
-                prior_weighted_q += prior * -child.effective_q();
-            }
-        }
+    fn child_indices(&self, node: u32) -> impl Iterator<Item = u32> + '_ {
+        let node = &self.nodes[node as usize];
+        node.first_child..node.first_child + u32::from(node.num_children)
+    }
+}
 
-        let weighted_q = if visited_prior_sum > 0.0 {
-            prior_weighted_q / visited_prior_sum
-        }
-        else {
-            root_value
-        };
-        let completed_value =
-            (root_value + total_visits as f32 * weighted_q) / (total_visits as f32 + 1.0);
-
-        let mut min_value = completed_value;
-        let mut max_value = completed_value;
-        for c in root.first_child..root.first_child + u32::from(root.num_children) {
-            let child = &self.nodes[c as usize];
-            let q = if child.effective_visits() == 0 {
-                completed_value
-            }
-            else {
-                -child.effective_q()
-            };
-            min_value = min_value.min(q);
-            max_value = max_value.max(q);
-        }
-
-        let range = max_value - min_value;
-        RootQTransform {
-            completed_value,
-            min_value,
-            inv_range: if range > Gumbel::Q_EPSILON {
-                range.recip()
-            }
-            else {
-                0.0
-            },
-            scale: (Gumbel::C_VISIT + max_visits as f32) * Gumbel::C_SCALE,
+pub(super) fn mixed_value(
+    raw_value: PositionValue,
+    q_values: &[Option<PositionValue>],
+    completed_visits: &[u32],
+    prior_probs: &[f32],
+) -> PositionValue {
+    debug_assert_eq!(q_values.len(), completed_visits.len());
+    debug_assert_eq!(q_values.len(), prior_probs.len());
+    let mut weighted_q = 0.0;
+    let mut prior_mass = 0.0;
+    let mut visits = 0u32;
+    for ((q, &count), &prior) in q_values.iter().zip(completed_visits).zip(prior_probs) {
+        if let Some(q) = q.filter(|_| count > 0) {
+            // Mctx weights each *visited action* by its prior, then uses the
+            // total visit count only for the raw-value interpolation below.
+            // Multiplying this weight by `count` would bias the completed
+            // value toward frequently selected actions twice.
+            let weight = prior.max(f32::MIN_POSITIVE);
+            weighted_q += weight * q.as_f32();
+            prior_mass += weight;
+            visits += count;
         }
     }
+    if visits == 0 || prior_mass <= 0.0 {
+        return raw_value;
+    }
+    PositionValue::new_clamped(
+        (raw_value.as_f32() + visits as f32 * weighted_q / prior_mass) / (visits as f32 + 1.0),
+    )
+}
+
+pub(super) fn completed_q_values(
+    raw_value: PositionValue,
+    q_values: &[Option<PositionValue>],
+    completed_visits: &[u32],
+    prior_probs: &[f32],
+    use_mixed_value: bool,
+) -> Vec<f32> {
+    let mixed = if use_mixed_value {
+        mixed_value(raw_value, q_values, completed_visits, prior_probs)
+    } else {
+        raw_value
+    };
+    q_values
+        .iter()
+        .zip(completed_visits)
+        .map(|(&q, &visits)| q.filter(|_| visits > 0).unwrap_or(mixed).as_f32())
+        .collect()
+}
+
+pub(super) fn rescale_q_values(values: &mut [f32], epsilon: f32) {
+    let min = values.iter().copied().fold(f32::INFINITY, f32::min);
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let range = max - min;
+    if range > epsilon {
+        for value in values {
+            *value = (*value - min) / range;
+        }
+    } else {
+        values.fill(0.0);
+    }
+}
+
+pub(super) fn transform_completed_q(
+    raw_value: PositionValue,
+    q_values: &[Option<PositionValue>],
+    completed_visits: &[u32],
+    prior_probs: &[f32],
+    config: CompletedQConfig,
+) -> Vec<f32> {
+    let mut values = completed_q_values(
+        raw_value,
+        q_values,
+        completed_visits,
+        prior_probs,
+        config.use_mixed_value,
+    );
+    if config.rescale_values {
+        rescale_q_values(&mut values, config.epsilon);
+    }
+    let max_visits = completed_visits.iter().copied().max().unwrap_or(0) as f32;
+    let scale = (config.maxvisit_init + max_visits) * config.value_scale;
+    for value in &mut values {
+        *value *= scale;
+    }
+    values
+}
+
+fn softmax(logits: &[f32]) -> Vec<f32> {
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut probabilities: Vec<_> = logits.iter().map(|logit| (*logit - max).exp()).collect();
+    let total: f32 = probabilities.iter().sum();
+    if total.is_finite() && total > 0.0 {
+        for probability in &mut probabilities {
+            *probability /= total;
+        }
+    } else if !probabilities.is_empty() {
+        let uniform = 1.0 / probabilities.len() as f32;
+        probabilities.fill(uniform);
+    }
+    probabilities
 }
 
 fn ceil_log2(n: usize) -> usize {
-    usize::BITS as usize - (n.saturating_sub(1)).leading_zeros() as usize
+    usize::BITS as usize - (n.saturating_sub(1).leading_zeros() as usize)
 }
 
-/// Visit-count schedule used by Sequential Halving. This is equivalent to the
-/// schedule in DeepMind's Mctx implementation and handles budgets that do not
-/// divide evenly between phases without wasting simulations.
-fn gumbel_visit_schedule(num_considered: usize, simulations: usize) -> Vec<u32> {
-    debug_assert!(num_considered > 0);
-    let mut sequence = Vec::with_capacity(simulations);
+pub(super) fn gumbel_visit_schedule(num_considered: usize, simulations: usize) -> Vec<u32> {
+    assert!(
+        num_considered > 0,
+        "Gumbel requires at least one considered action"
+    );
     if num_considered == 1 {
-        sequence.extend((0..simulations).map(|visit| visit as u32));
-        return sequence;
+        return (0..simulations).map(|visit| visit as u32).collect();
     }
-
     let phases = ceil_log2(num_considered).max(1);
     let mut visits = vec![0u32; num_considered];
     let mut active = num_considered;
-
+    let mut sequence = Vec::with_capacity(simulations);
     while sequence.len() < simulations {
         let extra_visits = (simulations / (phases * active)).max(1);
         for _ in 0..extra_visits {
@@ -301,12 +365,80 @@ fn gumbel_visit_schedule(num_considered: usize, simulations: usize) -> Vec<u32> 
         }
         active = (active / 2).max(2);
     }
-
     sequence.truncate(simulations);
     sequence
 }
 
 fn sample_gumbel<R: Rng + ?Sized>(rng: &mut R) -> f32 {
-    let u = rng.random_range(f32::MIN_POSITIVE..1.0);
-    -(-u.ln()).ln()
+    let uniform = rng.random_range(f32::MIN_POSITIVE..1.0);
+    -(-uniform.ln()).ln()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mctx_mixed_value_oracle(
+        raw: f32,
+        q_values: &[Option<f32>],
+        visits: &[u32],
+        priors: &[f32],
+    ) -> f32 {
+        let total_visits: u32 = visits.iter().sum();
+        if total_visits == 0 {
+            return raw;
+        }
+        let prior_mass: f32 = priors
+            .iter()
+            .zip(visits)
+            .filter(|(_, &count)| count > 0)
+            .map(|(&prior, _)| prior.max(f32::MIN_POSITIVE))
+            .sum();
+        let weighted_q: f32 = q_values
+            .iter()
+            .zip(visits)
+            .zip(priors)
+            .filter(|&((&_, &count), &_)| count > 0)
+            .map(|((&q, &_), &prior)| {
+                q.expect("visited actions have q values") * prior.max(f32::MIN_POSITIVE)
+                    / prior_mass
+            })
+            .sum();
+        (raw + total_visits as f32 * weighted_q) / (total_visits + 1) as f32
+    }
+
+    #[test]
+    fn completed_q_uses_raw_value_without_visits() {
+        let raw = PositionValue::new_clamped(0.4);
+        assert_eq!(mixed_value(raw, &[None, None], &[0, 0], &[0.5, 0.5]), raw);
+    }
+
+    #[test]
+    fn mixed_value_matches_independent_mctx_formula() {
+        let raw = 0.2;
+        let q_values = [Some(0.9), Some(-0.5), None];
+        let visits = [7, 1, 0];
+        let priors = [0.2, 0.8, 0.0];
+        let expected = mctx_mixed_value_oracle(raw, &q_values, &visits, &priors);
+        let actual = mixed_value(
+            PositionValue::new_clamped(raw),
+            &q_values.map(|value| value.map(PositionValue::new_clamped)),
+            &visits,
+            &priors,
+        )
+        .as_f32();
+        assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn rescaling_equal_values_is_finite() {
+        let mut values = [0.3, 0.3];
+        rescale_q_values(&mut values, 1e-8);
+        assert_eq!(values, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn one_action_schedule_is_consecutive() {
+        assert_eq!(gumbel_visit_schedule(1, 8), (0..8).collect::<Vec<_>>());
+    }
 }
