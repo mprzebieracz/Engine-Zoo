@@ -35,21 +35,29 @@ where
         context: R::Context<'_>,
         _mode: PolicyMode,
     ) -> Result<SearchResult<G::Move>, super::SearchError> {
-        assert!(!game.is_terminal(), "terminal roots must be rejected");
         self.clear_tree_common();
         self.nodes
             .push(Node::new(None, None, 0.0, 0.0, false, PositionValue::DRAW));
         let mut root = game.clone();
         self.rules.reset_path(context, game, &mut self.path_state);
-        let _ = self.rules.enter_state(
+        let root_rule = self.rules.enter_state(
             context,
             &mut root,
             &mut self.path_state,
             &mut self.nodes[0].meta,
         );
-        let evaluation = self
+        if let Some(value) = self.terminal_value(&root, root_rule) {
+            return Err(super::SearchError::TerminalRoot { value });
+        }
+        if root.legal_moves().next().is_none() {
+            return Err(super::SearchError::NoLegalMoves);
+        }
+        let (evaluation, root_stats) = self
             .evaluate_position(&root)
             .map_err(super::SearchError::Evaluation)?;
+        if evaluation.legal().is_empty() {
+            return Err(super::SearchError::NoLegalMoves);
+        }
         let root_value = evaluation.value;
         self.nodes[0].raw_value = root_value;
         self.build_policy_from(evaluation.legal(), evaluation.logits(), false, None);
@@ -57,7 +65,9 @@ where
         self.init_root_actions();
 
         let mut diagnostics = SearchDiagnostics {
-            network_evaluations: 1,
+            backend_evaluations: root_stats.backend_evaluations,
+            evaluation_cache_hits: root_stats.cache_hits,
+            evaluation_cache_misses: root_stats.backend_evaluations,
             ..SearchDiagnostics::default()
         };
         let schedule = gumbel_visit_schedule(
@@ -259,9 +269,10 @@ pub(super) fn mixed_value(
     if visits == 0 || prior_mass <= 0.0 {
         return raw_value;
     }
-    PositionValue::new_clamped(
+    PositionValue::from_finite_clamped(
         (raw_value.as_f32() + visits as f32 * weighted_q / prior_mass) / (visits as f32 + 1.0),
     )
+    .expect("finite search values must produce a finite mixed value")
 }
 
 pub(super) fn completed_q_values(
@@ -325,13 +336,9 @@ fn softmax(logits: &[f32]) -> Vec<f32> {
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut probabilities: Vec<_> = logits.iter().map(|logit| (*logit - max).exp()).collect();
     let total: f32 = probabilities.iter().sum();
-    if total.is_finite() && total > 0.0 {
-        for probability in &mut probabilities {
-            *probability /= total;
-        }
-    } else if !probabilities.is_empty() {
-        let uniform = 1.0 / probabilities.len() as f32;
-        probabilities.fill(uniform);
+    debug_assert!(total.is_finite() && total > 0.0);
+    for probability in &mut probabilities {
+        *probability /= total;
     }
     probabilities
 }
@@ -409,7 +416,7 @@ mod tests {
 
     #[test]
     fn completed_q_uses_raw_value_without_visits() {
-        let raw = PositionValue::new_clamped(0.4);
+        let raw = PositionValue::new(0.4).unwrap();
         assert_eq!(mixed_value(raw, &[None, None], &[0, 0], &[0.5, 0.5]), raw);
     }
 
@@ -421,8 +428,8 @@ mod tests {
         let priors = [0.2, 0.8, 0.0];
         let expected = mctx_mixed_value_oracle(raw, &q_values, &visits, &priors);
         let actual = mixed_value(
-            PositionValue::new_clamped(raw),
-            &q_values.map(|value| value.map(PositionValue::new_clamped)),
+            PositionValue::new(raw).unwrap(),
+            &q_values.map(|value| value.map(|value| PositionValue::new(value).unwrap())),
             &visits,
             &priors,
         )
@@ -440,5 +447,31 @@ mod tests {
     #[test]
     fn one_action_schedule_is_consecutive() {
         assert_eq!(gumbel_visit_schedule(1, 8), (0..8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn sequential_halving_matches_checked_in_reference_schedules() {
+        for line in include_str!("../../fixtures/full_gumbel_schedule.csv").lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut fields = line.split(',');
+            let actions = fields.next().unwrap().parse().unwrap();
+            let simulations = fields.next().unwrap().parse().unwrap();
+            let expected = fields
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .map(str::parse)
+                .collect::<Result<Vec<u32>, _>>()
+                .unwrap();
+            assert!(fields.next().is_none(), "invalid fixture row: {line}");
+            assert_eq!(
+                gumbel_visit_schedule(actions, simulations),
+                expected,
+                "{line}"
+            );
+        }
     }
 }

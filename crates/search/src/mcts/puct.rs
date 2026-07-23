@@ -59,22 +59,30 @@ where
         context: R::Context<'_>,
         mode: PolicyMode,
     ) -> Result<SearchResult<G::Move>, super::SearchError> {
-        assert!(!game.is_terminal(), "terminal roots must be rejected");
         self.clear_tree_common();
         self.nodes
             .push(Node::new(None, None, 0.0, 0.0, false, PositionValue::DRAW));
 
         let mut root = game.clone();
         self.rules.reset_path(context, game, &mut self.path_state);
-        let _ = self.rules.enter_state(
+        let root_rule = self.rules.enter_state(
             context,
             &mut root,
             &mut self.path_state,
             &mut self.nodes[0].meta,
         );
-        let root_eval = self
+        if let Some(value) = self.terminal_value(&root, root_rule) {
+            return Err(super::SearchError::TerminalRoot { value });
+        }
+        if root.legal_moves().next().is_none() {
+            return Err(super::SearchError::NoLegalMoves);
+        }
+        let (root_eval, root_stats) = self
             .evaluate_position(&root)
             .map_err(super::SearchError::Evaluation)?;
+        if root_eval.legal().is_empty() {
+            return Err(super::SearchError::NoLegalMoves);
+        }
         self.nodes[0].raw_value = root_eval.value;
         self.build_policy_from(
             root_eval.legal(),
@@ -86,7 +94,9 @@ where
 
         let mut batch = LeafBatch::with_capacity(self.cfg.leaf_batch_size);
         let mut diagnostics = SearchDiagnostics {
-            network_evaluations: 1,
+            backend_evaluations: root_stats.backend_evaluations,
+            evaluation_cache_hits: root_stats.cache_hits,
+            evaluation_cache_misses: root_stats.backend_evaluations,
             ..SearchDiagnostics::default()
         };
         while diagnostics.completed_simulations < self.cfg.simulations {

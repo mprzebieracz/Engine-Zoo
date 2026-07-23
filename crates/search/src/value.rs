@@ -35,15 +35,16 @@ impl PositionValue {
         }
     }
 
-    /// Converts a non-fallible model output into a legal search value.
-    /// Finite values are clamped to the closed unit interval; `NaN` becomes
-    /// neutral because the current evaluator trait cannot return an error.
-    pub fn new_clamped(value: f32) -> Self {
-        Self(if value.is_nan() {
-            0.0
+    /// Clamps finite arithmetic results to the legal interval.
+    ///
+    /// Network outputs must use [`Self::new`] instead: non-finite output is an
+    /// evaluator failure, not a draw.
+    pub fn from_finite_clamped(value: f32) -> Result<Self, InvalidValue> {
+        if value.is_finite() {
+            Ok(Self(value.clamp(-1.0, 1.0)))
         } else {
-            value.clamp(-1.0, 1.0)
-        })
+            Err(InvalidValue)
+        }
     }
 
     pub const fn as_f32(self) -> f32 {
@@ -75,14 +76,17 @@ mod tests {
         assert_eq!(PositionValue::new(-1.1), Err(InvalidValue));
         assert_eq!(PositionValue::new(f32::NAN), Err(InvalidValue));
         assert_eq!(
-            PositionValue::new_clamped(f32::INFINITY),
-            PositionValue::WIN
+            PositionValue::from_finite_clamped(1.1),
+            Ok(PositionValue::WIN)
         );
         assert_eq!(
-            PositionValue::new_clamped(f32::NEG_INFINITY),
-            PositionValue::LOSS
+            PositionValue::from_finite_clamped(f32::INFINITY),
+            Err(InvalidValue)
         );
-        assert_eq!(PositionValue::new_clamped(f32::NAN), PositionValue::DRAW);
+        assert_eq!(
+            PositionValue::from_finite_clamped(f32::NAN),
+            Err(InvalidValue)
+        );
         assert_eq!(PositionValue::WIN.flipped(), PositionValue::LOSS);
     }
 }

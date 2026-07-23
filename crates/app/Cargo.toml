@@ -2,6 +2,10 @@
 name = "engine_app"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 description = "CLI and API app for engine-zoo"
 build = "build.rs"
 

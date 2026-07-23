@@ -1,6 +1,6 @@
 use super::cache::CachedEvaluation;
 use super::core::MctsCore;
-use crate::PositionValue;
+use crate::{EvaluationError, EvaluationKey, PositionValue};
 use engine_core::GameState;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
@@ -21,15 +21,9 @@ pub(super) fn build_policy<M: Copy>(
         sum += prior;
         buf.push((m, prior, logit));
     }
-    if sum.is_finite() && sum > 0.0 {
-        for (_, p, _) in &mut *buf {
-            *p /= sum;
-        }
-    } else if !buf.is_empty() {
-        let p = 1.0 / buf.len() as f32;
-        for (_, prior, _) in &mut *buf {
-            *prior = p;
-        }
+    debug_assert!(sum.is_finite() && sum > 0.0);
+    for (_, prior, _) in &mut *buf {
+        *prior /= sum;
     }
     if let Some(noise) = noise.filter(|noise| noise.epsilon > 0.0 && !buf.is_empty()) {
         let gamma = Gamma::new(noise.alpha, 1.0).expect("validated Dirichlet alpha");
@@ -46,6 +40,16 @@ pub(super) fn build_policy<M: Copy>(
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct EvaluationBatchStats {
+    pub(super) requested_states: usize,
+    pub(super) duplicate_requests: usize,
+    pub(super) cache_hits: usize,
+    pub(super) backend_evaluations: usize,
+}
+
+type EvaluationBatch<M> = (Vec<CachedEvaluation<M>>, EvaluationBatchStats);
+
 impl<G, E, R, V> MctsCore<G, E, R, V>
 where
     G: GameState + Clone,
@@ -56,12 +60,15 @@ where
     pub(super) fn evaluate_position(
         &mut self,
         state: &G,
-    ) -> Result<CachedEvaluation<G::Move>, crate::EvaluationError> {
+    ) -> Result<(CachedEvaluation<G::Move>, EvaluationBatchStats), crate::EvaluationError> {
         self.evaluate_positions(std::slice::from_ref(state))
-            .map(|mut evaluations| {
-                evaluations
-                    .pop()
-                    .expect("one requested evaluation must produce one result")
+            .map(|(mut evaluations, stats)| {
+                (
+                    evaluations
+                        .pop()
+                        .expect("one requested evaluation must produce one result"),
+                    stats,
+                )
             })
     }
     pub(super) fn build_policy_from(
@@ -99,13 +106,17 @@ where
     pub(super) fn evaluate_positions(
         &mut self,
         states: &[G],
-    ) -> Result<Vec<CachedEvaluation<G::Move>>, crate::EvaluationError> {
+    ) -> Result<EvaluationBatch<G::Move>, crate::EvaluationError> {
         if states.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), EvaluationBatchStats::default()));
         }
+        let mut stats = EvaluationBatchStats {
+            requested_states: states.len(),
+            ..EvaluationBatchStats::default()
+        };
         let mut out: Vec<Option<CachedEvaluation<G::Move>>> = vec![None; states.len()];
         let mut misses = Vec::new();
-        let mut keys: Vec<Option<u64>> = Vec::new();
+        let mut keys: Vec<Option<EvaluationKey>> = Vec::new();
         let mut destinations = Vec::new();
         for (i, state) in states.iter().enumerate() {
             let Some(key) = self.evaluator.evaluation_key(state) else {
@@ -118,11 +129,13 @@ where
             if let Some(cache) = &self.eval_cache {
                 if let Some(value) = cache.get(key) {
                     out[i] = Some(value);
+                    stats.cache_hits += 1;
                     continue;
                 }
             }
             if let Some(j) = keys.iter().position(|&k| k == Some(key)) {
                 destinations.push((i, Some(j)));
+                stats.duplicate_requests += 1;
             } else {
                 keys.push(Some(key));
                 destinations.push((i, Some(misses.len())));
@@ -145,10 +158,26 @@ where
                 evaluations.len(),
             ));
         }
+        stats.backend_evaluations = misses.len();
         let mut unique = Vec::with_capacity(misses.len());
         for (i, eval) in evaluations.into_iter().enumerate() {
             let begin = self.offsets[i] as usize;
             let end = self.offsets[i + 1] as usize;
+            let expected = end - begin;
+            if eval.logits.len() != expected {
+                return Err(EvaluationError::LogitCardinality {
+                    row: i,
+                    expected,
+                    actual: eval.logits.len(),
+                });
+            }
+            if let Some(index) = eval.logits.iter().position(|logit| !logit.is_finite()) {
+                return Err(EvaluationError::NonFiniteLogit { row: i, index });
+            }
+            let value = eval.value.as_f32();
+            if !value.is_finite() || !(-1.0..=1.0).contains(&value) {
+                return Err(EvaluationError::InvalidValue { row: i, value });
+            }
             let value = CachedEvaluation::new(
                 self.legal_moves[begin..end].to_vec(),
                 eval.logits,
@@ -162,6 +191,8 @@ where
         for (i, destination) in destinations {
             out[i] = Some(unique[destination.unwrap()].clone());
         }
-        Ok(out.into_iter().map(Option::unwrap).collect())
+        let evaluations = out.into_iter().map(Option::unwrap).collect::<Vec<_>>();
+        debug_assert_eq!(stats.requested_states, evaluations.len());
+        Ok((evaluations, stats))
     }
 }

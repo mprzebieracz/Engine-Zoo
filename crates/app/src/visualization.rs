@@ -317,7 +317,7 @@ fn render_ascii_board(board: &str) -> String {
             continue;
         };
         for (file, piece) in parts.take(8).enumerate() {
-            let light = (rank.parse::<usize>().unwrap_or(1) + file).is_multiple_of(2);
+            let light = (rank.parse::<usize>().unwrap_or(1) + file) % 2 == 0;
             cells.push_str(&format!(
                 r#"<div class="sq {}">{}</div>"#,
                 if light { "light" } else { "dark" },

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tch::{nn, Kind, Tensor};
 
 #[path = "network/legacy.rs"]
@@ -23,6 +24,28 @@ pub enum ChessHistoryLength {
     Four,
     Eight,
 }
+
+/// Complete shape of the canonical chess squeeze-excitation trunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeTrunkSpec {
+    pub blocks: usize,
+    pub channels: i64,
+    pub se_hidden: i64,
+}
+
+impl Default for SeTrunkSpec {
+    fn default() -> Self {
+        Self {
+            blocks: 12,
+            channels: 128,
+            se_hidden: 16,
+        }
+    }
+}
+
+/// Stable identity for tensor-shape-compatible model data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModelFingerprint(pub [u8; 32]);
 
 impl ChessHistoryLength {
     pub const fn as_usize(self) -> usize {
@@ -81,14 +104,22 @@ impl ModelSpec {
     }
 
     pub fn chess_se(history: ChessHistoryLength, value_head: ValueHeadConfig) -> Self {
+        Self::chess_se_with_trunk(history, SeTrunkSpec::default(), value_head)
+    }
+
+    pub fn chess_se_with_trunk(
+        history: ChessHistoryLength,
+        trunk: SeTrunkSpec,
+        value_head: ValueHeadConfig,
+    ) -> Self {
         Self {
             game: GameSpec::Chess,
             representation: RepresentationSpec::ChessCanonical { history },
             network: NetworkSpec::Residual(ResidualNetworkConfig {
                 trunk: ResidualTrunkConfig::SqueezeExcitation {
-                    blocks: 12,
-                    channels: 128,
-                    se_hidden: 16,
+                    blocks: trunk.blocks,
+                    channels: trunk.channels,
+                    se_hidden: trunk.se_hidden,
                 },
                 policy_head: PolicyHeadConfig::ConvolutionalPlanes { planes: 73 },
                 value_head,
@@ -135,6 +166,11 @@ impl ModelSpec {
 
     pub const fn is_chess_classic(&self) -> bool {
         matches!(self.representation, RepresentationSpec::ChessClassic)
+    }
+
+    pub fn fingerprint(&self) -> ModelFingerprint {
+        let bytes = serde_json::to_vec(self).expect("model specifications serialize");
+        ModelFingerprint(Sha256::digest(bytes).into())
     }
 }
 
@@ -401,5 +437,29 @@ mod tests {
         let NetworkSpec::Residual(network) = &mut spec.network;
         network.policy_head = PolicyHeadConfig::ConvolutionalPlanes { planes: 72 };
         assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn fingerprints_include_every_checkpoint_shape_field() {
+        let a = ModelSpec::chess_se_with_trunk(
+            ChessHistoryLength::Four,
+            SeTrunkSpec {
+                blocks: 4,
+                channels: 32,
+                se_hidden: 8,
+            },
+            ValueHeadConfig::Wdl { hidden: 16 },
+        );
+        let b = ModelSpec::chess_se_with_trunk(
+            ChessHistoryLength::Four,
+            SeTrunkSpec {
+                blocks: 5,
+                channels: 32,
+                se_hidden: 8,
+            },
+            ValueHeadConfig::Wdl { hidden: 16 },
+        );
+        assert_eq!(a.fingerprint(), a.fingerprint());
+        assert_ne!(a.fingerprint(), b.fingerprint());
     }
 }

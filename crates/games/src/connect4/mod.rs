@@ -117,7 +117,7 @@ impl Connect4 {
 
     /// 1 if the first player (X) is to move, -1 otherwise.
     pub fn current_player(&self) -> i8 {
-        if self.ply.is_multiple_of(2) {
+        if self.ply % 2 == 0 {
             1
         } else {
             -1
@@ -135,7 +135,7 @@ impl Connect4 {
     }
 
     fn player1_stones(&self) -> u64 {
-        if self.ply.is_multiple_of(2) {
+        if self.ply % 2 == 0 {
             self.pos
         } else {
             self.pos ^ self.mask

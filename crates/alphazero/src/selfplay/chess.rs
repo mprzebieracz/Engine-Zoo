@@ -127,7 +127,7 @@ impl<const HISTORY: usize> SelfPlayWorker<ChessAzState<HISTORY>> for ChessSelfPl
                         SearchKind::Fast
                     },
                     simulations: budget.simulations() as u32,
-                    model_generation: self.config.model_generation,
+                    model_generation: request.model_generation,
                     game_id: request.game_id,
                     ply: trajectory.len() as u16,
                 },

@@ -43,7 +43,7 @@ impl InferenceBackend for MockBackend {
                         .iter()
                         .map(|action| action.as_u32() as f32)
                         .collect(),
-                    value: PositionValue::new_clamped(batch.states[row]),
+                    value: PositionValue::new(batch.states[row]).unwrap(),
                 }
             })
             .collect())
@@ -158,7 +158,7 @@ fn max_batch_splits_and_reassembles_one_large_request_in_order() {
             .collect::<Vec<_>>(),
         vec![0.0, 1.0, 2.0, 3.0, 4.0]
     );
-    assert_eq!(batcher.stats().max_inference_batch, 2);
+    assert_eq!(batcher.stats().lifetime_max_inference_batch, 2);
     assert_eq!(batcher.stats().split_batches, 2);
 }
 
@@ -193,8 +193,9 @@ fn reload_is_a_barrier_before_the_next_inference_pass() {
     });
     thread::sleep(Duration::from_millis(5));
     batcher.reload_weights(Path::new("unused")).unwrap();
+    assert_eq!(batcher.client().cache_namespace(), 1);
     evaluation.join().unwrap().unwrap();
-    assert_eq!(*events.lock().unwrap(), vec!["reload", "evaluate"]);
+    assert_eq!(*events.lock().unwrap(), vec!["evaluate", "reload"]);
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use super::representation::{Action, AlphaZeroRepresentation};
 use engine_core::GameState;
-use rand::seq::index;
+use rand::{seq::index, Rng};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::{Mutex, RwLock};
 use tch::Tensor;
@@ -321,18 +321,23 @@ impl<S: Clone> ReplayBuffer<S> {
 }
 
 impl<S: GameState + Clone> ReplayBuffer<S> {
-    pub fn sample<R: AlphaZeroRepresentation<S>>(
+    pub fn sample<R, Rep>(
         &self,
         batch_size: usize,
-        representation: &R,
-    ) -> Option<ReplayBatch> {
+        representation: &Rep,
+        rng: &mut R,
+    ) -> Option<ReplayBatch>
+    where
+        R: Rng + ?Sized,
+        Rep: AlphaZeroRepresentation<S>,
+    {
         let inner = self.inner.read().unwrap();
         let batch_size = batch_size.min(inner.len);
         if batch_size == 0 {
             return None;
         }
         let mut scratch = self.sample_scratch.lock().unwrap();
-        let state_size = R::state_size();
+        let state_size = Rep::state_size();
         scratch.states.resize(batch_size * state_size, 0.0);
         scratch.policy_actions.clear();
         scratch.policy_probabilities.clear();
@@ -342,7 +347,7 @@ impl<S: GameState + Clone> ReplayBuffer<S> {
         scratch.outcomes.clear();
         let mut offsets = Vec::with_capacity(batch_size + 1);
         offsets.push(0);
-        for (row, index) in index::sample(&mut rand::rng(), inner.len, batch_size)
+        for (row, index) in index::sample(rng, inner.len, batch_size)
             .into_iter()
             .enumerate()
         {

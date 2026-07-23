@@ -9,10 +9,11 @@ use anyhow::{Context, Result};
 use std::collections::VecDeque;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tch::Device;
 
 mod tch_backend;
@@ -57,7 +58,7 @@ impl CombinedEncodedBatch {
             0
         } else {
             anyhow::ensure!(
-                batch.states.len().is_multiple_of(batch.len()),
+                batch.states.len() % batch.len() == 0,
                 "encoded state count does not match rows"
             );
             batch.states.len() / batch.len()
@@ -146,7 +147,7 @@ pub struct BatcherClient {
     shared: Arc<Shared>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct BatcherStats {
     pub submitted_batches: u64,
     pub submitted_states: u64,
@@ -154,8 +155,16 @@ pub struct BatcherStats {
     pub coalesced_extra_requests: u64,
     pub split_batches: u64,
     pub partial_batches: u64,
-    pub max_submitted_batch: u64,
-    pub max_inference_batch: u64,
+    pub total_states: u64,
+    pub queue_wait_total: Duration,
+    pub queue_wait_max: Duration,
+    pub coalescing_wait_total: Duration,
+    pub backend_execution_total: Duration,
+    pub backend_execution_max: Duration,
+    pub reload_count: u64,
+    pub current_cache_namespace: u64,
+    pub lifetime_max_submitted_batch: u64,
+    pub lifetime_max_inference_batch: u64,
 }
 
 impl BatcherStats {
@@ -175,8 +184,22 @@ impl BatcherStats {
                 .saturating_sub(earlier.coalesced_extra_requests),
             split_batches: self.split_batches.saturating_sub(earlier.split_batches),
             partial_batches: self.partial_batches.saturating_sub(earlier.partial_batches),
-            max_submitted_batch: self.max_submitted_batch,
-            max_inference_batch: self.max_inference_batch,
+            total_states: self.total_states.saturating_sub(earlier.total_states),
+            queue_wait_total: self
+                .queue_wait_total
+                .saturating_sub(earlier.queue_wait_total),
+            queue_wait_max: self.queue_wait_max,
+            coalescing_wait_total: self
+                .coalescing_wait_total
+                .saturating_sub(earlier.coalescing_wait_total),
+            backend_execution_total: self
+                .backend_execution_total
+                .saturating_sub(earlier.backend_execution_total),
+            backend_execution_max: self.backend_execution_max,
+            reload_count: self.reload_count.saturating_sub(earlier.reload_count),
+            current_cache_namespace: self.current_cache_namespace,
+            lifetime_max_submitted_batch: self.lifetime_max_submitted_batch,
+            lifetime_max_inference_batch: self.lifetime_max_inference_batch,
         }
     }
 }
@@ -186,6 +209,7 @@ struct Task {
     next_row: usize,
     evaluations: Vec<Evaluation>,
     tx: SyncSender<BatcherResult<EvalResponse>>,
+    submitted_at: Instant,
 }
 
 struct EvalResponse {
@@ -198,9 +222,13 @@ struct Reload {
     tx: SyncSender<BatcherResult<()>>,
 }
 
+enum Command {
+    Evaluate(Task),
+    Reload(Reload),
+}
+
 struct Pending {
-    tasks: VecDeque<Task>,
-    reloads: VecDeque<Reload>,
+    commands: VecDeque<Command>,
     count: usize,
     stop: bool,
     terminal_error: Option<BatcherError>,
@@ -210,8 +238,7 @@ struct Pending {
 impl Pending {
     fn new() -> Self {
         Self {
-            tasks: VecDeque::new(),
-            reloads: VecDeque::new(),
+            commands: VecDeque::new(),
             count: 0,
             stop: false,
             terminal_error: None,
@@ -224,10 +251,11 @@ struct Shared {
     pending: Mutex<Pending>,
     cv: Condvar,
     config: BatcherConfig,
+    evaluation_generation: AtomicU64,
 }
 
 enum Work {
-    Evaluate(Vec<WorkItem>, CombinedEncodedBatch),
+    Evaluate,
     Reload(Reload),
     Stop,
 }
@@ -244,6 +272,7 @@ impl Batcher {
             pending: Mutex::new(Pending::new()),
             cv: Condvar::new(),
             config,
+            evaluation_generation: AtomicU64::new(0),
         });
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::Builder::new()
@@ -297,10 +326,10 @@ impl Batcher {
         if pending.stop {
             return Err(BatcherError::Shutdown);
         }
-        pending.reloads.push_back(Reload {
+        pending.commands.push_back(Command::Reload(Reload {
             weights: weights.to_path_buf(),
             tx,
-        });
+        }));
         drop(pending);
         self.shared.cv.notify_all();
         rx.recv().unwrap_or(Err(BatcherError::WorkerStopped))
@@ -321,6 +350,10 @@ impl Drop for Batcher {
 }
 
 impl BatcherClient {
+    pub fn cache_namespace(&self) -> u64 {
+        self.shared.evaluation_generation.load(Ordering::Acquire)
+    }
+
     pub fn evaluate(&mut self, batch: &mut EncodedEvalBatch) -> BatcherResult<Vec<Evaluation>> {
         let rows = batch.len();
         if rows == 0 {
@@ -344,14 +377,17 @@ impl BatcherClient {
         let owned = std::mem::take(batch);
         pending.stats.submitted_batches += 1;
         pending.stats.submitted_states += rows as u64;
-        pending.stats.max_submitted_batch = pending.stats.max_submitted_batch.max(rows as u64);
+        pending.stats.total_states += rows as u64;
+        pending.stats.lifetime_max_submitted_batch =
+            pending.stats.lifetime_max_submitted_batch.max(rows as u64);
         pending.count += rows;
-        pending.tasks.push_back(Task {
+        pending.commands.push_back(Command::Evaluate(Task {
             batch: owned,
             next_row: 0,
             evaluations: Vec::with_capacity(rows),
             tx,
-        });
+            submitted_at: Instant::now(),
+        }));
         drop(pending);
         self.shared.cv.notify_all();
         match rx.recv().unwrap_or(Err(BatcherError::WorkerStopped)) {
@@ -372,35 +408,50 @@ impl EncodedEvaluator for BatcherClient {
         BatcherClient::evaluate(self, batch)
             .map_err(|error| search::EvaluationError::new(error.to_string()))
     }
+
+    fn cache_namespace(&self) -> u64 {
+        BatcherClient::cache_namespace(self)
+    }
 }
 
 fn run_worker(mut backend: Box<dyn InferenceBackend>, shared: Arc<Shared>) {
+    let mut work_items = Vec::new();
+    let mut combined = CombinedEncodedBatch::new();
     loop {
-        match next_work(&shared) {
+        match next_work(&shared, &mut work_items, &mut combined) {
             Work::Stop => return,
             Work::Reload(reload) => {
                 let result = backend
                     .reload_weights(&reload.weights)
                     .map_err(backend_error);
-                if let Err(error) = &result {
-                    terminal_failure(&shared, error.clone());
+                match &result {
+                    Ok(()) => {
+                        shared.evaluation_generation.fetch_add(1, Ordering::Release);
+                        let mut pending = shared.pending.lock().unwrap();
+                        pending.stats.reload_count += 1;
+                        pending.stats.current_cache_namespace =
+                            shared.evaluation_generation.load(Ordering::Acquire);
+                    }
+                    Err(error) => terminal_failure(&shared, error.clone()),
                 }
                 let _ = reload.tx.send(result);
             }
-            Work::Evaluate(items, batch) => {
-                let result = backend.evaluate(&batch).map_err(backend_error);
+            Work::Evaluate => {
+                let started = Instant::now();
+                let result = backend.evaluate(&combined).map_err(backend_error);
+                record_backend_time(&shared, started.elapsed());
                 match result {
-                    Ok(evaluations) if evaluations.len() == batch.len() => {
-                        finish_pass(&shared, items, evaluations)
+                    Ok(evaluations) if evaluations.len() == combined.len() => {
+                        finish_pass(&shared, &mut work_items, evaluations)
                     }
                     Ok(_) => fail_work(
                         &shared,
-                        items,
+                        &mut work_items,
                         BatcherError::Backend(
                             "backend returned the wrong number of evaluations".into(),
                         ),
                     ),
-                    Err(error) => fail_work(&shared, items, error),
+                    Err(error) => fail_work(&shared, &mut work_items, error),
                 }
             }
         }
@@ -411,43 +462,63 @@ fn backend_error(error: anyhow::Error) -> BatcherError {
     BatcherError::Backend(error.to_string())
 }
 
-fn next_work(shared: &Shared) -> Work {
+fn next_work(
+    shared: &Shared,
+    items: &mut Vec<WorkItem>,
+    combined: &mut CombinedEncodedBatch,
+) -> Work {
     loop {
         let mut pending = shared.pending.lock().unwrap();
         pending = shared
             .cv
-            .wait_while(pending, |p| !p.stop && p.count == 0 && p.reloads.is_empty())
+            .wait_while(pending, |p| !p.stop && p.commands.is_empty())
             .unwrap();
         if pending.stop {
             return Work::Stop;
         }
-        // A reload is a queue barrier: the current pass has already finished,
-        // so apply new weights before beginning any later pass.
-        if !pending.reloads.is_empty() {
-            return Work::Reload(pending.reloads.pop_front().unwrap());
+        if matches!(pending.commands.front(), Some(Command::Reload(_))) {
+            let Some(Command::Reload(reload)) = pending.commands.pop_front() else {
+                unreachable!()
+            };
+            return Work::Reload(reload);
         }
-        if pending.count < shared.config.preferred_batch_size {
+        let reload_waiting = pending
+            .commands
+            .iter()
+            .any(|command| matches!(command, Command::Reload(_)));
+        if pending.count < shared.config.preferred_batch_size && !reload_waiting {
+            let wait_started = Instant::now();
             let (guard, _) = shared
                 .cv
                 .wait_timeout_while(pending, shared.config.max_wait, |p| {
-                    !p.stop && p.count < shared.config.preferred_batch_size && p.reloads.is_empty()
+                    !p.stop
+                        && p.count < shared.config.preferred_batch_size
+                        && !p
+                            .commands
+                            .iter()
+                            .any(|command| matches!(command, Command::Reload(_)))
                 })
                 .unwrap();
             pending = guard;
+            pending.stats.coalescing_wait_total += wait_started.elapsed();
             if pending.stop {
                 return Work::Stop;
-            }
-            if !pending.reloads.is_empty() {
-                return Work::Reload(pending.reloads.pop_front().unwrap());
             }
             if pending.count == 0 {
                 continue;
             }
         }
-        let mut items = Vec::new();
-        let mut combined = CombinedEncodedBatch::new();
+        items.clear();
+        combined.states.clear();
+        combined.legal_actions.clear();
+        combined.offsets.clear();
+        combined.offsets.push(0);
         while combined.len() < shared.config.max_batch_size {
-            let Some(task) = pending.tasks.pop_front() else {
+            let Some(command) = pending.commands.pop_front() else {
+                break;
+            };
+            let Command::Evaluate(task) = command else {
+                pending.commands.push_front(command);
                 break;
             };
             let available = shared.config.max_batch_size - combined.len();
@@ -462,6 +533,9 @@ fn next_work(shared: &Shared) -> Work {
                 return Work::Stop;
             }
             pending.count -= rows.len();
+            let queue_wait = task.submitted_at.elapsed();
+            pending.stats.queue_wait_total += queue_wait;
+            pending.stats.queue_wait_max = pending.stats.queue_wait_max.max(queue_wait);
             items.push(WorkItem { task, rows });
         }
         pending.stats.inference_batches += 1;
@@ -475,28 +549,30 @@ fn next_work(shared: &Shared) -> Work {
         if combined.len() < shared.config.preferred_batch_size {
             pending.stats.partial_batches += 1;
         }
-        pending.stats.max_inference_batch =
-            pending.stats.max_inference_batch.max(combined.len() as u64);
+        pending.stats.lifetime_max_inference_batch = pending
+            .stats
+            .lifetime_max_inference_batch
+            .max(combined.len() as u64);
         drop(pending);
         shared.cv.notify_all();
-        return Work::Evaluate(items, combined);
+        return Work::Evaluate;
     }
 }
 
-fn finish_pass(shared: &Shared, items: Vec<WorkItem>, evaluations: Vec<Evaluation>) {
+fn finish_pass(shared: &Shared, items: &mut Vec<WorkItem>, evaluations: Vec<Evaluation>) {
     let mut pending = shared.pending.lock().unwrap();
     if pending.stop || pending.terminal_error.is_some() {
         let error = pending
             .terminal_error
             .clone()
             .unwrap_or(BatcherError::Shutdown);
-        for item in items {
+        for item in items.drain(..) {
             let _ = item.task.tx.send(Err(error.clone()));
         }
         return;
     }
     let mut offset = 0;
-    for mut item in items {
+    for mut item in items.drain(..) {
         let count = item.rows.len();
         item.task
             .evaluations
@@ -512,7 +588,7 @@ fn finish_pass(shared: &Shared, items: Vec<WorkItem>, evaluations: Vec<Evaluatio
             // The rows left in this task stayed in `pending.count` while the
             // selected prefix was evaluated, so requeueing must not add them
             // a second time.
-            pending.tasks.push_front(item.task);
+            pending.commands.push_front(Command::Evaluate(item.task));
         }
     }
     drop(pending);
@@ -526,8 +602,8 @@ fn terminal_failure(shared: &Shared, error: BatcherError) {
     shared.cv.notify_all();
 }
 
-fn fail_work(shared: &Shared, items: Vec<WorkItem>, error: BatcherError) {
-    for item in items {
+fn fail_work(shared: &Shared, items: &mut Vec<WorkItem>, error: BatcherError) {
+    for item in items.drain(..) {
         let _ = item.task.tx.send(Err(error.clone()));
     }
     terminal_failure(shared, error);
@@ -537,13 +613,23 @@ fn fail_pending(pending: &mut Pending, error: BatcherError) {
     if pending.terminal_error.is_none() {
         pending.terminal_error = Some(error.clone());
     }
-    while let Some(task) = pending.tasks.pop_front() {
-        let _ = task.tx.send(Err(error.clone()));
+    while let Some(command) = pending.commands.pop_front() {
+        match command {
+            Command::Evaluate(task) => {
+                let _ = task.tx.send(Err(error.clone()));
+            }
+            Command::Reload(reload) => {
+                let _ = reload.tx.send(Err(error.clone()));
+            }
+        }
     }
     pending.count = 0;
-    while let Some(reload) = pending.reloads.pop_front() {
-        let _ = reload.tx.send(Err(error.clone()));
-    }
+}
+
+fn record_backend_time(shared: &Shared, elapsed: Duration) {
+    let mut pending = shared.pending.lock().unwrap();
+    pending.stats.backend_execution_total += elapsed;
+    pending.stats.backend_execution_max = pending.stats.backend_execution_max.max(elapsed);
 }
 
 #[cfg(test)]

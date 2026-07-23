@@ -1,6 +1,8 @@
 use crate::{ReplayBuffer, ReplaySample};
-use anyhow::Result;
+use anyhow::{ensure, Result};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -9,16 +11,26 @@ use super::SelfPlayConfig;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GameRequest {
     pub game_id: u64,
+    pub model_generation: u64,
     pub worker_id: usize,
-    pub seed: u64,
+    pub experiment_seed: u64,
 }
 
 impl GameRequest {
     pub fn seed_for(self, purpose: u64) -> u64 {
         splitmix64(
-            self.seed ^ splitmix64(self.worker_id as u64) ^ splitmix64(self.game_id) ^ purpose,
+            self.experiment_seed
+                ^ splitmix64(self.game_id)
+                ^ splitmix64(self.model_generation)
+                ^ purpose,
         )
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelfPlayEpoch {
+    pub model_generation: u64,
+    pub first_game_id: u64,
 }
 
 pub(crate) const BUDGET_SEED: u64 = 0x62_75_64_67_65_74;
@@ -92,14 +104,23 @@ impl SelfPlayCoordinator {
         &self,
         factory: &F,
         replay: &ReplayBuffer<S>,
+        epoch: SelfPlayEpoch,
     ) -> Result<SelfPlayStats> {
+        ensure!(
+            u64::try_from(self.config.num_games)
+                .ok()
+                .and_then(|games| epoch.first_game_id.checked_add(games))
+                .is_some(),
+            "self-play game IDs overflow u64"
+        );
         let next_game = AtomicUsize::new(0);
         let cancelled = AtomicBool::new(false);
-        let stats = Mutex::new(SelfPlayStats::default());
         let failure = Mutex::new(None);
         let started = Instant::now();
+        let mut stats = SelfPlayStats::default();
 
         std::thread::scope(|scope| {
+            let (sender, receiver) = mpsc::channel();
             for worker_id in 0..self.config.threads {
                 let mut worker = match factory.create(worker_id, worker_seed(self.seed, worker_id))
                 {
@@ -112,8 +133,8 @@ impl SelfPlayCoordinator {
                 };
                 let next_game = &next_game;
                 let cancelled = &cancelled;
-                let stats = &stats;
                 let failure = &failure;
+                let sender = sender.clone();
                 scope.spawn(move || loop {
                     if cancelled.load(Ordering::Acquire) {
                         break;
@@ -123,21 +144,19 @@ impl SelfPlayCoordinator {
                         break;
                     }
                     let request = GameRequest {
-                        game_id: game_id as u64,
+                        game_id: epoch.first_game_id + game_id as u64,
+                        model_generation: epoch.model_generation,
                         worker_id,
-                        seed: self.seed,
+                        experiment_seed: self.seed,
                     };
                     match worker.play_game(request) {
                         Ok(completed) => {
                             if cancelled.load(Ordering::Acquire) {
                                 break;
                             }
-                            // One lock acquisition commits the entire completed trajectory.
-                            replay.add(completed.trajectory);
-                            let mut total = stats.lock().unwrap();
-                            total.add(completed.stats);
-                            let done = total.games;
-                            print_progress(done, &self.config, &total, started);
+                            if sender.send((request.game_id, completed)).is_err() {
+                                break;
+                            }
                         }
                         Err(error) => {
                             cancelled.store(true, Ordering::Release);
@@ -150,11 +169,24 @@ impl SelfPlayCoordinator {
                     }
                 });
             }
+            drop(sender);
+
+            let mut pending = BTreeMap::new();
+            let mut next_commit = epoch.first_game_id;
+            while let Ok((game_id, completed)) = receiver.recv() {
+                pending.insert(game_id, completed);
+                while let Some(completed) = pending.remove(&next_commit) {
+                    replay.add(completed.trajectory);
+                    stats.add(completed.stats);
+                    print_progress(stats.games, &self.config, &stats, started);
+                    next_commit += 1;
+                }
+            }
         });
         if let Some(error) = failure.into_inner().unwrap() {
             return Err(error);
         }
-        Ok(stats.into_inner().unwrap())
+        Ok(stats)
     }
 }
 
@@ -163,8 +195,7 @@ fn worker_seed(experiment_seed: u64, worker_id: usize) -> u64 {
 }
 
 fn print_progress(done: usize, config: &SelfPlayConfig, stats: &SelfPlayStats, started: Instant) {
-    if config.progress_every == 0
-        || (done != config.num_games && !done.is_multiple_of(config.progress_every))
+    if config.progress_every == 0 || (done != config.num_games && done % config.progress_every != 0)
     {
         return;
     }

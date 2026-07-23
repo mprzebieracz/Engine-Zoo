@@ -23,6 +23,17 @@ pub enum SearchConfig {
     Gumbel(GumbelConfig),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchConfigError(&'static str);
+
+impl fmt::Display for SearchConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl Error for SearchConfigError {}
+
 impl SearchConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
@@ -39,6 +50,7 @@ impl Default for SearchConfig {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CommonSearchConfig {
     pub simulations: usize,
     pub leaf_batch_size: usize,
@@ -54,6 +66,7 @@ impl Default for CommonSearchConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PuctConfig {
     pub common: CommonSearchConfig,
     pub selection: PuctSelectionConfig,
@@ -93,6 +106,7 @@ impl PuctConfig {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PuctSelectionConfig {
     pub pb_c_init: f32,
     pub pb_c_base: f32,
@@ -207,6 +221,7 @@ impl DirichletConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GumbelConfig {
     pub simulations: usize,
     pub max_considered_actions: usize,
@@ -241,6 +256,7 @@ impl GumbelConfig {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CompletedQConfig {
     pub value_scale: f32,
     pub maxvisit_init: f32,
@@ -294,20 +310,31 @@ pub struct SearchResult<M> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SearchDiagnostics {
     pub completed_simulations: usize,
-    pub network_evaluations: usize,
-    pub cache_hits: usize,
+    pub backend_evaluations: usize,
+    pub evaluation_cache_hits: usize,
+    pub evaluation_cache_misses: usize,
     pub duplicate_leaves: usize,
     pub max_depth: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SearchError {
+    TerminalRoot { value: PositionValue },
+    NoLegalMoves,
     Evaluation(crate::EvaluationError),
 }
 
 impl fmt::Display for SearchError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TerminalRoot { value } => {
+                write!(
+                    formatter,
+                    "cannot search a terminal root (value {})",
+                    value.as_f32()
+                )
+            }
+            Self::NoLegalMoves => formatter.write_str("cannot search a root with no legal moves"),
             Self::Evaluation(error) => write!(formatter, "search evaluation failed: {error}"),
         }
     }
@@ -400,7 +427,10 @@ impl<M, Meta: Default> Node<M, Meta> {
     /// Mean value from this node's own player-to-move perspective.
     fn completed_q(&self) -> Option<PositionValue> {
         (self.completed_visits > 0).then(|| {
-            PositionValue::new_clamped(self.value_sum_from_node_pov / self.completed_visits as f32)
+            PositionValue::from_finite_clamped(
+                self.value_sum_from_node_pov / self.completed_visits as f32,
+            )
+            .expect("completed finite values must have a finite average")
         })
     }
 

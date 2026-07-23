@@ -81,7 +81,7 @@ struct ResultRecord {
 pub fn run() -> Result<()> {
     let args = Args::parse();
     anyhow::ensure!(
-        args.games > 0 && args.games.is_multiple_of(2),
+        args.games > 0 && args.games % 2 == 0,
         "--games must be a positive even number"
     );
     let device = match args.device.as_str() {
@@ -133,7 +133,7 @@ pub fn run() -> Result<()> {
     let mut rng = StdRng::seed_from_u64(seed);
     let (mut wins, mut draws, mut losses) = (0usize, 0usize, 0usize);
     for game_idx in 0..args.games {
-        let model_white = game_idx.is_multiple_of(2);
+        let model_white = game_idx % 2 == 0;
         let mut game = ChessGame::default();
         let mut uci_moves = Vec::new();
         let mut san_moves = Vec::new();
@@ -146,7 +146,7 @@ pub fn run() -> Result<()> {
         let mut state = game.position();
         let mut ply = uci_moves.len();
         while !state.is_terminal() && ply < args.max_moves {
-            let model_turn = (ply.is_multiple_of(2)) == model_white;
+            let model_turn = (ply % 2 == 0) == model_white;
             let action = if model_turn {
                 model
                     .search(
@@ -172,7 +172,7 @@ pub fn run() -> Result<()> {
             if !GameState::is_terminal(&game) || game.terminal_value().unwrap().as_f32() == 0.0 {
                 draws += 1;
                 "1/2-1/2"
-            } else if (ply - 1).is_multiple_of(2) == model_white {
+            } else if ((ply - 1) % 2 == 0) == model_white {
                 wins += 1;
                 if model_white {
                     "1-0"
@@ -209,7 +209,7 @@ pub fn run() -> Result<()> {
     let smoothed = (score + 0.5) / (args.games as f64 + 1.0);
     let baseline_result = if let Some(path) = args.baseline.as_ref() {
         anyhow::ensure!(
-            args.baseline_games > 0 && args.baseline_games.is_multiple_of(2),
+            args.baseline_games > 0 && args.baseline_games % 2 == 0,
             "--baseline-games must be a positive even number"
         );
         let baseline_batcher =
@@ -225,12 +225,12 @@ pub fn run() -> Result<()> {
         );
         let (mut baseline_wins, mut baseline_draws, mut baseline_losses) = (0usize, 0usize, 0usize);
         for game_idx in 0..args.baseline_games {
-            let model_white = game_idx.is_multiple_of(2);
+            let model_white = game_idx % 2 == 0;
             let mut game = ChessGame::default();
             let mut ply = apply_opening(&mut game, None, args.opening_plies, &mut rng);
             let mut state = game.position();
             while !state.is_terminal() && ply < args.max_moves {
-                let action = if ply.is_multiple_of(2) == model_white {
+                let action = if (ply % 2 == 0) == model_white {
                     model
                         .search(
                             &state,
@@ -253,7 +253,7 @@ pub fn run() -> Result<()> {
             }
             if !GameState::is_terminal(&game) || game.terminal_value().unwrap().as_f32() == 0.0 {
                 baseline_draws += 1;
-            } else if (ply - 1).is_multiple_of(2) == model_white {
+            } else if ((ply - 1) % 2 == 0) == model_white {
                 baseline_wins += 1;
             } else {
                 baseline_losses += 1;

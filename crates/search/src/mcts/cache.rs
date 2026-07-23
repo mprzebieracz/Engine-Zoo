@@ -1,4 +1,4 @@
-use crate::PositionValue;
+use crate::{EvaluationKey, PositionValue};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -38,7 +38,7 @@ impl<M> Clone for CachedEvaluation<M> {
 }
 
 struct EvalTableEntry<M> {
-    hash: u64,
+    key: EvaluationKey,
     cached: CachedEvaluation<M>,
 }
 
@@ -47,6 +47,10 @@ struct CacheShard<M> {
 }
 
 /// Fixed-capacity direct-mapped cache, sharded to avoid a lock per entry.
+///
+/// Production statistics use relaxed atomic increments. They are intentionally
+/// always enabled: callers use them for lifetime observability, not a
+/// transactionally consistent snapshot.
 pub struct EvalTable<M> {
     shards: Box<[RwLock<CacheShard<M>>]>,
     hits: AtomicU64,
@@ -76,15 +80,32 @@ impl<M> EvalTable<M> {
         }
     }
 
-    fn shard_index(&self, hash: u64) -> usize {
-        hash as usize & (self.shards.len() - 1)
+    fn mix(mut value: u64) -> u64 {
+        value ^= value >> 30;
+        value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value ^= value >> 27;
+        value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
     }
 
-    pub(super) fn insert(&self, hash: u64, cached: CachedEvaluation<M>) {
-        let shard = &self.shards[self.shard_index(hash)];
+    fn key_hash(key: EvaluationKey) -> u64 {
+        Self::mix(key.state) ^ Self::mix(key.namespace.wrapping_add(0x9e37_79b9_7f4a_7c15))
+    }
+
+    fn shard_index(&self, key: EvaluationKey) -> usize {
+        (Self::mix(key.namespace ^ key.state.rotate_left(17)) as usize) & (self.shards.len() - 1)
+    }
+
+    fn slot_index(hash: u64, slots: usize) -> usize {
+        Self::mix(hash.rotate_left(29)) as usize % slots
+    }
+
+    pub(super) fn insert(&self, key: EvaluationKey, cached: CachedEvaluation<M>) {
+        let hash = Self::key_hash(key);
+        let shard = &self.shards[self.shard_index(key)];
         let mut shard = shard.write().unwrap();
-        let slot = hash as usize % shard.slots.len();
-        shard.slots[slot] = Some(EvalTableEntry { hash, cached });
+        let slot = Self::slot_index(hash, shard.slots.len());
+        shard.slots[slot] = Some(EvalTableEntry { key, cached });
         self.inserts.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -98,13 +119,14 @@ impl<M> EvalTable<M> {
 }
 
 impl<M> EvalTable<M> {
-    pub(super) fn get(&self, hash: u64) -> Option<CachedEvaluation<M>> {
-        let shard = &self.shards[self.shard_index(hash)];
+    pub(super) fn get(&self, key: EvaluationKey) -> Option<CachedEvaluation<M>> {
+        let hash = Self::key_hash(key);
+        let shard = &self.shards[self.shard_index(key)];
         let shard = shard.read().unwrap();
-        let slot = hash as usize % shard.slots.len();
+        let slot = Self::slot_index(hash, shard.slots.len());
         let hit = shard.slots[slot]
             .as_ref()
-            .filter(|entry| entry.hash == hash)
+            .filter(|entry| entry.key == key)
             .map(|entry| entry.cached.clone());
         if hit.is_some() {
             self.hits.fetch_add(1, Ordering::Relaxed);
