@@ -308,6 +308,21 @@ impl Batcher {
         )
     }
 
+    /// Uses a TorchScript module produced by Torch-TensorRT for inference.
+    /// The TensorRT runtime itself remains an external, opt-in deployment
+    /// dependency; it must be loaded by LibTorch before this module is opened.
+    pub fn new_with_tensor_rt_torchscript(
+        spec: ModelSpec,
+        module: &Path,
+        device: Device,
+        config: BatcherConfig,
+    ) -> Result<Self> {
+        Self::with_backend(
+            TchInferenceBackend::new_tensor_rt_torchscript(spec, module, device)?,
+            config,
+        )
+    }
+
     pub fn client(&self) -> BatcherClient {
         BatcherClient {
             shared: Arc::clone(&self.shared),

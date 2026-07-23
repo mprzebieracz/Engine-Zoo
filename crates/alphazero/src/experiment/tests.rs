@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ChessHistoryLength, ModelSpec, ValueHeadConfig};
+use crate::{ChessHistoryLength, InferenceEngine, ModelSpec, ValueHeadConfig};
 use std::fs;
 use tch::{nn, Device};
 
@@ -47,6 +47,13 @@ fn experiment_toml_round_trips_and_carries_inference_settings() {
     let parsed: ExperimentConfig = toml::from_str(&expected.to_toml().unwrap()).unwrap();
     assert_eq!(parsed.inference, expected.inference);
     assert_eq!(parsed.fingerprint(), expected.fingerprint());
+}
+
+#[test]
+fn tensor_rt_inference_requires_a_module_path() {
+    let mut config = config();
+    config.inference.engine = InferenceEngine::TensorRtTorchScript;
+    assert!(config.validate().is_err());
 }
 
 #[test]
