@@ -80,7 +80,8 @@ impl TchInferenceBackend {
             let tensor = Tensor::zeros([rows, cols.max(old_cols)], (kind, Device::Cpu));
             *slot = Some(if device.is_cuda() {
                 tensor.pin_memory(device)
-            } else {
+            }
+            else {
                 tensor
             });
         }
@@ -151,7 +152,8 @@ impl TchInferenceBackend {
             .unwrap_or(0);
         if self.device.is_cuda() {
             self.evaluate_cuda(batch, policy, value, n, min_rows, max_actions)
-        } else {
+        }
+        else {
             self.evaluate_cpu(batch, policy, value)
         }
     }
@@ -167,7 +169,8 @@ impl TchInferenceBackend {
     ) -> Result<Vec<Evaluation>> {
         let gathered = if max_actions == 0 {
             None
-        } else {
+        }
+        else {
             let index_host = Self::staging(
                 &mut self.index_buf,
                 min_rows,

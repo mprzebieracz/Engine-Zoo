@@ -50,7 +50,8 @@ pub struct ClassicResidualNet {
 impl ClassicResidualNet {
     pub fn new(p: &nn::Path, spec: &ModelSpec, config: &ResidualNetworkConfig) -> Self {
         let [input_channels, height, width] = spec.state_shape();
-        let super::ResidualTrunkConfig::Basic { blocks, channels } = config.trunk else {
+        let super::ResidualTrunkConfig::Basic { blocks, channels } = config.trunk
+        else {
             unreachable!("classic residual network requires a basic trunk")
         };
         let super::PolicyHeadConfig::Dense {
@@ -124,7 +125,8 @@ impl ClassicResidualNet {
             .apply(&self.value_fc2);
         let value = if value_logits.size()[1] == 1 {
             RawValueOutput::Scalar(value_logits.tanh())
-        } else {
+        }
+        else {
             RawValueOutput::WdlLogits(value_logits)
         };
         RawNetworkOutput {

@@ -119,7 +119,8 @@ where
         let mut keys: Vec<Option<EvaluationKey>> = Vec::new();
         let mut destinations = Vec::new();
         for (i, state) in states.iter().enumerate() {
-            let Some(key) = self.evaluator.evaluation_key(state) else {
+            let Some(key) = self.evaluator.evaluation_key(state)
+            else {
                 let j = misses.len();
                 misses.push(state.clone());
                 keys.push(None);
@@ -136,7 +137,8 @@ where
             if let Some(j) = keys.iter().position(|&k| k == Some(key)) {
                 destinations.push((i, Some(j)));
                 stats.duplicate_requests += 1;
-            } else {
+            }
+            else {
                 keys.push(Some(key));
                 destinations.push((i, Some(misses.len())));
                 misses.push(state.clone());

@@ -33,12 +33,14 @@ impl<G: ChessRepetitionState> SearchRules<G> for ChessRepetitionRules {
     ) -> RuleResult {
         let hash = if meta.initialized {
             meta.hash
-        } else {
+        }
+        else {
             state.repetition_hash()
         };
         let repetitions_before = if meta.initialized {
             meta.repetitions_before_current
-        } else {
+        }
+        else {
             let mut count = context.occurrences_before_root(hash);
             for seen in path.iter().rev().take(state.reversible_plies()) {
                 count = count.saturating_add(u8::from(*seen == hash));

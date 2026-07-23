@@ -284,7 +284,8 @@ pub(super) fn completed_q_values(
 ) -> Vec<f32> {
     let mixed = if use_mixed_value {
         mixed_value(raw_value, q_values, completed_visits, prior_probs)
-    } else {
+    }
+    else {
         raw_value
     };
     q_values
@@ -302,7 +303,8 @@ pub(super) fn rescale_q_values(values: &mut [f32], epsilon: f32) {
         for value in values {
             *value = (*value - min) / range;
         }
-    } else {
+    }
+    else {
         values.fill(0.0);
     }
 }

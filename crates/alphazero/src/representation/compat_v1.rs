@@ -148,7 +148,8 @@ mod tests {
         ] {
             let game = if fen == "startpos" {
                 ChessGame::default()
-            } else {
+            }
+            else {
                 ChessGame::from_fen(fen).unwrap()
             };
             golden(&game);

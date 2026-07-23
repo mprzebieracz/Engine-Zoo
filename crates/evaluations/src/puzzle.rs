@@ -154,7 +154,8 @@ pub fn evaluate_moves(
     }
     summary.accuracy = if summary.total == 0 {
         0.0
-    } else {
+    }
+    else {
         summary.correct as f64 / summary.total as f64
     };
     Ok((results, summary))

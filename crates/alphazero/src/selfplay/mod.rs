@@ -27,7 +27,8 @@ pub fn select_temperature_action<M: Copy, R: Rng + ?Sized>(
     temperature: Option<f32>,
     rng: &mut R,
 ) -> M {
-    let Some(temperature) = temperature else {
+    let Some(temperature) = temperature
+    else {
         return result.best_move();
     };
     debug_assert!(temperature.is_finite() && temperature > 0.0);

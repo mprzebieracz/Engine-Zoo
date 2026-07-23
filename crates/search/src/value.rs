@@ -30,7 +30,8 @@ impl PositionValue {
     pub fn new(value: f32) -> Result<Self, InvalidValue> {
         if value.is_finite() && (-1.0..=1.0).contains(&value) {
             Ok(Self(value))
-        } else {
+        }
+        else {
             Err(InvalidValue)
         }
     }
@@ -42,7 +43,8 @@ impl PositionValue {
     pub fn from_finite_clamped(value: f32) -> Result<Self, InvalidValue> {
         if value.is_finite() {
             Ok(Self(value.clamp(-1.0, 1.0)))
-        } else {
+        }
+        else {
             Err(InvalidValue)
         }
     }

@@ -147,7 +147,8 @@ impl<G: InteractiveGame> Agent<G> for AlphaZeroAgent<G> {
             .expect("AlphaZero inference failed");
         if is_puct && mode == PolicyMode::Explore {
             result.sample_move(&mut rand::rng())
-        } else {
+        }
+        else {
             result.best_move()
         }
     }

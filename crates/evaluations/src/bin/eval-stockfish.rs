@@ -72,7 +72,8 @@ fn main() -> Result<()> {
             .option("UCI_LimitStrength", "true")
             .option("UCI_Elo", elo.to_string());
         format!("stockfish-elo-{elo}")
-    } else {
+    }
+    else {
         let nodes = args.stockfish_nodes.unwrap_or(3_000);
         stockfish = stockfish.nodes(nodes);
         format!("stockfish-nodes-{nodes}")

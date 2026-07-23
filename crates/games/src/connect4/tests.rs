@@ -70,7 +70,8 @@ impl Naive {
         self.current = -self.current;
         if won {
             self.status = Status::Loss;
-        } else if full {
+        }
+        else if full {
             self.status = Status::Draw;
         }
     }
@@ -91,7 +92,8 @@ impl Naive {
                     if count == 4 {
                         return true;
                     }
-                } else {
+                }
+                else {
                     count = 0;
                 }
             }

@@ -324,7 +324,8 @@ pub fn version(executable: impl AsRef<Path>) -> Result<String> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let text = if stdout.trim().is_empty() {
         stderr
-    } else {
+    }
+    else {
         stdout
     };
     Ok(text.trim().to_owned())
@@ -340,7 +341,8 @@ fn shell_quote(value: &str) -> String {
         .all(|c| c.is_ascii_alphanumeric() || "_./:=+-".contains(c))
     {
         value.to_owned()
-    } else {
+    }
+    else {
         format!("'{}'", value.replace('\'', "'\\''"))
     }
 }

@@ -26,7 +26,8 @@ pub fn san(board: &Board, mv: ChessMove) -> String {
     if !board.legal(mv) {
         return mv.to_string();
     }
-    let Some(piece) = board.piece_on(mv.get_source()) else {
+    let Some(piece) = board.piece_on(mv.get_source())
+    else {
         return mv.to_string();
     };
     if piece == Piece::King {
@@ -47,7 +48,8 @@ pub fn san(board: &Board, mv: ChessMove) -> String {
         if capture {
             text.push(file_char(mv.get_source()));
         }
-    } else {
+    }
+    else {
         text.push(piece_char(piece));
         push_disambiguation(&mut text, board, piece, mv);
     }
@@ -72,9 +74,11 @@ pub fn movetext(moves: &[String], starting_ply: u16, result: &str) -> String {
         }
         if ply % 2 == 0 {
             write!(out, "{}. {san}", ply / 2 + 1).unwrap();
-        } else if offset == 0 {
+        }
+        else if offset == 0 {
             write!(out, "{}... {san}", ply / 2 + 1).unwrap();
-        } else {
+        }
+        else {
             out.push_str(san);
         }
     }
@@ -119,9 +123,11 @@ fn push_disambiguation(out: &mut String, board: &Board, piece: Piece, mv: ChessM
     if conflict {
         if !same_file {
             out.push(file_char(source));
-        } else if !same_rank {
+        }
+        else if !same_rank {
             out.push(rank_char(source));
-        } else {
+        }
+        else {
             out.push(file_char(source));
             out.push(rank_char(source));
         }
@@ -132,7 +138,8 @@ fn with_check_suffix(board: &Board, mv: ChessMove, mut text: String) -> String {
     let next = board.make_move_new(mv);
     if next.status() == BoardStatus::Checkmate {
         text.push('#');
-    } else if next.checkers().popcnt() > 0 {
+    }
+    else if next.checkers().popcnt() > 0 {
         text.push('+');
     }
     text

@@ -14,7 +14,8 @@ impl Connect4Move {
     pub const fn new(column: u8) -> Option<Self> {
         if column < COLS as u8 {
             Some(Self(column))
-        } else {
+        }
+        else {
             None
         }
     }
@@ -119,7 +120,8 @@ impl Connect4 {
     pub fn current_player(&self) -> i8 {
         if self.ply % 2 == 0 {
             1
-        } else {
+        }
+        else {
             -1
         }
     }
@@ -137,7 +139,8 @@ impl Connect4 {
     fn player1_stones(&self) -> u64 {
         if self.ply % 2 == 0 {
             self.pos
-        } else {
+        }
+        else {
             self.pos ^ self.mask
         }
     }
@@ -162,7 +165,8 @@ impl Connect4 {
 
         if has_alignment(placed) {
             self.status = Status::Loss;
-        } else if self.mask == FULL_MASK {
+        }
+        else if self.mask == FULL_MASK {
             self.status = Status::Draw;
         }
     }
@@ -203,9 +207,11 @@ impl fmt::Display for Connect4 {
                 let b = bit(col, ROWS - 1 - row_top);
                 let cell = if p1 & b != 0 {
                     'X'
-                } else if p2 & b != 0 {
+                }
+                else if p2 & b != 0 {
                     'O'
-                } else {
+                }
+                else {
                     '.'
                 };
                 write!(f, "{cell} ")?;

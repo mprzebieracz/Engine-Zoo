@@ -130,7 +130,8 @@ impl<M> EvalTable<M> {
             .map(|entry| entry.cached.clone());
         if hit.is_some() {
             self.hits.fetch_add(1, Ordering::Relaxed);
-        } else {
+        }
+        else {
             self.misses.fetch_add(1, Ordering::Relaxed);
         }
         hit

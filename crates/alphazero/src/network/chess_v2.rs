@@ -80,7 +80,8 @@ impl SeResidualNet {
         else {
             unreachable!("SE residual network requires an SE trunk")
         };
-        let super::PolicyHeadConfig::ConvolutionalPlanes { planes } = config.policy_head else {
+        let super::PolicyHeadConfig::ConvolutionalPlanes { planes } = config.policy_head
+        else {
             unreachable!("SE residual network requires a convolutional policy head")
         };
         let value_hidden = match config.value_head {
@@ -163,7 +164,8 @@ impl SeResidualNet {
             .apply(&self.value_fc2);
         let value = if value_logits.size()[1] == 1 {
             RawValueOutput::Scalar(value_logits.tanh())
-        } else {
+        }
+        else {
             RawValueOutput::WdlLogits(value_logits)
         };
         RawNetworkOutput {

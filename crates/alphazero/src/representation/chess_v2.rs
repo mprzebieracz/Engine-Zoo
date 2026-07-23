@@ -38,7 +38,8 @@ fn cell(side: Color, square: Square) -> (i32, i32) {
     (
         if side == Color::White {
             7 - square.get_rank().to_index() as i32
-        } else {
+        }
+        else {
             square.get_rank().to_index() as i32
         },
         square.get_file().to_index() as i32,
@@ -50,7 +51,8 @@ fn square(side: Color, row: i32, col: i32) -> Option<Square> {
     Some(Square::make_square(
         Rank::from_index(if side == Color::White {
             7 - row as usize
-        } else {
+        }
+        else {
             row as usize
         }),
         File::from_index(col as usize),

@@ -136,7 +136,8 @@ impl ChessGame {
         let effect = self.pos.play_with_effect(mv);
         if effect.clears_repetition_history() {
             self.after_irreversible_move();
-        } else {
+        }
+        else {
             self.after_reversible_move();
         }
         self.history.rotate_right(1);
@@ -154,7 +155,8 @@ impl ChessGame {
 /// at this dependency boundary; public callers always use standard FEN.
 fn chess_crate_fen(parts: &[&str]) -> String {
     let mut fields: Vec<_> = parts.iter().map(|field| (*field).to_owned()).collect();
-    let Some([file, rank]) = fields.get(3).and_then(|square| square.as_bytes().get(..2)) else {
+    let Some([file, rank]) = fields.get(3).and_then(|square| square.as_bytes().get(..2))
+    else {
         return fields.join(" ");
     };
     let pawn_rank = match (fields.get(1).map(String::as_str), rank) {
