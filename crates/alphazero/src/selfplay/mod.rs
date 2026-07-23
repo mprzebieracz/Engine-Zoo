@@ -11,7 +11,7 @@ pub use config::{
     TemperaturePhase, TemperatureSchedule,
 };
 pub use coordinator::{
-    CompletedGame, GameRequest, SelfPlayCoordinator, SelfPlayStats, SelfPlayWorker,
+    CompletedGame, GameRequest, SelfPlayCoordinator, SelfPlayEpoch, SelfPlayStats, SelfPlayWorker,
     SelfPlayWorkerFactory,
 };
 pub use generic::GenericSelfPlayWorkerFactory;

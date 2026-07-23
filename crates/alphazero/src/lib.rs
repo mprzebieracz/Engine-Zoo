@@ -21,13 +21,13 @@ pub use batcher::{
 };
 pub use evaluator::{EncodedEvalBatch, EncodedEvaluator, RepresentedEvaluator};
 pub use experiment::{
-    ExperimentConfig, ReplayConfig, RunDir, RunState, EXPERIMENT_FORMAT_VERSION,
-    STATE_FORMAT_VERSION,
+    DurationConfig, ExperimentConfig, InferenceConfig, ReplayConfig, ResumeKind, RunDir, RunState,
+    EXPERIMENT_FORMAT_VERSION, STATE_FORMAT_VERSION,
 };
 pub use network::{
-    ChessHistoryLength, ClassicResidualNet, GameSpec, ModelSpec, Network, NetworkSpec,
-    PolicyHeadConfig, RawNetworkOutput, RawValueOutput, RepresentationSpec, ResidualNetworkConfig,
-    ResidualTrunkConfig, SeResidualNet, ValueHeadConfig,
+    ChessHistoryLength, ClassicResidualNet, GameSpec, ModelFingerprint, ModelSpec, Network,
+    NetworkSpec, PolicyHeadConfig, RawNetworkOutput, RawValueOutput, RepresentationSpec,
+    ResidualNetworkConfig, ResidualTrunkConfig, SeResidualNet, SeTrunkSpec, ValueHeadConfig,
 };
 pub use replay::{
     Outcome, ReplayBatch, ReplayBuffer, ReplaySample, SampleMetadata, SearchKind, SparsePolicy,
@@ -39,12 +39,15 @@ pub use search::{
     CommonSearchConfig, CompletedQConfig, DirichletConfig, EvalTable, EvalTableStats, Evaluation,
     EvaluationError, FpuConfig, GumbelConfig, InFlightConfig, Mcts, NoExtraRules,
     PolicyValueEvaluator, PuctConfig, PuctSelectionConfig, RuleResult, SearchConfig,
-    SearchDiagnostics, SearchError, SearchResult, SearchRules,
+    SearchConfigError, SearchDiagnostics, SearchError, SearchResult, SearchRules,
 };
 pub use selfplay::{
     select_temperature_action, ChessSelfPlayWorkerFactory, CompletedGame, GameRequest,
     GenericSelfPlayWorkerFactory, GumbelMoveSelection, ResignationConfig, SearchBudget,
-    SearchBudgetSchedule, SelfPlayConfig, SelfPlayCoordinator, SelfPlayStats, SelfPlayWorker,
-    SelfPlayWorkerFactory, TemperaturePhase, TemperatureSchedule,
+    SearchBudgetSchedule, SelfPlayConfig, SelfPlayCoordinator, SelfPlayEpoch, SelfPlayStats,
+    SelfPlayWorker, SelfPlayWorkerFactory, TemperaturePhase, TemperatureSchedule,
 };
-pub use trainer::{build_optimizer, train, wdl_cross_entropy, TrainConfig, TrainMetrics};
+pub use trainer::{
+    build_optimizer, train, wdl_cross_entropy, LearningRateSchedule, OptimizerSpec, TrainConfig,
+    TrainMetrics,
+};

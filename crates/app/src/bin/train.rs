@@ -2,22 +2,15 @@ use alphazero::representation::{
     ChessAzRepresentation, ChessClassicRepresentation, Connect4AzRepresentation,
 };
 use alphazero::{
-    Batcher, BatcherConfig, ChessHistoryLength, ChessSelfPlayWorkerFactory, ExperimentConfig,
-    GameSpec, GenericSelfPlayWorkerFactory, ModelSpec, Network, ReplayBuffer, ReplayConfig, RunDir,
-    SelfPlayConfig, SelfPlayCoordinator, TrainConfig, ValueHeadConfig, EXPERIMENT_FORMAT_VERSION,
+    Batcher, ChessHistoryLength, ChessSelfPlayWorkerFactory, ExperimentConfig, GameSpec,
+    GenericSelfPlayWorkerFactory, Network, ReplayBuffer, RunDir, SelfPlayCoordinator,
+    SelfPlayEpoch,
 };
 use anyhow::Result;
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use games::{ChessPosition, Connect4};
 use std::path::PathBuf;
-use std::time::Duration;
 use tch::{nn, Device};
-
-#[derive(Clone, Copy, ValueEnum)]
-enum GameKind {
-    Connect4,
-    Chess,
-}
 
 #[derive(Clone, Copy, ValueEnum)]
 enum DeviceKind {
@@ -29,75 +22,89 @@ enum DeviceKind {
 #[derive(Parser)]
 #[command(about = "AlphaZero self-play and training")]
 struct Args {
-    #[arg(long, value_enum)]
-    game: GameKind,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Validate an immutable experiment TOML and initialize an empty run.
+    Init {
+        #[arg(long)]
+        experiment: PathBuf,
+        #[arg(long)]
+        run_dir: PathBuf,
+    },
+    /// Resume an initialized run. Runtime flags do not change its experiment.
+    Run(RunArgs),
+    /// Print the immutable experiment and current mutable run state.
+    Inspect {
+        #[arg(long)]
+        run_dir: PathBuf,
+    },
+}
+
+#[derive(Parser)]
+struct RunArgs {
     #[arg(long)]
-    run_dir: Option<PathBuf>,
+    run_dir: PathBuf,
     #[arg(long, default_value_t = 1)]
     iterations: usize,
     #[arg(long)]
     forever: bool,
-    #[arg(long, default_value_t = 100)]
-    games: usize,
-    #[arg(long)]
-    threads: Option<usize>,
-    #[arg(long, default_value_t = 800)]
-    simulations: usize,
-    #[arg(long, default_value_t = 1)]
-    leaf_batch_size: usize,
-    #[arg(long, default_value_t = 512)]
-    max_moves: usize,
-    #[arg(long, default_value_t = 500_000)]
-    replay_capacity: usize,
-    #[arg(long, default_value_t = 256)]
-    batch_size: usize,
-    #[arg(long, default_value_t = 80)]
-    train_steps: usize,
-    #[arg(long, default_value_t = 1e-3)]
-    learning_rate: f64,
-    #[arg(long, default_value_t = 1e-4)]
-    weight_decay: f64,
-    #[arg(long, default_value_t = 0)]
-    seed: u64,
-    #[arg(long, default_value_t = 4)]
-    chess_history: usize,
-    #[arg(long)]
-    chess_classic: bool,
-    #[arg(long, default_value_t = 12)]
-    blocks: usize,
-    #[arg(long, default_value_t = 128)]
-    channels: i64,
     #[arg(long, value_enum, default_value_t = DeviceKind::Auto)]
     device: DeviceKind,
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
-    let root = args.run_dir.clone().unwrap_or_else(|| match args.game {
-        GameKind::Connect4 => PathBuf::from("runs/connect4"),
-        GameKind::Chess if args.chess_classic => PathBuf::from("runs/chess-classic"),
-        GameKind::Chess => PathBuf::from(format!("runs/chess-h{}", args.chess_history)),
-    });
-    let (run, experiment, mut state) =
-        RunDir::open_or_create(&root, || experiment_from_args(&args))?;
+    match Args::parse().command {
+        Command::Init {
+            experiment,
+            run_dir,
+        } => {
+            let config = ExperimentConfig::read_toml(&experiment)?;
+            RunDir::initialize(&run_dir, config)?;
+            println!("initialized {}", run_dir.display());
+            Ok(())
+        }
+        Command::Inspect { run_dir } => {
+            let (_, experiment, state) = RunDir::open(&run_dir)?;
+            println!("{}", experiment.to_toml()?);
+            println!("state:");
+            println!("{}", serde_json::to_string_pretty(&state)?);
+            Ok(())
+        }
+        Command::Run(args) => run(args),
+    }
+}
+
+fn run(args: RunArgs) -> Result<()> {
+    let (run, experiment, mut state) = RunDir::open(&args.run_dir)?;
     let device = select_device(args.device)?;
     let mut vs = nn::VarStore::new(device);
     let net = Network::new(&vs.root(), &experiment.model)?;
     if let Some(checkpoint) = run.latest_checkpoint(&state) {
         vs.load(checkpoint)?;
+        state.mark_weights_only_resume();
+        run.write_state(&state)?;
+        eprintln!(
+            "WARNING: resumed checkpoint weights only; replay and optimizer moments were reset."
+        );
+        run.log_metrics(serde_json::json!({
+            "event": "resume",
+            "resume_kind": "weights-only",
+            "replay_restored": false,
+            "optimizer_moments_restored": false,
+        }))?;
     } else {
         run.write_latest(&mut state, |path| Ok(vs.save(path)?))?;
     }
-    let batcher = Batcher::new_with_model(
+    let batcher = Batcher::new_with_model_precision(
         experiment.model.clone(),
         &run.latest_path(),
         device,
-        BatcherConfig {
-            preferred_batch_size: experiment.self_play.threads.max(1),
-            max_batch_size: 256,
-            max_wait: Duration::from_millis(2),
-            max_queued_states: 4096,
-        },
+        experiment.inference.batcher_config(),
+        experiment.inference.precision,
     )?;
     match experiment.model.game {
         GameSpec::Connect4 => run_connect4(
@@ -125,7 +132,7 @@ fn main() -> Result<()> {
 
 #[allow(clippy::too_many_arguments)] // Concrete model dispatch keeps the generic training loop type-safe.
 fn run_connect4(
-    args: &Args,
+    args: &RunArgs,
     run: &RunDir,
     experiment: &ExperimentConfig,
     state: &mut alphazero::RunState,
@@ -157,7 +164,7 @@ fn run_connect4(
 
 #[allow(clippy::too_many_arguments)] // Concrete model dispatch keeps the generic training loop type-safe.
 fn run_chess(
-    args: &Args,
+    args: &RunArgs,
     run: &RunDir,
     experiment: &ExperimentConfig,
     state: &mut alphazero::RunState,
@@ -188,7 +195,7 @@ fn run_chess(
 
 #[allow(clippy::too_many_arguments)] // Concrete model dispatch keeps the generic training loop type-safe.
 fn run_chess_classic(
-    args: &Args,
+    args: &RunArgs,
     run: &RunDir,
     experiment: &ExperimentConfig,
     state: &mut alphazero::RunState,
@@ -219,7 +226,7 @@ fn run_chess_classic(
 
 #[allow(clippy::too_many_arguments)] // Concrete model dispatch keeps the generic training loop type-safe.
 fn run_chess_history<const HISTORY: usize>(
-    args: &Args,
+    args: &RunArgs,
     run: &RunDir,
     experiment: &ExperimentConfig,
     state: &mut alphazero::RunState,
@@ -248,7 +255,7 @@ fn run_chess_history<const HISTORY: usize>(
 
 #[allow(clippy::too_many_arguments)] // Generic state, representation, model, and worker inputs meet here once.
 fn run_iterations<S, R, F>(
-    args: &Args,
+    args: &RunArgs,
     run: &RunDir,
     experiment: &ExperimentConfig,
     state: &mut alphazero::RunState,
@@ -270,7 +277,12 @@ where
     let coordinator = SelfPlayCoordinator::new(experiment.self_play.clone(), experiment.seed)?;
     let mut completed = 0;
     while args.forever || completed < args.iterations {
-        let stats = coordinator.run(factory, replay)?;
+        let epoch = SelfPlayEpoch {
+            model_generation: state.model_generation,
+            first_game_id: state.total_games_generated,
+        };
+        let stats = coordinator.run(factory, replay, epoch)?;
+        state.total_games_generated += stats.games as u64;
         let metrics = alphazero::train(
             net,
             &mut optimizer,
@@ -278,6 +290,8 @@ where
             representation,
             device,
             &experiment.training,
+            experiment.seed,
+            state.global_step,
         );
         state.iteration += 1;
         state.model_generation += 1;
@@ -293,68 +307,19 @@ where
         run.log_metrics(serde_json::json!({
             "iteration": state.iteration,
             "model_generation": state.model_generation,
+            "total_games_generated": state.total_games_generated,
             "games": stats.games,
             "moves": stats.moves,
             "replay_samples": replay.len(),
             "policy_loss": metrics.as_ref().map(|metrics| metrics.policy_loss),
             "value_loss": metrics.as_ref().map(|metrics| metrics.value_loss),
+            "learning_rate": metrics.as_ref().map(|metrics| metrics.learning_rate),
+            "training": metrics,
+            "batcher": batcher.stats(),
         }))?;
         completed += 1;
     }
     Ok(())
-}
-
-fn experiment_from_args(args: &Args) -> ExperimentConfig {
-    let model = match args.game {
-        GameKind::Connect4 => ModelSpec::connect4_basic(args.blocks, args.channels),
-        GameKind::Chess if args.chess_classic => {
-            ModelSpec::chess_classic(args.blocks, args.channels)
-        }
-        GameKind::Chess => ModelSpec::chess_se(
-            history(args.chess_history),
-            ValueHeadConfig::Wdl {
-                hidden: args.channels,
-            },
-        ),
-    };
-    let mut self_play = SelfPlayConfig {
-        num_games: args.games,
-        threads: args.threads.unwrap_or_else(|| {
-            std::thread::available_parallelism().map_or(1, |threads| threads.get())
-        }),
-        max_moves: args.max_moves,
-        ..Default::default()
-    };
-    if let search::SearchConfig::Puct(search) = &mut self_play.search {
-        search.common.simulations = args.simulations;
-        search.common.leaf_batch_size = args.leaf_batch_size;
-    }
-    self_play.budget_schedule = alphazero::SearchBudgetSchedule::fixed(&self_play.search);
-    ExperimentConfig {
-        format_version: EXPERIMENT_FORMAT_VERSION,
-        model,
-        self_play,
-        replay: ReplayConfig {
-            capacity: args.replay_capacity,
-        },
-        training: TrainConfig {
-            batch_size: args.batch_size,
-            train_steps: args.train_steps,
-            lr: args.learning_rate,
-            weight_decay: args.weight_decay,
-            ..Default::default()
-        },
-        seed: args.seed,
-    }
-}
-
-fn history(value: usize) -> ChessHistoryLength {
-    match value {
-        1 => ChessHistoryLength::One,
-        4 => ChessHistoryLength::Four,
-        8 => ChessHistoryLength::Eight,
-        _ => panic!("--chess-history must be 1, 4, or 8"),
-    }
 }
 
 fn select_device(kind: DeviceKind) -> Result<Device> {

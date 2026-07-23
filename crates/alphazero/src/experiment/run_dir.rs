@@ -1,6 +1,8 @@
 use super::migration::migrate_old_config;
-use super::{ExperimentConfig, RunState, STATE_FORMAT_VERSION};
+use super::state::RunStateV1;
+use super::{ExperimentConfig, RunState, EXPERIMENT_FORMAT_VERSION, STATE_FORMAT_VERSION};
 use anyhow::{Context, Result};
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -10,6 +12,28 @@ pub struct RunDir {
 }
 
 impl RunDir {
+    /// Opens an initialized run without inventing configuration or state.
+    pub fn open(root: &Path) -> Result<(Self, ExperimentConfig, RunState)> {
+        let run = Self {
+            root: root.to_path_buf(),
+        };
+        anyhow::ensure!(
+            run.experiment_path().is_file(),
+            "missing immutable experiment file: {}",
+            run.experiment_path().display()
+        );
+        anyhow::ensure!(
+            run.state_path().is_file(),
+            "missing run state: {}",
+            run.state_path().display()
+        );
+        Ok((
+            run,
+            read_experiment(&root.join("experiment.toml"))?,
+            read_state(&root.join("state.json"))?,
+        ))
+    }
+
     pub fn open_or_create(
         root: &Path,
         make_config: impl FnOnce() -> ExperimentConfig,
@@ -20,15 +44,19 @@ impl RunDir {
         fs::create_dir_all(run.checkpoints_dir())?;
         let config = if run.experiment_path().is_file() {
             read_experiment(&run.experiment_path())?
+        } else if run.legacy_experiment_path().is_file() {
+            let migrated = read_legacy_experiment(&run.legacy_experiment_path())?;
+            write_toml_atomic(&run.experiment_path(), &migrated)?;
+            migrated
         } else if run.old_config_path().is_file() {
             let migrated = migrate_old_config(&fs::read_to_string(run.old_config_path())?)?;
             migrated.validate()?;
-            write_json_atomic(&run.experiment_path(), &migrated)?;
+            write_toml_atomic(&run.experiment_path(), &migrated)?;
             migrated
         } else {
             let config = make_config();
             config.validate()?;
-            write_json_atomic(&run.experiment_path(), &config)?;
+            write_toml_atomic(&run.experiment_path(), &config)?;
             config
         };
         config.validate()?;
@@ -45,8 +73,37 @@ impl RunDir {
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// Creates a run from a validated TOML experiment. Existing experiments
+    /// are never overwritten: algorithm and model settings are immutable.
+    pub fn initialize(root: &Path, config: ExperimentConfig) -> Result<(Self, RunState)> {
+        let run = Self {
+            root: root.to_path_buf(),
+        };
+        if root.exists() {
+            anyhow::ensure!(
+                fs::read_dir(root)?.next().is_none(),
+                "run directory is not empty: {}",
+                root.display()
+            );
+        }
+        anyhow::ensure!(
+            !run.experiment_path().exists()
+                && !run.legacy_experiment_path().exists()
+                && !run.old_config_path().exists(),
+            "run directory already contains an experiment: {}",
+            root.display()
+        );
+        config.validate()?;
+        fs::create_dir_all(run.checkpoints_dir())?;
+        write_toml_atomic(&run.experiment_path(), &config)?;
+        let state = RunState::default();
+        run.write_state(&state)?;
+        Ok((run, state))
+    }
+
     pub fn experiment_path(&self) -> PathBuf {
-        self.root.join("experiment.json")
+        self.root.join("experiment.toml")
     }
     pub fn state_path(&self) -> PathBuf {
         self.root.join("state.json")
@@ -84,7 +141,7 @@ impl RunDir {
         write_model: impl FnOnce(&Path) -> Result<()>,
     ) -> Result<()> {
         let latest = self.latest_path();
-        let temporary = latest.with_extension("safetensors.tmp");
+        let temporary = temporary_model_path(&latest)?;
         let _ = fs::remove_file(&temporary);
         write_model(&temporary).with_context(|| format!("writing {}", temporary.display()))?;
         fs::rename(&temporary, &latest)?;
@@ -117,29 +174,75 @@ impl RunDir {
     fn old_config_path(&self) -> PathBuf {
         self.root.join("config.json")
     }
+
+    fn legacy_experiment_path(&self) -> PathBuf {
+        self.root.join("experiment.json")
+    }
 }
 
 fn read_experiment(path: &Path) -> Result<ExperimentConfig> {
-    let config: ExperimentConfig = serde_json::from_str(&fs::read_to_string(path)?)
+    let config: ExperimentConfig = toml::from_str(&fs::read_to_string(path)?)
         .with_context(|| format!("parsing {}", path.display()))?;
     config.validate()?;
     Ok(config)
 }
 
-fn read_state(path: &Path) -> Result<RunState> {
-    let state: RunState = serde_json::from_str(&fs::read_to_string(path)?)
+fn read_legacy_experiment(path: &Path) -> Result<ExperimentConfig> {
+    let config: ExperimentConfig = serde_json::from_str(&fs::read_to_string(path)?)
         .with_context(|| format!("parsing {}", path.display()))?;
-    anyhow::ensure!(
-        state.format_version == STATE_FORMAT_VERSION,
-        "unsupported state format version {}",
-        state.format_version
-    );
-    Ok(state)
+    let config = match config.format_version {
+        1 => config.upgrade_from_v1()?,
+        version if version == EXPERIMENT_FORMAT_VERSION => config,
+        version => anyhow::bail!("unsupported experiment format version {version}"),
+    };
+    config.validate()?;
+    Ok(config)
+}
+
+fn read_state(path: &Path) -> Result<RunState> {
+    let json = fs::read_to_string(path)?;
+    let format_version = serde_json::from_str::<serde_json::Value>(&json)
+        .with_context(|| format!("parsing {}", path.display()))?
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+        .context("state format_version must be an unsigned integer")?;
+    match format_version {
+        version if version == u64::from(STATE_FORMAT_VERSION) => {
+            serde_json::from_str(&json).with_context(|| format!("parsing {}", path.display()))
+        }
+        1 => {
+            let state: RunStateV1 = serde_json::from_str(&json)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            anyhow::ensure!(state.format_version == 1, "invalid version-1 state");
+            Ok(RunState::from_v1(state))
+        }
+        version => anyhow::bail!("unsupported state format version {version}"),
+    }
+}
+
+fn temporary_model_path(final_path: &Path) -> Result<PathBuf> {
+    let stem = final_path
+        .file_stem()
+        .context("checkpoint path must have a file stem")?;
+    let extension = final_path
+        .extension()
+        .context("checkpoint path must have a file extension")?;
+    let mut name = OsString::from(stem);
+    name.push(".tmp.");
+    name.push(extension);
+    Ok(final_path.with_file_name(name))
 }
 
 fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let temporary = path.with_extension("json.tmp");
     fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
+    fs::rename(temporary, path)?;
+    Ok(())
+}
+
+fn write_toml_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
+    let temporary = path.with_extension("toml.tmp");
+    fs::write(&temporary, toml::to_string_pretty(value)?)?;
     fs::rename(temporary, path)?;
     Ok(())
 }

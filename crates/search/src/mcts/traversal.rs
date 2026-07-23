@@ -101,15 +101,19 @@ where
     }
 
     fn cache_terminal(&mut self, node: u32, game: &G, rule: RuleResult) {
-        let reward = match rule {
-            RuleResult::Terminal(value) => Some(value),
-            RuleResult::Continue => game.terminal_value().map(PositionValue::from),
-        };
+        let reward = self.terminal_value(game, rule);
         if let Some(reward) = reward {
             let current = &mut self.nodes[node as usize];
             current.terminal = true;
             current.reward = reward;
             current.raw_value = reward;
+        }
+    }
+
+    pub(super) fn terminal_value(&self, game: &G, rule: RuleResult) -> Option<PositionValue> {
+        match rule {
+            RuleResult::Terminal(value) => Some(value),
+            RuleResult::Continue => game.terminal_value().map(PositionValue::from),
         }
     }
 
@@ -156,8 +160,8 @@ where
                 });
             }
         }
-        let evaluations = match self.evaluate_positions(&batch.unique_games) {
-            Ok(evaluations) => evaluations,
+        let (evaluations, evaluation_stats) = match self.evaluate_positions(&batch.unique_games) {
+            Ok(result) => result,
             Err(error) => {
                 for pending in batch.pending.drain(..) {
                     cancel_path(&mut self.nodes, pending.node);
@@ -165,7 +169,10 @@ where
                 return Err(error);
             }
         };
-        diagnostics.network_evaluations += batch.unique_games.len();
+        diagnostics.backend_evaluations += evaluation_stats.backend_evaluations;
+        diagnostics.evaluation_cache_hits += evaluation_stats.cache_hits;
+        diagnostics.evaluation_cache_misses += evaluation_stats.backend_evaluations;
+        diagnostics.duplicate_leaves += evaluation_stats.duplicate_requests;
         debug_assert_eq!(
             evaluations.len(),
             batch.unique_games.len(),
@@ -225,7 +232,7 @@ mod tests {
             let mut nodes = reserved_path(length);
             complete_path(&mut nodes, length as u32, PositionValue::WIN);
             for (index, node) in nodes.iter().enumerate() {
-                let expected = if (length - index).is_multiple_of(2) {
+                let expected = if (length - index) % 2 == 0 {
                     PositionValue::WIN
                 } else {
                     PositionValue::LOSS

@@ -80,7 +80,7 @@ pub fn evaluate<G: GameState + Default>(
     let mut result = ArenaResult::default();
 
     for game_index in 0..config.games {
-        let outcome = if game_index.is_multiple_of(2) {
+        let outcome = if game_index % 2 == 0 {
             play_single_game::<G, _, _>(candidate, baseline, config)
         } else {
             play_single_game::<G, _, _>(baseline, candidate, config).reverse()
@@ -128,7 +128,7 @@ where
         } else {
             PolicyMode::Deterministic
         };
-        let mv = if move_index.is_multiple_of(2) {
+        let mv = if move_index % 2 == 0 {
             first.select_move(&game, mode)
         } else {
             second.select_move(&game, mode)
@@ -143,9 +143,9 @@ where
 
     match game.terminal_value() {
         None | Some(TerminalValue::Draw) => Outcome::Draw,
-        Some(TerminalValue::Loss) if (move_index - 1).is_multiple_of(2) => Outcome::Win,
+        Some(TerminalValue::Loss) if (move_index - 1) % 2 == 0 => Outcome::Win,
         Some(TerminalValue::Loss) => Outcome::Loss,
-        Some(TerminalValue::Win) if (move_index - 1).is_multiple_of(2) => Outcome::Loss,
+        Some(TerminalValue::Win) if (move_index - 1) % 2 == 0 => Outcome::Loss,
         Some(TerminalValue::Win) => Outcome::Win,
     }
 }

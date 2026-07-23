@@ -7,40 +7,28 @@ import argparse
 import json
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_metadata(run_dir: Path, game: str) -> tuple[str, int | None]:
-    config_path = run_dir / "config.json"
+def run_metadata(run_dir: Path, game: str) -> tuple[str, str | None]:
+    config_path = run_dir / "experiment.toml"
     if not config_path.is_file():
-        raise SystemExit(f"run config does not exist: {config_path}")
-    config = json.loads(config_path.read_text())
-    model = config.get("model", {})
-    if model:
-        kind = model.get("kind")
-        model_config = model.get("config", {})
-    else:
-        # Older runs use {game, net, architecture}; Rust still reads them.
-        kind = {
-            ("chess", "legacy"): "chess-scalar-az-v1",
-            ("chess", "chess-az-v2"): "chess-az-v2",
-            ("connect4", "legacy"): "connect4-scalar-az",
-        }.get((config.get("game"), config.get("architecture", {}).get("kind", "legacy")))
-        model_config = config.get("architecture", {}).get("config", {})
-    expected = {
-        "chess": {"chess-scalar-az-v1", "chess-az-v2"},
-        "connect4": {"connect4-scalar-az"},
-    }
-    if kind not in expected[game]:
-        raise SystemExit(f"run model {kind!r} does not match --game {game}")
-    if kind == "chess-az-v2":
-        history = model_config.get("history")
-        if history not in (1, 4, 8):
-            raise SystemExit(f"unsupported chess-az-v2 history: {history!r}")
-        return kind, history
-    return kind, None
+        raise SystemExit(f"run experiment does not exist: {config_path}")
+    model = tomllib.loads(config_path.read_text()).get("model", {})
+    if model.get("game") != game:
+        raise SystemExit(f"run model does not match --game {game}")
+    representation = model.get("representation")
+    if representation == "chess-classic":
+        return "chess-classic", None
+    if representation == "connect4-canonical":
+        return "connect4-canonical", None
+    canonical = representation.get("chess-canonical") if isinstance(representation, dict) else None
+    if canonical is None:
+        raise SystemExit(f"unsupported representation: {representation!r}")
+    return "chess-canonical", canonical.get("history")
 
 
 def main() -> int:

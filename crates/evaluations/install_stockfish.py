@@ -7,9 +7,19 @@ import argparse
 import io
 import tarfile
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 URL = "https://github.com/official-stockfish/Stockfish/releases/download/sf_18/stockfish-ubuntu-x86-64.tar"
+
+
+def safe_relative_path(member: tarfile.TarInfo, root: str) -> Path | None:
+    path = PurePosixPath(member.name)
+    if path.is_absolute() or ".." in path.parts or member.issym() or member.islnk():
+        raise ValueError(f"unsafe archive member: {member.name!r}")
+    if not (member.isdir() or member.isreg()):
+        raise ValueError(f"unsupported archive member type: {member.name!r}")
+    parts = path.parts[1:] if root and path.parts[:1] == (root,) else path.parts
+    return Path(*parts) if parts else None
 
 
 def main() -> int:
@@ -22,12 +32,22 @@ def main() -> int:
     with urllib.request.urlopen(args.url) as response:
         archive = tarfile.open(fileobj=io.BytesIO(response.read()), mode="r:")
         members = archive.getmembers()
-        root = next((member.name.split("/", 1)[0] for member in members if "/" in member.name), "")
+        roots = {PurePosixPath(member.name).parts[0] for member in members if member.name}
+        root = roots.pop() if len(roots) == 1 else ""
         for member in members:
-            relative = member.name[len(root) + 1:] if root and member.name.startswith(root + "/") else member.name
-            if relative:
-                member.name = relative
-                archive.extract(member, destination)
+            relative = safe_relative_path(member, root)
+            if relative is None:
+                continue
+            target = destination / relative
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                raise ValueError(f"could not read archive member: {member.name!r}")
+            with source, target.open("wb") as output:
+                output.write(source.read())
     print(f"installed Stockfish in {destination}")
     return 0
 

@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 pub enum SearchBudget {
     Puct {
         simulations: usize,
-        leaf_batch_size: usize,
     },
     Gumbel {
         simulations: usize,
@@ -32,12 +31,8 @@ impl SearchBudget {
 
     fn validate(self) -> Result<()> {
         match self {
-            Self::Puct {
-                simulations,
-                leaf_batch_size,
-            } => {
+            Self::Puct { simulations } => {
                 ensure!(simulations > 0, "PUCT simulations must be positive");
-                ensure!(leaf_batch_size > 0, "PUCT leaf_batch_size must be positive");
             }
             Self::Gumbel {
                 simulations,
@@ -71,7 +66,6 @@ impl SearchBudgetSchedule {
         match search {
             SearchConfig::Puct(config) => Self::Fixed(SearchBudget::Puct {
                 simulations: config.common.simulations,
-                leaf_batch_size: config.common.leaf_batch_size,
             }),
             SearchConfig::Gumbel(config) => Self::Fixed(SearchBudget::Gumbel {
                 simulations: config.simulations,
@@ -215,12 +209,12 @@ impl ResignationConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SelfPlayConfig {
     pub num_games: usize,
     pub threads: usize,
     pub max_moves: usize,
     pub progress_every: usize,
-    pub model_generation: u64,
     pub search: SearchConfig,
     pub budget_schedule: SearchBudgetSchedule,
     pub temperature: TemperatureSchedule,
@@ -237,7 +231,6 @@ impl Default for SelfPlayConfig {
             threads: std::thread::available_parallelism().map_or(1, |threads| threads.get()),
             max_moves: 256,
             progress_every: 25,
-            model_generation: 0,
             budget_schedule: SearchBudgetSchedule::fixed(&search),
             search,
             temperature: TemperatureSchedule {
@@ -255,6 +248,7 @@ impl Default for SelfPlayConfig {
 
 impl SelfPlayConfig {
     pub fn validate(&self) -> Result<()> {
+        ensure!(self.num_games > 0, "self-play num_games must be positive");
         ensure!(self.threads > 0, "self-play threads must be positive");
         ensure!(self.max_moves > 0, "self-play max_moves must be positive");
         self.search.validate().map_err(anyhow::Error::msg)?;

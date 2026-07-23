@@ -1,4 +1,4 @@
-use super::{ExperimentConfig, ReplayConfig, EXPERIMENT_FORMAT_VERSION};
+use super::{ExperimentConfig, InferenceConfig, ReplayConfig, EXPERIMENT_FORMAT_VERSION};
 use crate::{ChessHistoryLength, ModelSpec, SelfPlayConfig, TrainConfig, ValueHeadConfig};
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -29,6 +29,7 @@ pub(super) fn migrate_old_config(json: &str) -> Result<ExperimentConfig> {
         self_play,
         replay: ReplayConfig::default(),
         training: TrainConfig::default(),
+        inference: InferenceConfig::default(),
         seed: 0,
     })
 }

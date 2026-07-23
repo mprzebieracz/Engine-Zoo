@@ -113,8 +113,18 @@ where
     E: PolicyValueEvaluator<G>,
     R: SearchRules<G>,
 {
+    /// Creates a searcher, panicking when `config` is invalid.
+    /// Prefer [`Self::try_new`] at recoverable application boundaries.
     pub fn new(evaluator: E, config: SearchConfig, rules: R) -> Self {
-        config.validate().expect("invalid search configuration");
+        Self::try_new(evaluator, config, rules).expect("invalid search configuration")
+    }
+
+    pub fn try_new(
+        evaluator: E,
+        config: SearchConfig,
+        rules: R,
+    ) -> Result<Self, super::SearchConfigError> {
+        config.validate().map_err(super::SearchConfigError)?;
         fn make_core<G, E, R, V>(
             evaluator: E,
             rules: R,
@@ -165,7 +175,7 @@ where
                 ))
             }
         };
-        Self { inner }
+        Ok(Self { inner })
     }
 
     pub fn with_eval_cache(mut self, cache: Arc<EvalTable<G::Move>>) -> Self {

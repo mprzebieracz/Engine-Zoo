@@ -57,6 +57,11 @@ pub trait EncodedEvaluator: Send {
         &mut self,
         batch: &mut EncodedEvalBatch,
     ) -> Result<Vec<Evaluation>, EvaluationError>;
+
+    /// Namespace for cache entries produced by the current model generation.
+    fn cache_namespace(&self) -> u64 {
+        0
+    }
 }
 
 /// Adapts native states and moves through a representation to an encoded evaluator.
@@ -127,8 +132,11 @@ where
         self.encoded.evaluate(&mut self.batch)
     }
 
-    fn evaluation_key(&self, state: &G) -> Option<u64> {
-        Some(self.representation.encoded_state_key(state))
+    fn evaluation_key(&self, state: &G) -> Option<search::EvaluationKey> {
+        Some(search::EvaluationKey {
+            state: self.representation.encoded_state_key(state),
+            namespace: self.encoded.cache_namespace(),
+        })
     }
 }
 
@@ -228,7 +236,7 @@ mod tests {
                             .iter()
                             .map(|action| action.as_u32() as f32)
                             .collect(),
-                        value: PositionValue::new_clamped(row as f32 + 0.25),
+                        value: PositionValue::new((row as f32 + 0.25).min(1.0)).unwrap(),
                     }
                 })
                 .collect())
@@ -250,10 +258,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(evaluations[0].logits, [209.0, 203.0]);
-        assert_eq!(evaluations[0].value, PositionValue::new_clamped(0.25));
+        assert_eq!(evaluations[0].value, PositionValue::new(0.25).unwrap());
         assert_eq!(evaluations[1].logits, [508.0]);
         assert_eq!(evaluations[1].value, PositionValue::WIN);
-        assert_eq!(evaluator.evaluation_key(&TestState(6)), Some(42));
+        assert_eq!(
+            evaluator.evaluation_key(&TestState(6)),
+            Some(search::EvaluationKey {
+                state: 42,
+                namespace: 0,
+            })
+        );
 
         evaluator.evaluate(&[TestState(1)], &[4], &[0, 1]).unwrap();
         assert!(evaluator.evaluate(&[], &[], &[0]).unwrap().is_empty());

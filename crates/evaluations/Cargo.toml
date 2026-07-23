@@ -2,7 +2,11 @@
 name = "checkpoint-eval"
 version.workspace = true
 edition.workspace = true
-description = "Background Stockfish evaluation for engine-zoo checkpoints"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Explicit chess checkpoint evaluation tools for engine-zoo"
 build = "build.rs"
 
 [dependencies]

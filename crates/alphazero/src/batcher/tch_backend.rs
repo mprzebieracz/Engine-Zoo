@@ -1,11 +1,13 @@
 use super::{CombinedEncodedBatch, InferenceBackend};
 use crate::evaluator::Evaluation;
 use crate::network::ModelSpec;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tch::{nn, Device, Kind, Tensor};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum InferencePrecision {
     Fp32,
     Fp16,
@@ -208,8 +210,8 @@ impl TchInferenceBackend {
         value_host.narrow(0, 0, n).copy_(&value.view([n, 1]));
         let values =
             unsafe { std::slice::from_raw_parts(value_host.data_ptr() as *const f32, batch.len()) };
-        Ok((0..batch.len())
-            .map(|row| {
+        (0..batch.len())
+            .map(|row| -> Result<Evaluation> {
                 let begin = batch.offsets[row] as usize;
                 let end = batch.offsets[row + 1] as usize;
                 let logits = gathered
@@ -221,12 +223,13 @@ impl TchInferenceBackend {
                         )[row * *width..row * *width + end - begin]
                             .to_vec()
                     });
-                Evaluation {
+                Ok(Evaluation {
                     logits,
-                    value: search::PositionValue::new_clamped(values[row]),
-                }
+                    value: search::PositionValue::new(values[row])
+                        .map_err(|_| anyhow!("network returned invalid value at row {row}"))?,
+                })
             })
-            .collect())
+            .collect::<Result<Vec<_>>>()
     }
 
     fn evaluate_cpu(
@@ -242,19 +245,20 @@ impl TchInferenceBackend {
             .try_into()?;
         let values: Vec<f32> = value.contiguous().view(-1).try_into()?;
         let action_size = self.spec.action_size();
-        Ok((0..batch.len())
-            .map(|row| {
+        (0..batch.len())
+            .map(|row| -> Result<Evaluation> {
                 let begin = batch.offsets[row] as usize;
                 let end = batch.offsets[row + 1] as usize;
                 let logits = batch.legal_actions[begin..end]
                     .iter()
                     .map(|action| policy[row * action_size + action.index()])
                     .collect();
-                Evaluation {
+                Ok(Evaluation {
                     logits,
-                    value: search::PositionValue::new_clamped(values[row]),
-                }
+                    value: search::PositionValue::new(values[row])
+                        .map_err(|_| anyhow!("network returned invalid value at row {row}"))?,
+                })
             })
-            .collect())
+            .collect::<Result<Vec<_>>>()
     }
 }

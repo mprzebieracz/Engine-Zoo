@@ -116,7 +116,7 @@ where
                         SearchKind::Fast
                     },
                     simulations: budget.simulations() as u32,
-                    model_generation: self.config.model_generation,
+                    model_generation: game.model_generation,
                     game_id: game.game_id,
                     ply: trajectory.len() as u16,
                 },
@@ -139,13 +139,10 @@ where
     R: search::SearchRules<G>,
 {
     match budget {
-        SearchBudget::Puct {
-            simulations,
-            leaf_batch_size,
-        } => {
+        SearchBudget::Puct { simulations } => {
             ensure!(
-                matches!(mcts.config(), SearchConfig::Puct(config) if config.common.leaf_batch_size == leaf_batch_size),
-                "PUCT budget leaf_batch_size must match the configured search"
+                matches!(mcts.config(), SearchConfig::Puct(_)),
+                "PUCT budget requires PUCT search"
             );
             mcts.set_simulations(simulations);
         }

@@ -75,7 +75,7 @@ fn main() -> Result<()> {
         .games
         .map(|games| {
             anyhow::ensure!(
-                games > 0 && games.is_multiple_of(2),
+                games > 0 && games % 2 == 0,
                 "--games must be a positive even number"
             );
             Ok(games / 2)

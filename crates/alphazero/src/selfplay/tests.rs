@@ -1,26 +1,153 @@
 use super::{
-    select_temperature_action, GameRequest, SearchBudget, SearchBudgetSchedule, TemperaturePhase,
-    TemperatureSchedule,
+    select_temperature_action, CompletedGame, GameRequest, SearchBudget, SearchBudgetSchedule,
+    SelfPlayConfig, SelfPlayCoordinator, SelfPlayEpoch, SelfPlayStats, SelfPlayWorker,
+    SelfPlayWorkerFactory, TemperaturePhase, TemperatureSchedule,
 };
+use crate::{Action, Outcome, ReplayBuffer, ReplaySample, SampleMetadata, TrainingWeights};
+use anyhow::Result;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use search::{PositionValue, SearchResult};
+use std::time::Duration;
 
 #[test]
 fn game_id_and_purpose_produce_independent_deterministic_seeds() {
     let first = GameRequest {
         game_id: 3,
+        model_generation: 0,
         worker_id: 0,
-        seed: 7,
+        experiment_seed: 7,
     };
     let second = GameRequest {
         game_id: 4,
-        worker_id: 0,
-        seed: 7,
+        model_generation: 1,
+        worker_id: 9,
+        experiment_seed: 7,
     };
     assert_eq!(first.seed_for(11), first.seed_for(11));
     assert_ne!(first.seed_for(11), second.seed_for(11));
     assert_ne!(first.seed_for(11), first.seed_for(12));
+    assert_ne!(
+        first.seed_for(11),
+        GameRequest {
+            model_generation: 1,
+            ..first
+        }
+        .seed_for(11)
+    );
+    assert_eq!(
+        first.seed_for(11),
+        GameRequest {
+            worker_id: 99,
+            ..first
+        }
+        .seed_for(11)
+    );
+}
+
+#[test]
+fn zero_games_is_rejected_before_self_play_starts() {
+    assert!(SelfPlayConfig {
+        num_games: 0,
+        ..SelfPlayConfig::default()
+    }
+    .validate()
+    .is_err());
+}
+
+#[derive(Clone, Copy)]
+struct ScriptedFactory;
+
+struct ScriptedWorker;
+
+impl SelfPlayWorkerFactory<u64> for ScriptedFactory {
+    type Worker = ScriptedWorker;
+
+    fn create(&self, _: usize, _: u64) -> Result<Self::Worker> {
+        Ok(ScriptedWorker)
+    }
+}
+
+impl SelfPlayWorker<u64> for ScriptedWorker {
+    fn play_game(&mut self, request: GameRequest) -> Result<CompletedGame<u64>> {
+        let delay = (3 - request.game_id % 4) * 2;
+        std::thread::sleep(Duration::from_millis(delay));
+        Ok(CompletedGame {
+            stats: SelfPlayStats {
+                games: 1,
+                moves: 1,
+                ..Default::default()
+            },
+            trajectory: vec![ReplaySample {
+                state: request.game_id,
+                policy: vec![(Action::new(0), 1.0)].into(),
+                outcome: Outcome::Draw,
+                weights: TrainingWeights::default(),
+                metadata: SampleMetadata {
+                    model_generation: request.model_generation,
+                    game_id: request.game_id,
+                    ..Default::default()
+                },
+            }],
+        })
+    }
+}
+
+fn scripted_run(threads: usize, epoch: SelfPlayEpoch) -> Vec<(u64, u64)> {
+    let coordinator = SelfPlayCoordinator::new(
+        SelfPlayConfig {
+            num_games: 8,
+            threads,
+            ..SelfPlayConfig::default()
+        },
+        17,
+    )
+    .unwrap();
+    let replay = ReplayBuffer::new(16, 1);
+    let stats = coordinator.run(&ScriptedFactory, &replay, epoch).unwrap();
+    assert_eq!(stats.games, 8);
+    replay
+        .export_filled()
+        .into_iter()
+        .map(|sample| (sample.metadata.game_id, sample.metadata.model_generation))
+        .collect()
+}
+
+#[test]
+fn ordered_commit_makes_thread_counts_and_generation_metadata_reproducible() {
+    let epoch = SelfPlayEpoch {
+        model_generation: 6,
+        first_game_id: 40,
+    };
+    let one_thread = scripted_run(1, epoch);
+    let four_threads = scripted_run(4, epoch);
+    assert_eq!(one_thread, four_threads);
+    assert_eq!(
+        four_threads,
+        (40..48).map(|game_id| (game_id, 6)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn epochs_never_reuse_game_ids() {
+    let first = scripted_run(
+        2,
+        SelfPlayEpoch {
+            model_generation: 0,
+            first_game_id: 0,
+        },
+    );
+    let second = scripted_run(
+        2,
+        SelfPlayEpoch {
+            model_generation: 1,
+            first_game_id: first.len() as u64,
+        },
+    );
+    assert_eq!(first.last().unwrap().0, 7);
+    assert_eq!(second.first().unwrap().0, 8);
+    assert!(first.iter().all(|(_, generation)| *generation == 0));
+    assert!(second.iter().all(|(_, generation)| *generation == 1));
 }
 
 #[test]

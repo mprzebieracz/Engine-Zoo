@@ -1,0 +1,38 @@
+format_version = 2
+seed = 1
+
+[model]
+game = "chess"
+
+[model.representation.chess-canonical]
+history = "four"
+
+[model.network]
+architecture = "residual"
+
+[model.network.config.trunk.squeeze-excitation]
+blocks = 12
+channels = 128
+se_hidden = 16
+
+[model.network.config.policy_head.convolutional-planes]
+planes = 73
+
+[model.network.config.value_head.wdl]
+hidden = 128
+
+[self_play]
+num_games = 128
+threads = 8
+
+[self_play.search.Puct.common]
+simulations = 800
+leaf_batch_size = 8
+
+[self_play.budget_schedule.fixed.puct]
+simulations = 800
+
+[training]
+batch_size = 2048
+train_steps = 80
+

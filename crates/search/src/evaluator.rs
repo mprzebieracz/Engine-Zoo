@@ -3,10 +3,34 @@ use engine_core::GameState;
 use std::error::Error;
 use std::fmt;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Identifies one evaluator result. The namespace changes whenever the model
+/// behind an evaluator changes, so cache entries cannot cross model reloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EvaluationKey {
+    pub state: u64,
+    pub namespace: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum EvaluationError {
     Message(String),
-    ResultCardinality { expected: usize, actual: usize },
+    ResultCardinality {
+        expected: usize,
+        actual: usize,
+    },
+    LogitCardinality {
+        row: usize,
+        expected: usize,
+        actual: usize,
+    },
+    NonFiniteLogit {
+        row: usize,
+        index: usize,
+    },
+    InvalidValue {
+        row: usize,
+        value: f32,
+    },
 }
 
 impl EvaluationError {
@@ -27,6 +51,26 @@ impl fmt::Display for EvaluationError {
                 write!(
                     formatter,
                     "evaluator returned {actual} results for {expected} states"
+                )
+            }
+            Self::LogitCardinality {
+                row,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "evaluator row {row} returned {actual} logits for {expected} legal moves"
+            ),
+            Self::NonFiniteLogit { row, index } => {
+                write!(
+                    formatter,
+                    "evaluator row {row} returned a non-finite logit at {index}"
+                )
+            }
+            Self::InvalidValue { row, value } => {
+                write!(
+                    formatter,
+                    "evaluator row {row} returned invalid value {value}"
                 )
             }
         }
@@ -54,7 +98,7 @@ pub trait PolicyValueEvaluator<G: GameState>: Send {
     ) -> Result<Vec<Evaluation>, EvaluationError>;
 
     /// Returns a complete evaluation-cache key, or `None` to disable caching.
-    fn evaluation_key(&self, state: &G) -> Option<u64> {
+    fn evaluation_key(&self, state: &G) -> Option<EvaluationKey> {
         let _ = state;
         None
     }
