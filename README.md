@@ -83,6 +83,7 @@ The repository has a deterministic pure-search harness in `crates/search/benches
 - [Repository guide](REPOSITORY_GUIDE.md): linear, file-level architecture tour.
 - [Architecture](docs/architecture.md), [PUCT](docs/search/puct.md), and [Full Gumbel](docs/search/full-gumbel.md).
 - [Training](docs/training.md), [Chess representation](docs/chess-representation.md), and [reproducibility](docs/reproducibility.md).
+- [Opt-in TensorRT inference](docs/tensorrt.md).
 - [Testing](docs/testing.md) and [archived refactor plan](docs/archive/architecture-refactor-plan-2026-07.md).
 
 ## License

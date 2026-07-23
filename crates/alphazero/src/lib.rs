@@ -21,8 +21,8 @@ pub use batcher::{
 };
 pub use evaluator::{EncodedEvalBatch, EncodedEvaluator, RepresentedEvaluator};
 pub use experiment::{
-    DurationConfig, ExperimentConfig, InferenceConfig, ReplayConfig, ResumeKind, RunDir, RunState,
-    EXPERIMENT_FORMAT_VERSION, STATE_FORMAT_VERSION,
+    DurationConfig, ExperimentConfig, InferenceConfig, InferenceEngine, ReplayConfig, ResumeKind,
+    RunDir, RunState, EXPERIMENT_FORMAT_VERSION, STATE_FORMAT_VERSION,
 };
 pub use network::{
     ChessHistoryLength, ClassicResidualNet, GameSpec, ModelFingerprint, ModelSpec, Network,

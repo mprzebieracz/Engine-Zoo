@@ -3,14 +3,14 @@ use alphazero::representation::{
 };
 use alphazero::{
     Batcher, ChessHistoryLength, ChessSelfPlayWorkerFactory, ExperimentConfig, GameSpec,
-    GenericSelfPlayWorkerFactory, Network, ReplayBuffer, RunDir, SelfPlayCoordinator,
-    SelfPlayEpoch,
+    GenericSelfPlayWorkerFactory, InferenceEngine, Network, ReplayBuffer, RunDir,
+    SelfPlayCoordinator, SelfPlayEpoch,
 };
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use games::{ChessPosition, Connect4};
 use std::path::PathBuf;
-use tch::{nn, Device};
+use tch::{nn, CModule, Device, Kind, Tensor};
 
 #[derive(Clone, Copy, ValueEnum)]
 enum DeviceKind {
@@ -41,6 +41,17 @@ enum Command {
     Inspect {
         #[arg(long)]
         run_dir: PathBuf,
+    },
+    /// Export a checkpoint as a TorchScript module for TensorRT compilation.
+    ExportTorchScript {
+        #[arg(long)]
+        experiment: PathBuf,
+        #[arg(long)]
+        checkpoint: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, value_enum, default_value_t = DeviceKind::Auto)]
+        device: DeviceKind,
     },
 }
 
@@ -74,8 +85,39 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&state)?);
             Ok(())
         }
+        Command::ExportTorchScript {
+            experiment,
+            checkpoint,
+            output,
+            device,
+        } => export_torchscript(experiment, checkpoint, output, select_device(device)?),
         Command::Run(args) => run(args),
     }
+}
+
+fn export_torchscript(
+    experiment_path: PathBuf,
+    checkpoint: PathBuf,
+    output: PathBuf,
+    device: Device,
+) -> Result<()> {
+    let experiment = ExperimentConfig::read_toml(&experiment_path)?;
+    let mut vs = nn::VarStore::new(device);
+    let net = Network::new(&vs.root(), &experiment.model)?;
+    vs.load(&checkpoint)?;
+    vs.freeze();
+
+    let [channels, height, width] = experiment.model.state_shape();
+    let input = Tensor::zeros([1, channels, height, width], (Kind::Float, device));
+    let mut forward = |inputs: &[Tensor]| {
+        let output = net.forward_t(&inputs[0], false);
+        let scalar = output.value.expected_value();
+        vec![Tensor::cat(&[output.policy_logits, scalar], 1)]
+    };
+    let module = CModule::create_by_tracing("engine_zoo", "forward", &[input], &mut forward)?;
+    module.save(&output)?;
+    println!("exported {}", output.display());
+    Ok(())
 }
 
 fn run(args: RunArgs) -> Result<()> {
@@ -100,13 +142,38 @@ fn run(args: RunArgs) -> Result<()> {
     else {
         run.write_latest(&mut state, |path| Ok(vs.save(path)?))?;
     }
-    let batcher = Batcher::new_with_model_precision(
-        experiment.model.clone(),
-        &run.latest_path(),
-        device,
-        experiment.inference.batcher_config(),
-        experiment.inference.precision,
-    )?;
+    let batcher = match experiment.inference.engine {
+        InferenceEngine::Native => Batcher::new_with_model_precision(
+            experiment.model.clone(),
+            &run.latest_path(),
+            device,
+            experiment.inference.batcher_config(),
+            experiment.inference.precision,
+        )?,
+        InferenceEngine::TensorRtTorchScript => {
+            anyhow::ensure!(
+                !args.forever && args.iterations == 1,
+                "TensorRT TorchScript inference supports one generation per run; compile a module for each new checkpoint"
+            );
+            let module = experiment
+                .inference
+                .tensor_rt_module
+                .as_deref()
+                .expect("validated TensorRT module path");
+            let module = if module.is_absolute() {
+                module.to_path_buf()
+            }
+            else {
+                run.root().join(module)
+            };
+            Batcher::new_with_tensor_rt_torchscript(
+                experiment.model.clone(),
+                &module,
+                device,
+                experiment.inference.batcher_config(),
+            )?
+        }
+    };
     match experiment.model.game {
         GameSpec::Connect4 => run_connect4(
             &args,
@@ -302,9 +369,11 @@ where
         state.replay_sample_count = replay.len();
         state.optimizer_moments_restored = false;
         run.write_latest(state, |path| Ok(vs.save(path)?))?;
-        batcher
-            .reload_weights(&run.latest_path())
-            .map_err(anyhow::Error::msg)?;
+        if experiment.inference.engine == InferenceEngine::Native {
+            batcher
+                .reload_weights(&run.latest_path())
+                .map_err(anyhow::Error::msg)?;
+        }
         run.log_metrics(serde_json::json!({
             "iteration": state.iteration,
             "model_generation": state.model_generation,

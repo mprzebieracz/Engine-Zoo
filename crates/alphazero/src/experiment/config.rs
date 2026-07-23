@@ -1,7 +1,7 @@
 use crate::{BatcherConfig, InferencePrecision, ModelSpec, SelfPlayConfig, TrainConfig};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const EXPERIMENT_FORMAT_VERSION: u32 = 2;
@@ -10,6 +10,18 @@ pub const EXPERIMENT_FORMAT_VERSION: u32 = 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DurationConfig {
     pub milliseconds: u64,
+}
+
+/// Selects the implementation used for self-play inference.
+///
+/// TensorRT modules are opt-in because they require the matching Torch-TensorRT
+/// runtime to be available to LibTorch at process startup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InferenceEngine {
+    #[default]
+    Native,
+    TensorRtTorchScript,
 }
 
 impl DurationConfig {
@@ -22,6 +34,10 @@ impl DurationConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InferenceConfig {
+    pub engine: InferenceEngine,
+    /// A TorchScript module compiled with Torch-TensorRT. Its `forward` method
+    /// returns the policy logits and scalar value packed along dimension one.
+    pub tensor_rt_module: Option<PathBuf>,
     pub precision: InferencePrecision,
     pub preferred_batch_size: usize,
     pub max_batch_size: usize,
@@ -32,6 +48,8 @@ pub struct InferenceConfig {
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
+            engine: InferenceEngine::Native,
+            tensor_rt_module: None,
             precision: InferencePrecision::Fp32,
             preferred_batch_size: 32,
             max_batch_size: 256,
@@ -43,6 +61,12 @@ impl Default for InferenceConfig {
 
 impl InferenceConfig {
     fn validate(&self) -> Result<()> {
+        if self.engine == InferenceEngine::TensorRtTorchScript {
+            ensure!(
+                self.tensor_rt_module.is_some(),
+                "tensor-rt-torch-script inference requires tensor_rt_module"
+            );
+        }
         BatcherConfig {
             preferred_batch_size: self.preferred_batch_size,
             max_batch_size: self.max_batch_size,

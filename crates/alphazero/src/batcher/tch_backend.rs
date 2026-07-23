@@ -4,7 +4,7 @@ use crate::network::ModelSpec;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tch::{nn, Device, Kind, Tensor};
+use tch::{nn, CModule, Device, IValue, Kind, Tensor};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -16,8 +16,7 @@ pub enum InferencePrecision {
 /// LibTorch implementation. Dynamic batching deliberately does not leak into
 /// this type: it only receives one contiguous batch at a time.
 pub struct TchInferenceBackend {
-    vs: nn::VarStore,
-    net: crate::network::Network,
+    model: LoadedModel,
     spec: ModelSpec,
     device: Device,
     input_kind: Kind,
@@ -26,6 +25,14 @@ pub struct TchInferenceBackend {
     index_buf: Option<Tensor>,
     gathered_buf: Option<Tensor>,
     value_buf: Option<Tensor>,
+}
+
+enum LoadedModel {
+    Native {
+        vs: nn::VarStore,
+        net: crate::network::Network,
+    },
+    TensorRtTorchScript(CModule),
 }
 
 impl TchInferenceBackend {
@@ -47,8 +54,7 @@ impl TchInferenceBackend {
             vs.half();
         }
         Ok(Self {
-            vs,
-            net,
+            model: LoadedModel::Native { vs, net },
             spec,
             device,
             input_kind: match precision {
@@ -56,6 +62,27 @@ impl TchInferenceBackend {
                 InferencePrecision::Fp16 => Kind::Half,
             },
             precision,
+            states_buf: None,
+            index_buf: None,
+            gathered_buf: None,
+            value_buf: None,
+        })
+    }
+
+    pub fn new_tensor_rt_torchscript(spec: ModelSpec, module: &Path, device: Device) -> Result<Self> {
+        anyhow::ensure!(device.is_cuda(), "TensorRT inference requires CUDA");
+        anyhow::ensure!(module.is_file(), "missing TensorRT TorchScript module: {}", module.display());
+        let mut module = CModule::load_on_device(module, device)
+            .with_context(|| format!("loading TensorRT TorchScript module from {}", module.display()))?;
+        module.set_eval();
+        Ok(Self {
+            model: LoadedModel::TensorRtTorchScript(module),
+            spec,
+            device,
+            // TensorRT chooses FP16 kernels internally. Its exported module
+            // contract uses FP32 inputs and outputs.
+            input_kind: Kind::Float,
+            precision: InferencePrecision::Fp32,
             states_buf: None,
             index_buf: None,
             gathered_buf: None,
@@ -91,14 +118,20 @@ impl TchInferenceBackend {
 
 impl InferenceBackend for TchInferenceBackend {
     fn reload_weights(&mut self, weights: &Path) -> Result<()> {
-        self.vs.float();
-        self.vs
-            .load(weights)
-            .with_context(|| format!("loading network weights from {}", weights.display()))?;
-        if self.precision == InferencePrecision::Fp16 {
-            self.vs.half();
+        match &mut self.model {
+            LoadedModel::Native { vs, .. } => {
+                vs.float();
+                vs.load(weights)
+                    .with_context(|| format!("loading network weights from {}", weights.display()))?;
+                if self.precision == InferencePrecision::Fp16 {
+                    vs.half();
+                }
+                Ok(())
+            }
+            LoadedModel::TensorRtTorchScript(_) => anyhow::bail!(
+                "TensorRT TorchScript modules cannot reload safetensors weights; compile a module for the next checkpoint and start a new run"
+            ),
         }
-        Ok(())
     }
 
     fn evaluate(&mut self, batch: &CombinedEncodedBatch) -> Result<Vec<Evaluation>> {
@@ -141,9 +174,29 @@ impl TchInferenceBackend {
             .view([n, c, h, w])
             .to_device_(self.device, Kind::Float, true, false)
             .to_kind(self.input_kind);
-        let output = self.net.forward_t(&inputs, false);
-        let policy = output.policy_logits;
-        let value = output.value.expected_value().to_kind(Kind::Float);
+        let (policy, value) = match &self.model {
+            LoadedModel::Native { net, .. } => {
+                let output = net.forward_t(&inputs, false);
+                (output.policy_logits, output.value.expected_value().to_kind(Kind::Float))
+            }
+            LoadedModel::TensorRtTorchScript(module) => {
+                let output = module
+                    .forward_is(&[IValue::from(inputs)])
+                    .context("executing TensorRT TorchScript module")?;
+                let output: Tensor = output
+                    .try_into()
+                    .context("TensorRT TorchScript forward must return a packed tensor")?;
+                let action_space = self.spec.action_size() as i64;
+                anyhow::ensure!(
+                    output.dim() == 2 && output.size()[1] == action_space + 1,
+                    "TensorRT TorchScript output must have shape [batch, {}]",
+                    action_space + 1
+                );
+                let policy = output.narrow(1, 0, action_space);
+                let value = output.narrow(1, action_space, 1).squeeze_dim(1).to_kind(Kind::Float);
+                (policy, value)
+            }
+        };
         let max_actions = batch
             .offsets
             .windows(2)
