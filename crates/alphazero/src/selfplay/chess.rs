@@ -90,7 +90,8 @@ impl<const HISTORY: usize> SelfPlayWorker<ChessAzState<HISTORY>> for ChessSelfPl
             set_budget(&mut self.mcts, budget)?;
             if full {
                 stats.full_searches += 1;
-            } else {
+            }
+            else {
                 stats.fast_searches += 1;
             }
             let result =
@@ -123,7 +124,8 @@ impl<const HISTORY: usize> SelfPlayWorker<ChessAzState<HISTORY>> for ChessSelfPl
                 metadata: SampleMetadata {
                     search_kind: if full {
                         SearchKind::Full
-                    } else {
+                    }
+                    else {
                         SearchKind::Fast
                     },
                     simulations: budget.simulations() as u32,
@@ -149,7 +151,8 @@ impl<const HISTORY: usize> SelfPlayWorker<ChessAzState<HISTORY>> for ChessSelfPl
             &mut trajectory,
             if resigned {
                 Outcome::Loss
-            } else {
+            }
+            else {
                 last_mover_outcome(game.terminal_value(), game.is_terminal())
             },
         );
@@ -171,7 +174,8 @@ fn should_resign(
         && value < config.resignation.threshold
     {
         *streak += 1;
-    } else {
+    }
+    else {
         *streak = 0;
     }
     *streak >= config.resignation.consecutive_moves

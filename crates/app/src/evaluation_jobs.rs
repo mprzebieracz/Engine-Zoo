@@ -98,15 +98,18 @@ impl EvaluationService {
         );
         let path = if name == "stdout.log" || name == "stderr.log" {
             self.jobs_dir.join(id).join(name)
-        } else {
+        }
+        else {
             self.jobs_dir.join(id).join("artifacts").join(name)
         };
         anyhow::ensure!(path.is_file(), "artifact not found");
         let content_type = if name.ends_with(".pgn") {
             "application/x-chess-pgn"
-        } else if name.ends_with(".json") || name.ends_with(".jsonl") {
+        }
+        else if name.ends_with(".json") || name.ends_with(".jsonl") {
             "application/json"
-        } else {
+        }
+        else {
             "text/plain; charset=utf-8"
         };
         Ok((path, content_type.into()))
@@ -314,9 +317,11 @@ impl EvaluationService {
     fn checkpoint_path(&self, id: &str) -> Result<PathBuf> {
         let path = if id == "best" {
             self.root.join("best.safetensors")
-        } else if id == "candidate" {
+        }
+        else if id == "candidate" {
             self.root.join("candidate.safetensors")
-        } else {
+        }
+        else {
             self.root.join("checkpoints").join(id)
         };
         anyhow::ensure!(path.is_file(), "checkpoint is unavailable");
@@ -378,7 +383,8 @@ impl EvaluationService {
             available: ok,
             message: if ok {
                 "Ready".into()
-            } else {
+            }
+            else {
                 format!("Missing {missing}.")
             },
         }

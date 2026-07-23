@@ -20,7 +20,10 @@ fn complete_path<M, Meta: Default>(
         let current = &mut nodes[node as usize];
         current.complete_reserved_visit(value);
         value = value.flipped();
-        let Some(parent) = current.parent else { break };
+        let Some(parent) = current.parent
+        else {
+            break;
+        };
         node = parent;
     }
 }
@@ -29,7 +32,10 @@ fn cancel_path<M, Meta: Default>(nodes: &mut [Node<M, Meta>], mut node: u32) {
     loop {
         let current = &mut nodes[node as usize];
         current.cancel_reserved_visit();
-        let Some(parent) = current.parent else { break };
+        let Some(parent) = current.parent
+        else {
+            break;
+        };
         node = parent;
     }
 }
@@ -86,7 +92,8 @@ where
             if !self.nodes[node as usize].expanded || self.nodes[node as usize].terminal {
                 break;
             }
-            let Some(next) = select_child(self, node) else {
+            let Some(next) = select_child(self, node)
+            else {
                 break;
             };
             node = next;
@@ -120,7 +127,8 @@ where
     pub(super) fn reserve_path(&mut self, mut node: u32) {
         loop {
             self.nodes[node as usize].reserve_visit();
-            let Some(parent) = self.nodes[node as usize].parent else {
+            let Some(parent) = self.nodes[node as usize].parent
+            else {
                 break;
             };
             node = parent;
@@ -144,13 +152,15 @@ where
                     node: leaf.node,
                     result: PendingResult::Terminal,
                 });
-            } else if let Some(index) = find_leaf_result(&batch.result_by_node, leaf.node) {
+            }
+            else if let Some(index) = find_leaf_result(&batch.result_by_node, leaf.node) {
                 diagnostics.duplicate_leaves += 1;
                 batch.pending.push(PendingBackup {
                     node: leaf.node,
                     result: PendingResult::Evaluation(index),
                 });
-            } else {
+            }
+            else {
                 let index = batch.unique_games.len();
                 batch.result_by_node.push((leaf.node, index));
                 batch.unique_games.push(leaf.game);
@@ -234,7 +244,8 @@ mod tests {
             for (index, node) in nodes.iter().enumerate() {
                 let expected = if (length - index) % 2 == 0 {
                     PositionValue::WIN
-                } else {
+                }
+                else {
                     PositionValue::LOSS
                 };
                 assert_eq!(node.completed_q(), Some(expected));

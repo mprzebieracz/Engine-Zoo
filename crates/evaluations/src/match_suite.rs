@@ -131,9 +131,11 @@ fn clean_pgn(pgn: &str) -> String {
         for ch in line.chars() {
             if ch == '{' {
                 in_comment = true;
-            } else if ch == '}' {
+            }
+            else if ch == '}' {
                 in_comment = false;
-            } else if !in_comment {
+            }
+            else if !in_comment {
                 cleaned.push(ch);
             }
         }

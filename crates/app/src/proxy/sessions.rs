@@ -152,7 +152,8 @@ pub(super) fn play_chess_engine_turn(
             batcher_config(session.wait_for_count, Duration::from_millis(1)),
             if device.is_cuda() {
                 InferencePrecision::Fp16
-            } else {
+            }
+            else {
                 InferencePrecision::Fp32
             },
         )?;
@@ -186,7 +187,8 @@ pub(super) fn play_chess_engine_turn(
         batcher_config(session.wait_for_count, Duration::from_millis(1)),
         if device.is_cuda() {
             InferencePrecision::Fp16
-        } else {
+        }
+        else {
             InferencePrecision::Fp32
         },
     )?;

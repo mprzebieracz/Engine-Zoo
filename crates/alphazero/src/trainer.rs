@@ -428,12 +428,14 @@ fn train_device_batch(
     StepMetrics {
         policy_loss: if has_policy {
             policy_metric.double_value(&[]) / policy_denominator.double_value(&[])
-        } else {
+        }
+        else {
             0.0
         },
         value_loss: if has_value {
             value_metric.double_value(&[]) / value_denominator.double_value(&[])
-        } else {
+        }
+        else {
             0.0
         },
         forward_backward,
@@ -495,7 +497,8 @@ fn weighted_mean(numerator: Tensor, weights: &Tensor, reference: &Tensor) -> Ten
     let denominator = weights.sum(Kind::Float);
     if denominator.double_value(&[]) > 0.0 {
         numerator / denominator
-    } else {
+    }
+    else {
         reference.sum(Kind::Float) * 0.0
     }
 }

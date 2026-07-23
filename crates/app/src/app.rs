@@ -121,12 +121,14 @@ fn run_game<G: crate::players::InteractiveGame>(args: PlayArgs) -> Result<()> {
         let side = ply % 2;
         let mode = if ply < cfg.opening_moves {
             PolicyMode::Explore
-        } else {
+        }
+        else {
             PolicyMode::Deterministic
         };
         let mv = if side == 0 {
             first.select_move(&game, mode)
-        } else {
+        }
+        else {
             second.select_move(&game, mode)
         };
         println!(
@@ -175,7 +177,8 @@ fn build_agent<G: crate::players::InteractiveGame>(
 fn interactive_game_name<G: crate::players::InteractiveGame>() -> &'static str {
     if std::any::TypeId::of::<G>() == std::any::TypeId::of::<ChessGame>() {
         "chess"
-    } else {
+    }
+    else {
         "connect4"
     }
 }
@@ -188,12 +191,15 @@ fn side_name<G: crate::players::InteractiveGame>(side: usize) -> &'static str {
     if std::any::TypeId::of::<G>() == std::any::TypeId::of::<ChessGame>() {
         if side == 0 {
             "white"
-        } else {
+        }
+        else {
             "black"
         }
-    } else if side == 0 {
+    }
+    else if side == 0 {
         "first"
-    } else {
+    }
+    else {
         "second"
     }
 }

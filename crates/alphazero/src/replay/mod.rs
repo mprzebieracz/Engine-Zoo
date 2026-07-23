@@ -306,7 +306,8 @@ impl<S: Clone> ReplayBuffer<S> {
         let inner = self.inner.read().unwrap();
         let start = if inner.len == self.capacity {
             inner.ptr
-        } else {
+        }
+        else {
             0
         };
         (0..inner.len)

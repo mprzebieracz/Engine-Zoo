@@ -160,13 +160,15 @@ fn classic_chess_action(
         (),
         if sampled {
             PolicyMode::Explore
-        } else {
+        }
+        else {
             PolicyMode::Deterministic
         },
     )?;
     let mv = if sampled {
         result.sample_move(&mut rand::rng())
-    } else {
+    }
+    else {
         result.best_move()
     };
     Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
@@ -188,13 +190,15 @@ fn chess_action<const HISTORY: usize>(
         game.repetition_context(),
         if sampled {
             PolicyMode::Explore
-        } else {
+        }
+        else {
             PolicyMode::Deterministic
         },
     )?;
     let mv = if sampled {
         result.sample_move(&mut rand::rng())
-    } else {
+    }
+    else {
         result.best_move()
     };
     Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
@@ -211,7 +215,8 @@ fn load_config_and_model(run_dir: &Path, model: &str) -> Result<(PathBuf, Experi
     let path = PathBuf::from(model);
     let weights = if path.exists() {
         path
-    } else {
+    }
+    else {
         match model {
             "best" => checkpoint_path(&run, "best"),
             "candidate" => checkpoint_path(&run, "candidate"),
@@ -239,7 +244,8 @@ fn checkpoint_path(run: &RunDir, name: &str) -> PathBuf {
     };
     if current.is_file() {
         current
-    } else {
+    }
+    else {
         run.root().join(format!("{name}.safetensors"))
     }
 }

@@ -58,7 +58,8 @@ impl RunState {
         // total cannot be recovered. Start the new global sequence at zero.
         let resume_kind = if previous.latest_checkpoint.is_some() {
             ResumeKind::WeightsOnly
-        } else {
+        }
+        else {
             ResumeKind::Fresh
         };
         Self {

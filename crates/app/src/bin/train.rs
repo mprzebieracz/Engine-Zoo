@@ -96,7 +96,8 @@ fn run(args: RunArgs) -> Result<()> {
             "replay_restored": false,
             "optimizer_moments_restored": false,
         }))?;
-    } else {
+    }
+    else {
         run.write_latest(&mut state, |path| Ok(vs.save(path)?))?;
     }
     let batcher = Batcher::new_with_model_precision(

@@ -159,7 +159,8 @@ where
             FpuConfig::Absolute { value, root_value } => {
                 if node == 0 {
                     root_value.unwrap_or(value).as_f32()
-                } else {
+                }
+                else {
                     value.as_f32()
                 }
             }
@@ -169,7 +170,8 @@ where
             } => {
                 let reduction = if node == 0 {
                     root_reduction.unwrap_or(reduction)
-                } else {
+                }
+                else {
                     reduction
                 };
                 parent_q - reduction * visited_prior_mass.sqrt()
@@ -229,7 +231,8 @@ fn normalize_policy<M>(policy: &mut [(M, f32)]) {
         for (_, probability) in policy {
             *probability /= total;
         }
-    } else if !policy.is_empty() {
+    }
+    else if !policy.is_empty() {
         let uniform = 1.0 / policy.len() as f32;
         for (_, probability) in policy {
             *probability = uniform;

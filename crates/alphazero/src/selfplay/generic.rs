@@ -83,7 +83,8 @@ where
             set_budget(&mut self.mcts, budget)?;
             if full {
                 stats.full_searches += 1;
-            } else {
+            }
+            else {
                 stats.fast_searches += 1;
             }
             let result = self.mcts.search(&position, (), PolicyMode::Explore)?;
@@ -112,7 +113,8 @@ where
                 metadata: SampleMetadata {
                     search_kind: if full {
                         SearchKind::Full
-                    } else {
+                    }
+                    else {
                         SearchKind::Fast
                     },
                     simulations: budget.simulations() as u32,
@@ -150,7 +152,8 @@ where
             simulations,
             max_considered_actions,
         } => {
-            let SearchConfig::Gumbel(mut config) = mcts.config() else {
+            let SearchConfig::Gumbel(mut config) = mcts.config()
+            else {
                 anyhow::bail!("Gumbel budget requires Gumbel search");
             };
             config.simulations = simulations;

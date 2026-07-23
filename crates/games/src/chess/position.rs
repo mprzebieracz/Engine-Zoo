@@ -108,7 +108,8 @@ impl ChessPosition {
 
         if effect.resets_halfmove_clock {
             self.halfmove_clock = 0;
-        } else {
+        }
+        else {
             self.halfmove_clock += 1;
         }
 
@@ -232,7 +233,8 @@ impl fmt::Display for ChessPosition {
             "{} to move",
             if self.board.side_to_move() == Color::White {
                 "White"
-            } else {
+            }
+            else {
                 "Black"
             }
         )

@@ -44,16 +44,19 @@ impl RunDir {
         fs::create_dir_all(run.checkpoints_dir())?;
         let config = if run.experiment_path().is_file() {
             read_experiment(&run.experiment_path())?
-        } else if run.legacy_experiment_path().is_file() {
+        }
+        else if run.legacy_experiment_path().is_file() {
             let migrated = read_legacy_experiment(&run.legacy_experiment_path())?;
             write_toml_atomic(&run.experiment_path(), &migrated)?;
             migrated
-        } else if run.old_config_path().is_file() {
+        }
+        else if run.old_config_path().is_file() {
             let migrated = migrate_old_config(&fs::read_to_string(run.old_config_path())?)?;
             migrated.validate()?;
             write_toml_atomic(&run.experiment_path(), &migrated)?;
             migrated
-        } else {
+        }
+        else {
             let config = make_config();
             config.validate()?;
             write_toml_atomic(&run.experiment_path(), &config)?;
@@ -62,7 +65,8 @@ impl RunDir {
         config.validate()?;
         let state = if run.state_path().is_file() {
             read_state(&run.state_path())?
-        } else {
+        }
+        else {
             let state = RunState::default();
             run.write_state(&state)?;
             state

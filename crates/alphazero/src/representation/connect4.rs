@@ -22,9 +22,11 @@ impl AlphaZeroRepresentation<Connect4> for Connect4AzRepresentation {
                 let bit = 1u64 << (col * 7 + (5 - row_top));
                 output[row_top * 7 + col] = if own & bit != 0 {
                     1.0
-                } else if opponent & bit != 0 {
+                }
+                else if opponent & bit != 0 {
                     -1.0
-                } else {
+                }
+                else {
                     0.0
                 };
             }

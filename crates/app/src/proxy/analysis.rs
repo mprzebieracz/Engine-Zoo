@@ -176,7 +176,8 @@ fn chess_az_state_snapshot<const HISTORY: usize>(
 fn inference_precision(device: Device) -> InferencePrecision {
     if device.is_cuda() {
         InferencePrecision::Fp16
-    } else {
+    }
+    else {
         InferencePrecision::Fp32
     }
 }

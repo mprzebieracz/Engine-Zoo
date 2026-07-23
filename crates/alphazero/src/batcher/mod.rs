@@ -56,7 +56,8 @@ impl CombinedEncodedBatch {
         );
         let state_size = if batch.is_empty() {
             0
-        } else {
+        }
+        else {
             anyhow::ensure!(
                 batch.states.len() % batch.len() == 0,
                 "encoded state count does not match rows"
@@ -477,7 +478,8 @@ fn next_work(
             return Work::Stop;
         }
         if matches!(pending.commands.front(), Some(Command::Reload(_))) {
-            let Some(Command::Reload(reload)) = pending.commands.pop_front() else {
+            let Some(Command::Reload(reload)) = pending.commands.pop_front()
+            else {
                 unreachable!()
             };
             return Work::Reload(reload);
@@ -514,10 +516,12 @@ fn next_work(
         combined.offsets.clear();
         combined.offsets.push(0);
         while combined.len() < shared.config.max_batch_size {
-            let Some(command) = pending.commands.pop_front() else {
+            let Some(command) = pending.commands.pop_front()
+            else {
                 break;
             };
-            let Command::Evaluate(task) = command else {
+            let Command::Evaluate(task) = command
+            else {
                 pending.commands.push_front(command);
                 break;
             };
@@ -584,7 +588,8 @@ fn finish_pass(shared: &Shared, items: &mut Vec<WorkItem>, evaluations: Vec<Eval
                 batch: item.task.batch,
                 evaluations: item.task.evaluations,
             }));
-        } else {
+        }
+        else {
             // The rows left in this task stayed in `pending.count` while the
             // selected prefix was evaluated, so requeueing must not add them
             // a second time.
