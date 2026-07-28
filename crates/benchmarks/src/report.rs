@@ -37,6 +37,12 @@ pub struct HostMetadata {
     pub cpu_model: Option<String>,
     pub cpu_count: usize,
     pub gpu: Option<String>,
+    #[serde(default)]
+    pub gpu_driver: Option<String>,
+    #[serde(default)]
+    pub cuda_available: bool,
+    #[serde(default)]
+    pub cuda_device_count: i64,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -84,6 +90,9 @@ mod tests {
                 cpu_model: None,
                 cpu_count: 1,
                 gpu: None,
+                gpu_driver: None,
+                cuda_available: false,
+                cuda_device_count: 0,
             },
             workload: json!({ "fixed": true }),
             samples: vec![BenchmarkSample {

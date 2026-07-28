@@ -15,17 +15,64 @@ cargo run --release -p engine-bench -- inference --samples 20 --human
 cargo run --release -p engine-bench -- suite --device cuda --precision fp32 --output results.json
 ```
 
+## Full-iteration CUDA baselines
+
+The `iteration` workload measures the production `TrainingRun::step` lifecycle
+from outside the production crates: self-play, training, checkpoint write, and
+inference reload. CUDA is the default and the timer synchronizes at the
+iteration boundary. Every measured sample starts from a fresh temporary run,
+so its replay contents, optimizer state, model weights, and seed are
+reproducible.
+
+The checked-in 200-game baseline is the standard comparison point: canonical
+chess H1, 12x128 SE model, FP16 inference, 16 self-play workers, 800 PUCT
+simulations per move, 2,048 training batch, 256 micro-batch, and 80 training
+steps. The optional 500-game version changes only the game count.
+
+```bash
+# Capture a named before/after artifact. The parent directory is created.
+cargo run --release -p engine-bench -- iteration \
+  --name before-cache-change \
+  --output benchmark-results/before-cache-change.json \
+  --human
+
+cargo run --release -p engine-bench -- iteration \
+  --name after-cache-change \
+  --output benchmark-results/after-cache-change.json \
+  --human
+
+# Use the longer workload or deliberately override a parameter.
+cargo run --release -p engine-bench -- iteration \
+  --experiment benchmarks/configs/full-iteration-cuda-500.toml \
+  --name cuda-500-baseline \
+  --output benchmark-results/cuda-500-baseline.json
+
+cargo run --release -p engine-bench -- iteration \
+  --games 200 --train-steps 80 --batch-size 2048 --micro-batch-size 256 \
+  --seed 1 --device cuda --precision fp16 \
+  --name explicit-cuda-200 \
+  --output benchmark-results/explicit-cuda-200.json
+```
+
+The report records the effective experiment TOML, seed, machine/build metadata,
+elapsed wall time, positions/s, configured PUCT simulations/s, training phase
+metrics, and batcher statistics. `TrainMetrics` provides training subphase
+durations. Without benchmark timers in production, the remaining phase is
+truthfully labelled as the combined self-play/checkpoint/reload/persistence
+time; do not treat it as an isolated checkpoint or reload measurement. Use
+`engine-profile` with Nsight Systems to inspect that timeline.
+
 Representation/replay measurements should cover H1/H4/H8 construction/encoding/action round trips and replay batch sizes 256/1024/4096. GPU measurements should separately report forward-only, legal-logit gather, end-to-end inference, transfer, backward, optimizer, latency percentiles, and samples/s.
 
 ## Profiling prerequisites
 
-Benchmarking (`crates/benchmarks`, `engine-bench`) and profiling
-(`crates/profiling`, `engine-profile`) are separate tools. Production crates
-remain instrumentation-free: do not add profiler hooks, tracing allocations, or
-profiler-only branches to search, inference, self-play, or training code. The
-profiling Cargo profile keeps optimized code while retaining symbols (`debug =
-1`, `strip = false`). See [profiling.md](profiling.md) for the compact command
-reference.
+`crates/benchmarks` (`engine-bench`) owns benchmark workloads;
+`crates/profiling` (`engine-profile`) owns profiling-only workloads and launch
+commands. Production crates remain instrumentation-free: do not add profiler
+hooks, tracing allocations, or profiler-only branches to search, inference,
+self-play, or training code. The profiling Cargo profile keeps optimized code
+while retaining symbols (`debug = 1`, `strip = false`). See
+[profiling.md](profiling.md) for the compact command reference.
 
 ### LibTorch runtime
 
@@ -116,10 +163,12 @@ installation, Nsight versions, power-management mode, and whether the machine
 was otherwise idle. Keep raw `.nsys-rep`, `ncu` exports, and large profiler
 artifacts out of Git; commit only concise summaries and interpretation.
 
-## Final refactor benchmark and profiling record — 2026-07-29
+## Historical CPU refactor benchmark and profiling record — 2026-07-29
 
 These results are a local CPU measurement record for the completed refactor.
-They are not portable performance claims.
+They are not portable performance claims and predate the CUDA-default neural
+batcher and self-play fixtures above; do not compare their non-search rows to
+new benchmark output.
 
 ### Regression comparison
 

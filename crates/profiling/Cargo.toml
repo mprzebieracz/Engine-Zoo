@@ -7,10 +7,12 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Profiling-only CUDA workloads for engine-zoo"
+build = "build.rs"
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+serde_json.workspace = true
 alphazero = { path = "../alphazero" }
 engine_core = { path = "../core" }
 games = { path = "../games" }

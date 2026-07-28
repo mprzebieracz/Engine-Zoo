@@ -493,6 +493,7 @@ dependencies = [
  "clap",
  "engine_core",
  "games",
+ "serde_json",
  "tch",
 ]
 
