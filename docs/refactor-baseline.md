@@ -46,19 +46,15 @@ toolchain. They are guardrails for this refactor, not a cross-platform ABI.
 this is the memory budget the later search/replay refactor must preserve or
 change deliberately.
 
-## Deterministic CPU MCTS harness
+## Historical deterministic CPU MCTS harness
 
-The checked-in harness is
-[`crates/search/benches/connect4_mcts.rs`](../crates/search/benches/connect4_mcts.rs).
-It uses an allocation-free-in-spirit deterministic evaluator (uniform legal
-logits and zero value), warms the reusable MCTS buffers once, then performs
-200 Connect Four searches of 256 simulations each. It deliberately has no
-timing assertion.
-
-Run it with:
+The recorded measurement below used the retired `connect4_mcts` harness: a
+uniform legal-logit evaluator with zero value, one warmup, and 200 Connect
+Four searches of 256 simulations. The harness was removed after its workload
+was covered by `engine-bench`; reproduce the current equivalent with:
 
 ```sh
-cargo bench -p search --bench connect4_mcts
+cargo run -p engine-bench -- search --algorithm puct --simulations 256 --human
 ```
 
 Recorded run:

@@ -7,7 +7,7 @@ use crate::{Action, Outcome, ReplayBuffer, ReplaySample, SampleMetadata, Trainin
 use anyhow::Result;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
-use search::{PositionValue, SearchResult};
+use search::{PositionValue, SearchDiagnostics, SearchResult};
 use std::time::Duration;
 
 #[test]
@@ -53,6 +53,36 @@ fn zero_games_is_rejected_before_self_play_starts() {
     }
     .validate()
     .is_err());
+}
+
+#[test]
+fn aggregate_search_diagnostics_are_preserved() {
+    let mut stats = SelfPlayStats::default();
+    stats.add_search_diagnostics(SearchDiagnostics {
+        completed_simulations: 12,
+        backend_evaluations: 4,
+        evaluation_cache_hits: 8,
+        duplicate_leaves: 2,
+        nodes_created: 9,
+        max_depth: 5,
+        ..Default::default()
+    });
+    stats.add_search_diagnostics(SearchDiagnostics {
+        completed_simulations: 7,
+        backend_evaluations: 3,
+        evaluation_cache_hits: 1,
+        duplicate_leaves: 4,
+        nodes_created: 6,
+        max_depth: 8,
+        ..Default::default()
+    });
+
+    assert_eq!(stats.completed_simulations, 19);
+    assert_eq!(stats.backend_evaluations, 7);
+    assert_eq!(stats.evaluation_cache_hits, 9);
+    assert_eq!(stats.duplicate_leaves, 6);
+    assert_eq!(stats.nodes_created, 15);
+    assert_eq!(stats.maximum_search_depth, 8);
 }
 
 #[derive(Clone, Copy)]

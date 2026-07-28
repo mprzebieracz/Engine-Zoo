@@ -133,6 +133,23 @@ impl FastchessCommand {
     /// The exact argv passed to Fastchess. `-repeat` is deliberate: it pairs
     /// every opening with a colour reversal.
     pub fn args(&self) -> Result<Vec<OsString>> {
+        self.validate()?;
+
+        let mut args = Vec::new();
+        for engine in &self.engines {
+            append_engine_args(&mut args, engine);
+        }
+
+        append_match_args(&mut args, self);
+        append_opening_args(&mut args, self.openings.as_ref());
+        append_pgn_output_args(&mut args, self.pgn_output.as_ref());
+
+        args.extend(self.extra_args.iter().cloned());
+
+        Ok(args)
+    }
+
+    fn validate(&self) -> Result<()> {
         if self.rounds == 0 {
             bail!("Fastchess rounds must be greater than zero")
         }
@@ -148,58 +165,8 @@ impl FastchessCommand {
         if self.engines.iter().any(|engine| engine.nodes == Some(0)) {
             bail!("Fastchess engine nodes must be greater than zero")
         }
-        let mut args = Vec::new();
-        for engine in &self.engines {
-            args.extend([
-                "-engine".into(),
-                format!("cmd={}", engine.command.display()).into(),
-                format!("name={}", engine.name).into(),
-            ]);
-            if let Some(dir) = &engine.directory {
-                args.push(format!("dir={}", dir.display()).into());
-            }
-            for (name, value) in &engine.options {
-                args.push(format!("option.{name}={value}").into());
-            }
-            if let Some(nodes) = engine.nodes {
-                args.push(format!("nodes={nodes}").into());
-            }
-        }
-        args.extend([
-            "-each".into(),
-            format!("tc={}", self.time_control).into(),
-            "-rounds".into(),
-            self.rounds.to_string().into(),
-            "-repeat".into(),
-        ]);
-        if let Some(concurrency) = self.concurrency {
-            args.extend(["-concurrency".into(), concurrency.to_string().into()]);
-        }
-        if let Some(openings) = &self.openings {
-            let format = match openings.format {
-                OpeningFormat::Pgn => "pgn",
-                OpeningFormat::Epd => "epd",
-            };
-            args.extend([
-                "-openings".into(),
-                format!("file={}", openings.file.display()).into(),
-                format!("format={format}").into(),
-                "order=sequential".into(),
-            ]);
-            if let Some(plies) = openings.plies {
-                args.push(format!("plies={plies}").into());
-            }
-        }
-        if let Some(pgn) = &self.pgn_output {
-            args.extend([
-                "-pgnout".into(),
-                format!("file={}", pgn.display()).into(),
-                "notation=san".into(),
-                "append=false".into(),
-            ]);
-        }
-        args.extend(self.extra_args.iter().cloned());
-        Ok(args)
+
+        Ok(())
     }
 
     pub fn command_line(&self) -> Result<String> {
@@ -211,6 +178,72 @@ impl FastchessCommand {
         );
         Ok(parts.join(" "))
     }
+}
+
+fn append_engine_args(args: &mut Vec<OsString>, engine: &Engine) {
+    args.extend([
+        "-engine".into(),
+        format!("cmd={}", engine.command.display()).into(),
+        format!("name={}", engine.name).into(),
+    ]);
+
+    if let Some(dir) = &engine.directory {
+        args.push(format!("dir={}", dir.display()).into());
+    }
+    for (name, value) in &engine.options {
+        args.push(format!("option.{name}={value}").into());
+    }
+    if let Some(nodes) = engine.nodes {
+        args.push(format!("nodes={nodes}").into());
+    }
+}
+
+fn append_match_args(args: &mut Vec<OsString>, command: &FastchessCommand) {
+    args.extend([
+        "-each".into(),
+        format!("tc={}", command.time_control).into(),
+        "-rounds".into(),
+        command.rounds.to_string().into(),
+        "-repeat".into(),
+    ]);
+
+    if let Some(concurrency) = command.concurrency {
+        args.extend(["-concurrency".into(), concurrency.to_string().into()]);
+    }
+}
+
+fn append_opening_args(args: &mut Vec<OsString>, openings: Option<&Openings>) {
+    let Some(openings) = openings
+    else {
+        return;
+    };
+    let format = match openings.format {
+        OpeningFormat::Pgn => "pgn",
+        OpeningFormat::Epd => "epd",
+    };
+    args.extend([
+        "-openings".into(),
+        format!("file={}", openings.file.display()).into(),
+        format!("format={format}").into(),
+        "order=sequential".into(),
+    ]);
+
+    if let Some(plies) = openings.plies {
+        args.push(format!("plies={plies}").into());
+    }
+}
+
+fn append_pgn_output_args(args: &mut Vec<OsString>, pgn_output: Option<&PathBuf>) {
+    let Some(pgn) = pgn_output
+    else {
+        return;
+    };
+    args.extend([
+        "-pgnout".into(),
+        format!("file={}", pgn.display()).into(),
+        "notation=san".into(),
+        "append=false".into(),
+    ]);
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

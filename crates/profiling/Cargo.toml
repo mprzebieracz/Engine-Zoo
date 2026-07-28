@@ -1,0 +1,17 @@
+[package]
+name = "engine-profile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Profiling-only CUDA workloads for engine-zoo"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+alphazero = { path = "../alphazero" }
+engine_core = { path = "../core" }
+games = { path = "../games" }
+tch.workspace = true

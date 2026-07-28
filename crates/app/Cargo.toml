@@ -18,6 +18,10 @@ name = "train"
 path = "src/bin/train.rs"
 
 [[bin]]
+name = "engine-zoo-model"
+path = "src/bin/engine-zoo-model.rs"
+
+[[bin]]
 name = "eval"
 path = "src/bin/eval.rs"
 

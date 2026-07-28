@@ -485,6 +485,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-profile"
+version = "0.1.0"
+dependencies = [
+ "alphazero",
+ "anyhow",
+ "clap",
+ "engine_core",
+ "games",
+ "tch",
+]
+
+[[package]]
 name = "engine_app"
 version = "0.1.0"
 dependencies = [
@@ -1719,7 +1731,6 @@ name = "search"
 version = "0.1.0"
 dependencies = [
  "engine_core",
- "games",
  "rand 0.9.4",
  "rand_distr",
  "serde",

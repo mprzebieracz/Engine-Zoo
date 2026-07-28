@@ -28,6 +28,11 @@ pub struct BenchReportRow {
 
 pub fn render_chess_play_page(game: GameKind, run_dir: &str) -> String {
     let title = format!("engine-zoo {}", game_name(game));
+
+    render_chess_play_document(&title, run_dir)
+}
+
+fn render_chess_play_document(title: &str, run_dir: &str) -> String {
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -142,38 +147,54 @@ body{{background:#f5f1e8}}.board-bounds .white-1e1d7{{background:#d8caa5}}.board
 <script>{}</script>
 </body>
 </html>"#,
-        escape_html(&title),
-        escape_html(&title),
+        escape_html(title),
+        escape_html(title),
         escape_html(run_dir),
         play_js()
     )
 }
 
 pub fn render_bench_report(report: &BenchReport<'_>) -> String {
-    let total = report.rows.len();
-    let correct = report.rows.iter().filter(|r| r.correct).count();
+    let summary = report_summary(report.rows);
+    let categories = render_category_options(report.rows);
+    let rows = render_report_rows(report.rows);
+
+    render_bench_document(report, summary, &categories, &rows)
+}
+
+#[derive(Clone, Copy)]
+struct ReportSummary {
+    total: usize,
+    correct: usize,
+    accuracy: f64,
+}
+
+fn report_summary(rows: &[BenchReportRow]) -> ReportSummary {
+    let total = rows.len();
+    let correct = rows.iter().filter(|row| row.correct).count();
     let accuracy = if total == 0 {
         0.0
     }
     else {
         correct as f64 / total as f64
     };
-    let rows = report
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(i, row)| render_report_row(i, row))
-        .collect::<String>();
-    let categories = report
-        .rows
-        .iter()
-        .filter_map(|row| row.category.as_deref())
-        .fold(Vec::<&str>::new(), |mut acc, category| {
-            if !acc.contains(&category) {
-                acc.push(category);
-            }
-            acc
-        })
+
+    ReportSummary {
+        total,
+        correct,
+        accuracy,
+    }
+}
+
+fn render_category_options(rows: &[BenchReportRow]) -> String {
+    let mut categories = Vec::new();
+    for category in rows.iter().filter_map(|row| row.category.as_deref()) {
+        if !categories.contains(&category) {
+            categories.push(category);
+        }
+    }
+
+    categories
         .into_iter()
         .map(|category| {
             format!(
@@ -182,8 +203,22 @@ pub fn render_bench_report(report: &BenchReport<'_>) -> String {
                 escape_html(category)
             )
         })
-        .collect::<String>();
+        .collect()
+}
 
+fn render_report_rows(rows: &[BenchReportRow]) -> String {
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| render_report_row(index, row))
+        .collect()
+}
+
+fn render_bench_document(
+    report: &BenchReport<'_>,
+    summary: ReportSummary,
+    categories: &str,
+    rows: &str,
+) -> String {
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -229,9 +264,9 @@ pub fn render_bench_report(report: &BenchReport<'_>) -> String {
         escape_html(game_name(report.game)),
         escape_html(report.model),
         escape_html(report.mode),
-        total,
-        correct,
-        100.0 * accuracy,
+        summary.total,
+        summary.correct,
+        100.0 * summary.accuracy,
         categories,
         rows,
         report_js()

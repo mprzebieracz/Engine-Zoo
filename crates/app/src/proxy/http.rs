@@ -221,7 +221,7 @@ pub(super) async fn analyze_http(
         );
     }
     let result = tokio::task::spawn_blocking(move || {
-        analyze_request(state.game, state.run_dir, req, state.device)
+        analyze_request_with_registry(state.game, state.run_dir, req, state.device, &state.models)
     })
     .await;
     match result {

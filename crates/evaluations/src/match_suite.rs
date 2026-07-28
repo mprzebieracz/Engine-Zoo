@@ -1,6 +1,6 @@
 //! Shared persistence for Fastchess-backed match suites.
 
-use crate::fastchess::{self, FastchessCommand};
+use crate::fastchess::{self, FastchessCommand, FastchessRun};
 use crate::report::{write_report, EvaluationReport, EvaluationSpec, Score};
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -11,11 +11,7 @@ pub fn run_match(
     mut spec: EvaluationSpec,
     command: FastchessCommand,
 ) -> Result<EvaluationReport> {
-    fs::create_dir_all(output_dir)?;
-    fs::write(
-        output_dir.join("fastchess.command.txt"),
-        format!("{}\n", command.command_line()?),
-    )?;
+    write_command_artifact(output_dir, &command)?;
 
     let run = fastchess::run(&command).with_context(|| {
         format!(
@@ -23,22 +19,59 @@ pub fn run_match(
             output_dir.join("fastchess.command.txt").display()
         )
     })?;
+
     spec.fastchess_version = run.version.clone();
+
+    persist_run_artifacts(output_dir, &run)?;
+    validate_run(output_dir, &command, &run)?;
+
+    let report = report_from_run(spec, &command, &run)?;
+
+    write_report(output_dir, &report)?;
+
+    Ok(report)
+}
+
+fn write_command_artifact(output_dir: &Path, command: &FastchessCommand) -> Result<()> {
+    fs::create_dir_all(output_dir)?;
+    fs::write(
+        output_dir.join("fastchess.command.txt"),
+        format!("{}\n", command.command_line()?),
+    )?;
+
+    Ok(())
+}
+
+fn persist_run_artifacts(output_dir: &Path, run: &FastchessRun) -> Result<()> {
     fs::write(output_dir.join("fastchess.stdout.log"), &run.stdout)?;
     fs::write(output_dir.join("fastchess.stderr.log"), &run.stderr)?;
-    if let Some(pgn) = run.pgn {
-        let clean_games: Vec<String> = split_pgn_games(&pgn)
-            .into_iter()
-            .map(|game| clean_pgn(&game))
-            .collect();
-        let clean_pgn = clean_games.join("\n");
-        fs::write(output_dir.join("games.pgn"), &clean_pgn)?;
-        let games_dir = output_dir.join("games");
-        fs::create_dir_all(&games_dir)?;
-        for (index, game) in clean_games.into_iter().enumerate() {
-            fs::write(games_dir.join(format!("game-{:04}.pgn", index + 1)), game)?;
-        }
+
+    if let Some(pgn) = &run.pgn {
+        persist_clean_pgn(output_dir, pgn)?;
     }
+
+    Ok(())
+}
+
+fn persist_clean_pgn(output_dir: &Path, pgn: &str) -> Result<()> {
+    let clean_games: Vec<String> = split_pgn_games(pgn)
+        .into_iter()
+        .map(|game| clean_pgn(&game))
+        .collect();
+    let clean_pgn = clean_games.join("\n");
+
+    fs::write(output_dir.join("games.pgn"), &clean_pgn)?;
+
+    let games_dir = output_dir.join("games");
+    fs::create_dir_all(&games_dir)?;
+    for (index, game) in clean_games.into_iter().enumerate() {
+        fs::write(games_dir.join(format!("game-{:04}.pgn", index + 1)), game)?;
+    }
+
+    Ok(())
+}
+
+fn validate_run(output_dir: &Path, command: &FastchessCommand, run: &FastchessRun) -> Result<()> {
     if run.status != 0 {
         bail!(
             "Fastchess exited with status {}; see {} and {}",
@@ -47,6 +80,7 @@ pub fn run_match(
             output_dir.join("fastchess.stderr.log").display()
         );
     }
+
     if let Some(pgn_output) = &command.pgn_output {
         if !output_dir.join("games.pgn").is_file() {
             bail!(
@@ -58,30 +92,41 @@ pub fn run_match(
         }
     }
 
+    Ok(())
+}
+
+fn report_from_run(
+    spec: EvaluationSpec,
+    command: &FastchessCommand,
+    run: &FastchessRun,
+) -> Result<EvaluationReport> {
     let wdl = fastchess::parse_wdl(&run.stdout)
         .or_else(|| fastchess::parse_wdl(&run.stderr))
         .context("Fastchess completed but its candidate WDL summary could not be parsed")?;
-    let report = EvaluationReport::from_score(
+    let score = Score {
+        wins: wdl.wins as usize,
+        draws: wdl.draws as usize,
+        losses: wdl.losses as usize,
+    };
+
+    Ok(EvaluationReport::from_score(
         spec,
-        Score {
-            wins: wdl.wins as usize,
-            draws: wdl.draws as usize,
-            losses: wdl.losses as usize,
-        },
-        {
-            let mut artifacts = vec![
-                "fastchess.command.txt".into(),
-                "fastchess.stdout.log".into(),
-                "fastchess.stderr.log".into(),
-            ];
-            if command.pgn_output.is_some() {
-                artifacts.extend(["games.pgn".into(), "games/".into()]);
-            }
-            artifacts
-        },
-    );
-    write_report(output_dir, &report)?;
-    Ok(report)
+        score,
+        report_artifacts(command),
+    ))
+}
+
+fn report_artifacts(command: &FastchessCommand) -> Vec<String> {
+    let mut artifacts = vec![
+        "fastchess.command.txt".into(),
+        "fastchess.stdout.log".into(),
+        "fastchess.stderr.log".into(),
+    ];
+    if command.pgn_output.is_some() {
+        artifacts.extend(["games.pgn".into(), "games/".into()]);
+    }
+
+    artifacts
 }
 
 /// Fastchess emits one PGN per game, separated by the Event tag. Preserve the

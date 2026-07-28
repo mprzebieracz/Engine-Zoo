@@ -1,14 +1,11 @@
 use alphazero::representation::{AlphaZeroRepresentation, Connect4AzRepresentation};
-use alphazero::{
-    Batcher, BatcherConfig, Mcts, MctsSearchBudget, ModelSpec, RepresentedEvaluator, SearchConfig,
-    SearchRequest,
-};
+use alphazero::{InferenceService, InferenceSource, ModelSpec, RepresentedEvaluator};
 use anyhow::{Context, Result};
 use engine_core::agent::{Agent, PolicyMode};
 use engine_core::game::GameState;
 use engine_core::notation::GameNotation;
 use games::{Connect4, Connect4Notation};
-use search::SearchRules;
+use search::{Mcts, SearchBudget, SearchConfig, SearchRequest, SearchRules};
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -108,8 +105,9 @@ type NativeMcts<G> = Mcts<
 >;
 
 pub struct AlphaZeroAgent<G: InteractiveGame> {
-    _batcher: Batcher,
+    _inference: InferenceService,
     mcts: NativeMcts<G>,
+    simulations: usize,
 }
 
 impl<G: InteractiveGame> AlphaZeroAgent<G> {
@@ -121,21 +119,19 @@ impl<G: InteractiveGame> AlphaZeroAgent<G> {
         wait_for_count: usize,
         timeout: Duration,
     ) -> Result<Self> {
-        let batcher = Batcher::new_with_model(
-            model.clone(),
-            weights,
-            device,
-            batcher_config(wait_for_count, timeout),
-        )
-        .with_context(|| format!("loading AlphaZero agent from {}", weights.display()))?;
+        let config = inference_config(wait_for_count, timeout);
+        let inference =
+            InferenceService::load(model, InferenceSource::Checkpoint(weights), device, &config)
+                .with_context(|| format!("loading AlphaZero agent from {}", weights.display()))?;
         let mcts = Mcts::new(
-            RepresentedEvaluator::new(G::Representation::default(), batcher.client()),
+            RepresentedEvaluator::new(G::Representation::default(), inference.client()),
             puct_search(simulations),
             G::Rules::default(),
         );
         Ok(AlphaZeroAgent {
-            _batcher: batcher,
+            _inference: inference,
             mcts,
+            simulations: simulations.max(1),
         })
     }
 }
@@ -151,7 +147,9 @@ impl<G: InteractiveGame> Agent<G> for AlphaZeroAgent<G> {
                 game.search_context(),
                 SearchRequest {
                     mode,
-                    budget: MctsSearchBudget::Puct { simulations: 800 },
+                    budget: SearchBudget::Puct {
+                        simulations: self.simulations,
+                    },
                 },
             )
             .expect("AlphaZero inference failed");
@@ -165,19 +163,16 @@ impl<G: InteractiveGame> Agent<G> for AlphaZeroAgent<G> {
 }
 
 fn puct_search(_simulations: usize) -> SearchConfig {
-    SearchConfig::Puct(search::PuctConfig {
-        leaf_batch_size: 1,
-        root_noise: None,
-        ..Default::default()
-    })
+    SearchConfig::Puct(search::PuctConfig::analysis_default(1))
 }
 
-fn batcher_config(wait_for_count: usize, timeout: Duration) -> BatcherConfig {
-    BatcherConfig {
+fn inference_config(wait_for_count: usize, timeout: Duration) -> alphazero::InferenceConfig {
+    alphazero::InferenceConfig {
         preferred_batch_size: wait_for_count.max(1),
-        max_batch_size: 256,
-        max_wait: timeout,
-        max_queued_states: 4096,
+        max_wait: alphazero::DurationConfig {
+            milliseconds: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+        },
+        ..Default::default()
     }
 }
 

@@ -132,7 +132,7 @@ impl TrainConfig {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TrainMetrics {
     pub policy_loss: f64,
     pub value_loss: f64,
@@ -143,6 +143,50 @@ pub struct TrainMetrics {
     pub optimizer_seconds: f64,
     pub samples_per_second: f64,
     pub learning_rate: f64,
+}
+
+/// Reproducibility inputs for one training invocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrainingSeed {
+    pub experiment_seed: u64,
+    pub global_step: u64,
+}
+
+/// Owns the optimizer together with the immutable training configuration.
+pub struct Trainer {
+    config: TrainConfig,
+    optimizer: Optimizer,
+}
+
+impl Trainer {
+    pub fn new(vs: &nn::VarStore, config: TrainConfig) -> anyhow::Result<Self> {
+        let optimizer = build_optimizer(vs, &config)?;
+
+        Ok(Self { config, optimizer })
+    }
+
+    pub fn train<S, R>(
+        &mut self,
+        network: &Network,
+        replay: &ReplayBuffer<S>,
+        representation: &R,
+        device: Device,
+        seed: TrainingSeed,
+    ) -> Option<TrainMetrics>
+    where
+        S: GameState + Clone + Send + Sync,
+        R: AlphaZeroRepresentation<S>,
+    {
+        train_with_optimizer(
+            network,
+            &mut self.optimizer,
+            replay,
+            representation,
+            device,
+            &self.config,
+            seed,
+        )
+    }
 }
 
 const REPLAY_SAMPLING_PURPOSE: u64 = 0x7265_706c_6179_7361;
@@ -184,7 +228,35 @@ where
     S: GameState + Clone + Send + Sync,
     R: AlphaZeroRepresentation<S>,
 {
-    cfg.validate().expect("invalid training configuration");
+    train_with_optimizer(
+        network,
+        optimizer,
+        replay,
+        representation,
+        device,
+        cfg,
+        TrainingSeed {
+            experiment_seed,
+            global_step,
+        },
+    )
+}
+
+fn train_with_optimizer<S, R>(
+    network: &Network,
+    optimizer: &mut Optimizer,
+    replay: &ReplayBuffer<S>,
+    representation: &R,
+    device: Device,
+    cfg: &TrainConfig,
+    seed: TrainingSeed,
+) -> Option<TrainMetrics>
+where
+    S: GameState + Clone + Send + Sync,
+    R: AlphaZeroRepresentation<S>,
+{
+    cfg.validate()
+        .expect("Trainer only accepts validated training configuration");
     let started = Instant::now();
     let (sender, receiver) = sync_channel(cfg.prefetch_depth.max(1));
     let mut sampling_time = Duration::ZERO;
@@ -200,8 +272,8 @@ where
             for offset in 0..cfg.train_steps {
                 let sampling_started = Instant::now();
                 let mut rng = SmallRng::seed_from_u64(replay_seed(
-                    experiment_seed,
-                    global_step + offset as u64,
+                    seed.experiment_seed,
+                    seed.global_step + offset as u64,
                 ));
                 let batch = replay.sample(cfg.batch_size, representation, &mut rng);
                 let elapsed = sampling_started.elapsed();
@@ -220,7 +292,7 @@ where
             let transfer_started = Instant::now();
             let batch = DeviceReplayBatch::from_cpu(batch, device);
             transfer_time += transfer_started.elapsed();
-            let learning_rate = cfg.learning_rate_at(global_step + completed as u64);
+            let learning_rate = cfg.learning_rate_at(seed.global_step + completed as u64);
             optimizer.set_lr(learning_rate);
             let metrics = train_device_batch(
                 network,
@@ -246,7 +318,7 @@ where
         optimizer_seconds: optimizer_time.as_secs_f64(),
         samples_per_second: completed as f64 * cfg.batch_size as f64
             / started.elapsed().as_secs_f64().max(f64::EPSILON),
-        learning_rate: cfg.learning_rate_at(global_step + completed.saturating_sub(1) as u64),
+        learning_rate: cfg.learning_rate_at(seed.global_step + completed.saturating_sub(1) as u64),
     })
 }
 

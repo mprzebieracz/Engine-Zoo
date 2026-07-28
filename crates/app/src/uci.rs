@@ -1,17 +1,10 @@
-use alphazero::representation::{ChessAzRepresentation, ChessClassicRepresentation};
-use alphazero::ChessRepetitionRules;
-use alphazero::{
-    Batcher, BatcherConfig, ChessHistory, ExperimentConfig, GameKind, Mcts, ModelSpec,
-    RepresentedEvaluator, RunDir, SearchConfig,
-};
+use alphazero::{ChessAlphaZeroEngine, ExperimentConfig, GameKind, InferenceSource, RunDir};
 use anyhow::{Context, Result};
-use engine_core::agent::PolicyMode;
 use engine_core::game::GameState;
 use engine_core::notation::GameNotation;
 use games::ChessGame;
-use search::NoExtraRules;
+use search::{SearchBudget, SearchRequest};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use tch::Device;
 
 mod protocol;
@@ -46,13 +39,8 @@ impl Default for Settings {
 pub struct ChessUciEngine {
     pub settings: Settings,
     pub game: ChessGame,
-    batcher: Option<Batcher>,
-    loaded: Option<LoadedModel>,
+    engine: Option<ChessAlphaZeroEngine>,
     position_moves: Vec<String>,
-}
-
-struct LoadedModel {
-    model: ModelSpec,
 }
 
 impl Default for ChessUciEngine {
@@ -66,8 +54,7 @@ impl ChessUciEngine {
         Self {
             settings,
             game: ChessGame::default(),
-            batcher: None,
-            loaded: None,
+            engine: None,
             position_moves: Vec::new(),
         }
     }
@@ -89,8 +76,7 @@ impl ChessUciEngine {
     }
 
     pub fn invalidate_model(&mut self) {
-        self.batcher = None;
-        self.loaded = None;
+        self.engine = None;
     }
 
     /// Starts a fresh game without reloading unchanged network weights.
@@ -101,18 +87,17 @@ impl ChessUciEngine {
     }
 
     fn ensure_model(&mut self) -> Result<()> {
-        if self.batcher.is_some() {
+        if self.engine.is_some() {
             return Ok(());
         }
         let (weights, cfg) = load_config_and_model(&self.settings.run_dir, &self.settings.model)?;
-        let batcher = Batcher::new_with_model(
-            cfg.model.clone(),
-            &weights,
+        let engine = ChessAlphaZeroEngine::open(
+            cfg.model,
+            InferenceSource::Checkpoint(&weights),
             self.settings.device,
-            batcher_config(),
+            &cfg.inference,
         )?;
-        self.batcher = Some(batcher);
-        self.loaded = Some(LoadedModel { model: cfg.model });
+        self.engine = Some(engine);
         Ok(())
     }
 
@@ -122,72 +107,24 @@ impl ChessUciEngine {
         }
         self.ensure_model()?;
         let simulations = simulations.unwrap_or(self.settings.simulations).max(1);
-        let evaluator = self.batcher.as_ref().expect("model loaded").client();
-        let model = &self.loaded.as_ref().expect("model loaded").model;
         let sampled = self.position_moves.len() < self.settings.opening_plies;
-        let bestmove = match model.chess_history() {
-            Some(ChessHistory::One) => {
-                chess_action::<1>(evaluator, &self.game, simulations, sampled)
+        let request = if sampled {
+            SearchRequest {
+                mode: engine_core::agent::PolicyMode::Explore,
+                budget: SearchBudget::Puct { simulations },
             }
-            Some(ChessHistory::Four) => {
-                chess_action::<4>(evaluator, &self.game, simulations, sampled)
-            }
-            Some(ChessHistory::Eight) => {
-                chess_action::<8>(evaluator, &self.game, simulations, sampled)
-            }
-            None if model.is_chess_classic() => {
-                classic_chess_action(evaluator, &self.game, simulations, sampled)
-            }
-            None => anyhow::bail!("run is not a chess model"),
-        }?;
-        Ok(bestmove)
-    }
-}
+        }
+        else {
+            SearchRequest::deterministic_puct(simulations)
+        };
+        let mv = self
+            .engine
+            .as_mut()
+            .expect("engine was loaded before move selection")
+            .select_move(&self.game, request)?;
 
-fn classic_chess_action(
-    evaluator: alphazero::BatcherClient,
-    game: &ChessGame,
-    simulations: usize,
-    sampled: bool,
-) -> Result<String> {
-    let mut mcts = Mcts::<_, _, _>::new(
-        RepresentedEvaluator::new(ChessClassicRepresentation, evaluator),
-        puct_search(simulations),
-        NoExtraRules,
-    );
-    let result = mcts.search(&game.position(), (), search_request(simulations, sampled))?;
-    let mv = if sampled {
-        result.sample_move(&mut rand::rng())
+        Ok(games::chess::ChessUciNotation.format_move(&self.game.position(), mv))
     }
-    else {
-        result.best_move()
-    };
-    Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
-}
-
-fn chess_action<const HISTORY: usize>(
-    evaluator: alphazero::BatcherClient,
-    game: &ChessGame,
-    simulations: usize,
-    sampled: bool,
-) -> Result<String> {
-    let mut mcts = Mcts::<_, _, _>::new(
-        RepresentedEvaluator::new(ChessAzRepresentation::<HISTORY>, evaluator),
-        puct_search(simulations),
-        ChessRepetitionRules,
-    );
-    let result = mcts.search(
-        &alphazero::representation::ChessAzState::from_game(game),
-        game.repetition_context(),
-        search_request(simulations, sampled),
-    )?;
-    let mv = if sampled {
-        result.sample_move(&mut rand::rng())
-    }
-    else {
-        result.best_move()
-    };
-    Ok(games::chess::ChessUciNotation.format_move(&game.position(), mv))
 }
 
 fn load_config_and_model(run_dir: &Path, model: &str) -> Result<(PathBuf, ExperimentConfig)> {
@@ -239,37 +176,6 @@ fn checkpoint_path(run: &RunDir, name: &str) -> PathBuf {
 fn existing_classic_checkpoint(run_dir: &Path, name: &str) -> Option<PathBuf> {
     let path = run_dir.join(format!("{name}.safetensors"));
     path.is_file().then_some(path)
-}
-
-fn puct_search(_simulations: usize) -> SearchConfig {
-    SearchConfig::Puct(search::PuctConfig {
-        leaf_batch_size: 1,
-        root_noise: None,
-        ..Default::default()
-    })
-}
-
-fn search_request(simulations: usize, sampled: bool) -> alphazero::SearchRequest {
-    alphazero::SearchRequest {
-        mode: if sampled {
-            PolicyMode::Explore
-        }
-        else {
-            PolicyMode::Deterministic
-        },
-        budget: alphazero::MctsSearchBudget::Puct {
-            simulations: simulations.max(1),
-        },
-    }
-}
-
-fn batcher_config() -> BatcherConfig {
-    BatcherConfig {
-        preferred_batch_size: 1,
-        max_batch_size: 256,
-        max_wait: Duration::from_millis(1),
-        max_queued_states: 4096,
-    }
 }
 
 #[cfg(test)]

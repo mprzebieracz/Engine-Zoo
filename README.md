@@ -76,7 +76,7 @@ cd web && npm ci && npm run check && npm run build
 
 ## Benchmarks
 
-The repository has a deterministic pure-search harness in `crates/search/benches/connect4_mcts.rs`; benchmark sources are compiled in CI with `--no-run`. GPU inference/training benchmarks are intentionally not presented as measurements until they are run on suitable hardware. Methodology and the required benchmark matrix live in [docs/benchmarks.md](docs/benchmarks.md).
+The repository has a reproducible `engine-bench` CLI covering search, representation, inference, batching, self-play, training, and end-to-end workloads. Run `cargo run -p engine-bench -- suite --human` on an intentional benchmark machine. GPU inference/training results are not presented as measurements until they are run on suitable hardware. Methodology and the benchmark matrix live in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Further reading
 

@@ -49,7 +49,7 @@ fn main() -> Result<()> {
         &args.run_dir,
         &args.checkpoint,
         device(&args.device)?,
-        alphazero::SearchConfig::Puct(alphazero::PuctConfig {
+        search::SearchConfig::Puct(search::PuctConfig {
             leaf_batch_size: args.leaf_batch_size,
             root_noise: None,
             ..Default::default()

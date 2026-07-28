@@ -4,12 +4,15 @@ mod analysis;
 mod batcher;
 mod evaluator;
 pub mod experiment;
+pub mod inference;
 mod network;
 mod replay;
 pub mod representation;
 mod rules;
+pub mod runtime;
 mod selfplay;
 mod trainer;
+mod training_run;
 
 pub use analysis::{
     analyze_game_mcts, analyze_game_mcts_with_repetitions, analyze_game_net, Analysis,
@@ -24,6 +27,7 @@ pub use experiment::{
     DurationConfig, ExperimentConfig, InferenceConfig, InferenceEngine, ReplayConfig, ResumeKind,
     RunDir, RunState, EXPERIMENT_FORMAT_VERSION, STATE_FORMAT_VERSION,
 };
+pub use inference::{InferenceClient, InferenceService, InferenceSource};
 pub use network::{
     ChessHistory, GameKind, ModelFingerprint, ModelSpec, Network, RawNetworkOutput, RawValueOutput,
     ValueHeadSpec,
@@ -34,20 +38,17 @@ pub use replay::{
 };
 pub use representation::{Action, AlphaZeroRepresentation};
 pub use rules::{ChessNodeMeta, ChessRepetitionRules};
-pub use search::{
-    CompletedQConfig, DirichletConfig, EvalTable, EvalTableStats, Evaluation, EvaluationError,
-    FpuConfig, FullGumbelConfig, GumbelRootConfig, InFlightConfig, Mcts, NoExtraRules,
-    PolicyValueEvaluator, PuctConfig, PuctSelectionConfig, PuctTreeConfig, RootGumbelPuctConfig,
-    RuleResult, SearchAlgorithm, SearchBudget as MctsSearchBudget, SearchConfig, SearchConfigError,
-    SearchDiagnostics, SearchError, SearchRequest, SearchResult, SearchRules,
-};
+pub use runtime::ChessAlphaZeroEngine;
+pub(crate) use search::{EvalTable, Mcts, SearchAlgorithm, SearchConfig, SearchRequest};
 pub use selfplay::{
-    select_temperature_action, ChessSelfPlayWorkerFactory, CompletedGame, GameRequest,
-    GenericSelfPlayWorkerFactory, GumbelMoveSelection, ResignationConfig, SearchBudget,
-    SearchBudgetSchedule, SelfPlayConfig, SelfPlayCoordinator, SelfPlayEpoch, SelfPlayStats,
-    SelfPlayWorker, SelfPlayWorkerFactory, TemperaturePhase, TemperatureSchedule,
+    select_temperature_action, ChessCanonicalSelfPlayDomain, ChessClassicSelfPlayDomain,
+    CompletedGame, DomainSelfPlayWorkerFactory, GameRequest, GumbelMoveSelection,
+    ResignationConfig, SearchBudget, SearchBudgetSchedule, SelfPlayConfig, SelfPlayCoordinator,
+    SelfPlayDomain, SelfPlayEpoch, SelfPlayStats, SelfPlayWorker, SelfPlayWorkerFactory,
+    StandardSelfPlayDomain, TemperaturePhase, TemperatureSchedule,
 };
 pub use trainer::{
     build_optimizer, train, wdl_cross_entropy, LearningRateSchedule, OptimizerSpec, TrainConfig,
-    TrainMetrics,
+    TrainMetrics, Trainer, TrainingSeed,
 };
+pub use training_run::{IterationReport, RunLimit, TrainingRun};

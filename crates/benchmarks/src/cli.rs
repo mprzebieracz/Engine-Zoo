@@ -1,5 +1,6 @@
 use crate::{
-    batcher, environment, harness, inference, replay, representation, search, self_play, training,
+    batcher, device, environment, harness, inference, replay, representation, search, self_play,
+    training,
 };
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -29,7 +30,6 @@ enum BenchmarkCommand {
     #[command(name = "end-to-end")]
     EndToEnd(OutputArgs),
     Suite(OutputArgs),
-    Profile(ProfileArgs),
 }
 
 #[derive(Args, Clone)]
@@ -44,6 +44,14 @@ pub struct OutputArgs {
 
     #[arg(long, default_value_t = 10)]
     samples: usize,
+
+    /// Execution device. CUDA is the default; use `auto` to permit CPU fallback.
+    #[arg(long, value_enum, default_value_t = device::DeviceKind::Cuda)]
+    device: device::DeviceKind,
+
+    /// Network precision for CUDA inference fixtures.
+    #[arg(long, value_enum, default_value_t = device::Precision::Fp32)]
+    precision: device::Precision,
 
     /// Write the complete machine-readable JSON report to this path.
     #[arg(long)]
@@ -71,20 +79,6 @@ enum SearchAlgorithm {
     Puct,
     RootGumbelPuct,
     FullGumbel,
-}
-
-#[derive(Args)]
-struct ProfileArgs {
-    #[command(subcommand)]
-    workload: ProfileWorkload,
-}
-
-#[derive(Subcommand)]
-enum ProfileWorkload {
-    Search,
-    #[command(name = "self-play")]
-    SelfPlay,
-    Training,
 }
 
 pub fn run(command: Command) -> Result<()> {
@@ -120,23 +114,46 @@ pub fn run(command: Command) -> Result<()> {
         }
         BenchmarkCommand::Suite(args) => run_suite(&args),
         BenchmarkCommand::Inference(args) => write(
-            inference::connect4(&args.warmup, args.samples, config_value(&args)?),
+            inference::connect4(
+                &args.warmup,
+                args.samples,
+                config_value(&args)?,
+                benchmark_device(&args)?,
+                args.precision,
+            ),
             &args,
         ),
         BenchmarkCommand::Batcher(args) => write(
-            batcher::connect4(&args.warmup, args.samples, config_value(&args)?),
+            batcher::connect4(
+                &args.warmup,
+                args.samples,
+                config_value(&args)?,
+                benchmark_device(&args)?,
+                args.precision,
+            )?,
             &args,
         ),
         BenchmarkCommand::SelfPlay(args) => write(
-            self_play::connect4(&args.warmup, args.samples, config_value(&args)?),
+            self_play::connect4(
+                &args.warmup,
+                args.samples,
+                config_value(&args)?,
+                benchmark_device(&args)?,
+                args.precision,
+            )?,
             &args,
         ),
         BenchmarkCommand::Training(args) => write(
-            training::connect4(&args.warmup, args.samples, config_value(&args)?),
+            training::connect4(
+                &args.warmup,
+                args.samples,
+                config_value(&args)?,
+                benchmark_device(&args)?,
+                args.precision,
+            )?,
             &args,
         ),
         BenchmarkCommand::EndToEnd(args) => write(end_to_end(&args)?, &args),
-        BenchmarkCommand::Profile(args) => profile(args),
     }
 }
 
@@ -147,11 +164,35 @@ fn run_suite(args: &OutputArgs) -> Result<()> {
         search::root_gumbel_puct(128, &args.warmup, args.samples, config.clone())?,
         search::full_gumbel(128, &args.warmup, args.samples, config.clone())?,
         representation::connect4(&args.warmup, args.samples, config),
-        inference::connect4(&args.warmup, args.samples, json!({})),
-        batcher::connect4(&args.warmup, args.samples, json!({})),
+        inference::connect4(
+            &args.warmup,
+            args.samples,
+            json!({}),
+            benchmark_device(args)?,
+            args.precision,
+        ),
+        batcher::connect4(
+            &args.warmup,
+            args.samples,
+            json!({}),
+            benchmark_device(args)?,
+            args.precision,
+        )?,
         replay::connect4(&args.warmup, args.samples, json!({})),
-        self_play::connect4(&args.warmup, args.samples, json!({})),
-        training::connect4(&args.warmup, args.samples, json!({})),
+        self_play::connect4(
+            &args.warmup,
+            args.samples,
+            json!({}),
+            benchmark_device(args)?,
+            args.precision,
+        )?,
+        training::connect4(
+            &args.warmup,
+            args.samples,
+            json!({}),
+            benchmark_device(args)?,
+            args.precision,
+        )?,
         end_to_end(args)?,
     ];
     let report = harness::combine("suite", reports)?;
@@ -161,22 +202,28 @@ fn run_suite(args: &OutputArgs) -> Result<()> {
 fn end_to_end(args: &OutputArgs) -> Result<crate::report::BenchmarkReport> {
     let config = config_value(args)?;
     let reports = vec![
-        self_play::connect4(&args.warmup, args.samples, config.clone()),
-        training::connect4(&args.warmup, args.samples, config),
+        self_play::connect4(
+            &args.warmup,
+            args.samples,
+            config.clone(),
+            benchmark_device(args)?,
+            args.precision,
+        )?,
+        training::connect4(
+            &args.warmup,
+            args.samples,
+            config,
+            benchmark_device(args)?,
+            args.precision,
+        )?,
     ];
     harness::combine("end-to-end.connect4", reports)
 }
 
-fn profile(args: ProfileArgs) -> Result<()> {
-    let name = match args.workload {
-        ProfileWorkload::Search => "search",
-        ProfileWorkload::SelfPlay => "self-play",
-        ProfileWorkload::Training => "training",
-    };
-    println!("cargo build --profile profiling -p engine-bench");
-    println!("perf record -g -- cargo run --profile profiling -p engine-bench -- {name} --warmup 10s --samples 1000");
-    println!("nsys profile --trace=cuda,nvtx,osrt cargo run --profile profiling -p engine-bench -- {name} --warmup 10s --samples 1000");
-    Ok(())
+fn benchmark_device(args: &OutputArgs) -> Result<tch::Device> {
+    let selected = device::select(args.device)?;
+    device::validate_precision(args.precision, selected)?;
+    Ok(selected)
 }
 
 fn config_value(args: &OutputArgs) -> Result<Value> {
