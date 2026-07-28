@@ -45,13 +45,13 @@ pub fn analyze_request(
             let (_, run_cfg) = open_existing_run(&run_dir, "chess")?;
             let weights = resolve_model(&run_dir, &req.model);
             match run_cfg.model.chess_history() {
-                Some(alphazero::ChessHistoryLength::One) => {
+                Some(alphazero::ChessHistory::One) => {
                     analyze_chess::<1>(&run_cfg.model, &weights, &position, device, &cfg)
                 }
-                Some(alphazero::ChessHistoryLength::Four) => {
+                Some(alphazero::ChessHistory::Four) => {
                     analyze_chess::<4>(&run_cfg.model, &weights, &position, device, &cfg)
                 }
-                Some(alphazero::ChessHistoryLength::Eight) => {
+                Some(alphazero::ChessHistory::Eight) => {
                     analyze_chess::<8>(&run_cfg.model, &weights, &position, device, &cfg)
                 }
                 None if run_cfg.model.is_chess_classic() => {
@@ -64,7 +64,7 @@ pub fn analyze_request(
             let (_, run_cfg) = open_existing_run(&run_dir, "connect4")?;
             let weights = resolve_model(&run_dir, &req.model);
             anyhow::ensure!(
-                run_cfg.model.game == alphazero::GameSpec::Connect4,
+                run_cfg.model.game() == alphazero::GameKind::Connect4,
                 "run config is not a Connect4 model"
             );
             analyze_connect4(
@@ -110,10 +110,7 @@ fn analyze_classic_chess(
     }
     let mut mcts = Mcts::new(
         alphazero::RepresentedEvaluator::new(ChessClassicRepresentation, batcher.client()),
-        puct_search(match &cfg.mcts {
-            SearchConfig::Puct(search) => search.common.simulations,
-            SearchConfig::Gumbel(search) => search.simulations,
-        }),
+        cfg.mcts.clone(),
         NoExtraRules,
     );
     analyze_game_mcts(
@@ -218,10 +215,7 @@ fn analyze_chess<const HISTORY: usize>(
     if cfg.mode == AnalyzeMode::Net {
         return Ok(network);
     }
-    let mcts_cfg = puct_search(match &cfg.mcts {
-        SearchConfig::Puct(search) => search.common.simulations,
-        SearchConfig::Gumbel(search) => search.simulations,
-    });
+    let mcts_cfg = cfg.mcts.clone();
     let mut mcts = Mcts::new(
         alphazero::RepresentedEvaluator::new(ChessAzRepresentation::<HISTORY>, batcher.client()),
         mcts_cfg,

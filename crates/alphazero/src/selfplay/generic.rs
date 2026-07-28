@@ -1,18 +1,18 @@
 use super::coordinator::{
     CompletedGame, GameRequest, SelfPlayWorker, SelfPlayWorkerFactory, BUDGET_SEED, MOVE_SEED,
 };
-use super::{select_temperature_action, SearchBudget, SelfPlayConfig, SelfPlayStats};
+use super::{select_temperature_action, SelfPlayConfig, SelfPlayStats};
 use crate::{AlphaZeroRepresentation, Batcher};
 use crate::{
     BatcherClient, Outcome, ReplaySample, RepresentedEvaluator, SampleMetadata, SearchKind,
     TrainingWeights,
 };
-use anyhow::{ensure, Result};
+use anyhow::Result;
 use engine_core::agent::PolicyMode;
 use engine_core::game::{GameState, TerminalValue};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
-use search::{Mcts, NoExtraRules, SearchConfig};
+use search::{Mcts, NoExtraRules};
 
 pub struct GenericSelfPlayWorkerFactory<G, Rep> {
     batcher: BatcherClient,
@@ -80,14 +80,17 @@ where
 
         while !position.is_terminal() && trajectory.len() < self.config.max_moves {
             let (budget, policy_weight, full) = self.config.budget_schedule.choose(&mut budget_rng);
-            set_budget(&mut self.mcts, budget)?;
             if full {
                 stats.full_searches += 1;
             }
             else {
                 stats.fast_searches += 1;
             }
-            let result = self.mcts.search(&position, (), PolicyMode::Explore)?;
+            let result = self.mcts.search(
+                &position,
+                (),
+                super::config::search_request(budget, PolicyMode::Explore),
+            )?;
             let action = select_temperature_action(
                 &result,
                 self.config.temperature.at_ply(trajectory.len()),
@@ -132,36 +135,6 @@ where
         stats.moves = trajectory.len();
         Ok(CompletedGame { stats, trajectory })
     }
-}
-
-pub(crate) fn set_budget<G, E, R>(mcts: &mut Mcts<G, E, R>, budget: SearchBudget) -> Result<()>
-where
-    G: GameState + Clone,
-    E: search::PolicyValueEvaluator<G>,
-    R: search::SearchRules<G>,
-{
-    match budget {
-        SearchBudget::Puct { simulations } => {
-            ensure!(
-                matches!(mcts.config(), SearchConfig::Puct(_)),
-                "PUCT budget requires PUCT search"
-            );
-            mcts.set_simulations(simulations);
-        }
-        SearchBudget::Gumbel {
-            simulations,
-            max_considered_actions,
-        } => {
-            let SearchConfig::Gumbel(mut config) = mcts.config()
-            else {
-                anyhow::bail!("Gumbel budget requires Gumbel search");
-            };
-            config.simulations = simulations;
-            config.max_considered_actions = max_considered_actions;
-            mcts.set_gumbel_config(config).map_err(anyhow::Error::msg)?;
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn assign_outcomes<S>(trajectory: &mut [ReplaySample<S>], mut outcome: Outcome) {

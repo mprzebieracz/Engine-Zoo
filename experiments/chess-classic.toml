@@ -1,29 +1,17 @@
-format_version = 2
+format_version = 3
 seed = 1
 
 [model]
-game = "chess"
-representation = "chess-classic"
-
-[model.network]
-architecture = "residual"
-
-[model.network.config.trunk.basic]
+architecture = "chess-classic"
 blocks = 10
 channels = 64
-
-[model.network.config.policy_head.dense]
-channels = 2
-
-[model.network.config.value_head.scalar]
-hidden = 64
 
 [self_play]
 num_games = 128
 threads = 8
 
-[self_play.search.Puct.common]
-simulations = 800
+[self_play.search]
+algorithm = "puct"
 leaf_batch_size = 8
 
 [self_play.budget_schedule.fixed.puct]

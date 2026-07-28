@@ -1,33 +1,20 @@
-format_version = 2
+format_version = 3
 seed = 1
 
 [model]
-game = "chess"
-
-[model.representation.chess-canonical]
+architecture = "chess-se"
 history = "four"
-
-[model.network]
-architecture = "residual"
-
-[model.network.config.trunk.squeeze-excitation]
 blocks = 12
 channels = 128
 se_hidden = 16
-
-[model.network.config.policy_head.convolutional-planes]
-planes = 73
-
-[model.network.config.value_head.wdl]
-hidden = 128
+value_head = { wdl = { hidden = 128 } }
 
 [self_play]
 num_games = 128
 threads = 8
 
-[self_play.search.Gumbel]
-simulations = 128
-max_considered_actions = 16
+[self_play.search]
+algorithm = "full-gumbel"
 
 [self_play.budget_schedule.fixed.gumbel]
 simulations = 128
@@ -36,4 +23,3 @@ max_considered_actions = 16
 [training]
 batch_size = 2048
 train_steps = 80
-

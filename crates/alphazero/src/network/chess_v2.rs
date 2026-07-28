@@ -1,7 +1,4 @@
-use super::{
-    ModelSpec, RawNetworkOutput, RawValueOutput, ResidualNetworkConfig, ResidualTrunkConfig,
-    ValueHeadConfig,
-};
+use super::{ModelSpec, RawNetworkOutput, RawValueOutput, ValueHeadSpec};
 use tch::{nn, Tensor};
 
 struct SeResBlock {
@@ -70,26 +67,24 @@ pub struct SeResidualNet {
 }
 
 impl SeResidualNet {
-    pub fn new(p: &nn::Path, spec: &ModelSpec, config: &ResidualNetworkConfig) -> Self {
+    pub fn new(p: &nn::Path, spec: &ModelSpec) -> Self {
         let [input_channels, _, _] = spec.state_shape();
-        let ResidualTrunkConfig::SqueezeExcitation {
+        let ModelSpec::ChessSe {
             blocks,
             channels,
             se_hidden,
-        } = config.trunk
+            value_head,
+            ..
+        } = spec
         else {
-            unreachable!("SE residual network requires an SE trunk")
+            unreachable!("SE residual network requires a chess SE model")
         };
-        let super::PolicyHeadConfig::ConvolutionalPlanes { planes } = config.policy_head
-        else {
-            unreachable!("SE residual network requires a convolutional policy head")
+        let value_hidden = match value_head {
+            ValueHeadSpec::Scalar { hidden } | ValueHeadSpec::Wdl { hidden } => *hidden,
         };
-        let value_hidden = match config.value_head {
-            ValueHeadConfig::Scalar { hidden } | ValueHeadConfig::Wdl { hidden } => hidden,
-        };
-        let value_outputs = match config.value_head {
-            ValueHeadConfig::Scalar { .. } => 1,
-            ValueHeadConfig::Wdl { .. } => 3,
+        let value_outputs = match value_head {
+            ValueHeadSpec::Scalar { .. } => 1,
+            ValueHeadSpec::Wdl { .. } => 3,
         };
         let no_bias_3x3 = nn::ConvConfig {
             padding: 1,
@@ -97,17 +92,17 @@ impl SeResidualNet {
             ..Default::default()
         };
         Self {
-            stem_conv: nn::conv2d(p / "stem_conv", input_channels, channels, 3, no_bias_3x3),
-            stem_bn: nn::batch_norm2d(p / "stem_bn", channels, Default::default()),
-            blocks: (0..blocks)
-                .map(|i| SeResBlock::new(&(p / "blocks" / i), channels, se_hidden))
+            stem_conv: nn::conv2d(p / "stem_conv", input_channels, *channels, 3, no_bias_3x3),
+            stem_bn: nn::batch_norm2d(p / "stem_bn", *channels, Default::default()),
+            blocks: (0..*blocks)
+                .map(|i| SeResBlock::new(&(p / "blocks" / i), *channels, *se_hidden))
                 .collect(),
-            policy_conv: nn::conv2d(p / "policy_conv", channels, channels, 3, no_bias_3x3),
-            policy_bn: nn::batch_norm2d(p / "policy_bn", channels, Default::default()),
+            policy_conv: nn::conv2d(p / "policy_conv", *channels, *channels, 3, no_bias_3x3),
+            policy_bn: nn::batch_norm2d(p / "policy_bn", *channels, Default::default()),
             policy_out: nn::conv2d(
                 p / "policy_out",
-                channels,
-                planes,
+                *channels,
+                73,
                 3,
                 nn::ConvConfig {
                     padding: 1,
@@ -116,7 +111,7 @@ impl SeResidualNet {
             ),
             value_conv: nn::conv2d(
                 p / "value_conv",
-                channels,
+                *channels,
                 32,
                 1,
                 nn::ConvConfig {

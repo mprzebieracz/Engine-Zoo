@@ -1,4 +1,4 @@
-use super::{ModelSpec, RawNetworkOutput, RawValueOutput, ResidualNetworkConfig, ValueHeadConfig};
+use super::{ModelSpec, RawNetworkOutput, RawValueOutput, ValueHeadSpec};
 use tch::{nn, Tensor};
 
 struct ResBlock {
@@ -48,24 +48,24 @@ pub struct ClassicResidualNet {
 }
 
 impl ClassicResidualNet {
-    pub fn new(p: &nn::Path, spec: &ModelSpec, config: &ResidualNetworkConfig) -> Self {
+    pub fn new(p: &nn::Path, spec: &ModelSpec) -> Self {
         let [input_channels, height, width] = spec.state_shape();
-        let super::ResidualTrunkConfig::Basic { blocks, channels } = config.trunk
-        else {
-            unreachable!("classic residual network requires a basic trunk")
+        let (blocks, channels) = match spec {
+            ModelSpec::Connect4Residual {
+                blocks, channels, ..
+            }
+            | ModelSpec::ChessClassic { blocks, channels } => (*blocks, *channels),
+            ModelSpec::ChessSe { .. } => {
+                unreachable!("classic residual network requires a basic model")
+            }
         };
-        let super::PolicyHeadConfig::Dense {
-            channels: policy_channels,
-        } = config.policy_head
-        else {
-            unreachable!("classic residual network requires a dense policy head")
+        let value_head = spec.value_head();
+        let value_hidden = match value_head {
+            ValueHeadSpec::Scalar { hidden } | ValueHeadSpec::Wdl { hidden } => hidden,
         };
-        let value_hidden = match config.value_head {
-            ValueHeadConfig::Scalar { hidden } | ValueHeadConfig::Wdl { hidden } => hidden,
-        };
-        let value_outputs = match config.value_head {
-            ValueHeadConfig::Scalar { .. } => 1,
-            ValueHeadConfig::Wdl { .. } => 3,
+        let value_outputs = match value_head {
+            ValueHeadSpec::Scalar { .. } => 1,
+            ValueHeadSpec::Wdl { .. } => 3,
         };
         let conv_cfg = nn::ConvConfig {
             padding: 1,
@@ -78,17 +78,11 @@ impl ClassicResidualNet {
             blocks: (0..blocks)
                 .map(|i| ResBlock::new(&(p / "blocks" / i), channels))
                 .collect(),
-            policy_conv: nn::conv2d(
-                p / "policy_conv",
-                channels,
-                policy_channels,
-                1,
-                Default::default(),
-            ),
-            policy_bn: nn::batch_norm2d(p / "policy_bn", policy_channels, Default::default()),
+            policy_conv: nn::conv2d(p / "policy_conv", channels, 2, 1, Default::default()),
+            policy_bn: nn::batch_norm2d(p / "policy_bn", 2, Default::default()),
             policy_fc: nn::linear(
                 p / "policy_fc",
-                policy_channels * hw,
+                2 * hw,
                 spec.action_size() as i64,
                 Default::default(),
             ),

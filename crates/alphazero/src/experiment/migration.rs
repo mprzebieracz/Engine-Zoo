@@ -1,5 +1,5 @@
 use super::{ExperimentConfig, InferenceConfig, ReplayConfig, EXPERIMENT_FORMAT_VERSION};
-use crate::{ChessHistoryLength, ModelSpec, SelfPlayConfig, TrainConfig, ValueHeadConfig};
+use crate::{ChessHistory, ModelSpec, SelfPlayConfig, TrainConfig, ValueHeadSpec};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -139,14 +139,14 @@ fn classic_chess(config: ScalarConfig) -> Result<ModelSpec> {
 
 fn canonical_chess(history: usize) -> Result<ModelSpec> {
     let history = match history {
-        1 => ChessHistoryLength::One,
-        4 => ChessHistoryLength::Four,
-        8 => ChessHistoryLength::Eight,
+        1 => ChessHistory::One,
+        4 => ChessHistory::Four,
+        8 => ChessHistory::Eight,
         _ => anyhow::bail!("unsupported chess canonical history length {history}"),
     };
     Ok(ModelSpec::chess_se(
         history,
-        ValueHeadConfig::Wdl { hidden: 128 },
+        ValueHeadSpec::Wdl { hidden: 128 },
     ))
 }
 
@@ -180,12 +180,150 @@ fn positive_channels(value: i64) -> Result<i64> {
     Ok(value)
 }
 
+#[derive(Deserialize)]
+pub(super) struct VersionTwoExperiment {
+    pub format_version: u32,
+    pub model: VersionTwoModel,
+    #[serde(default)]
+    pub self_play: SelfPlayConfig,
+    #[serde(default)]
+    pub replay: ReplayConfig,
+    #[serde(default)]
+    pub training: TrainConfig,
+    #[serde(default)]
+    pub inference: InferenceConfig,
+    pub seed: u64,
+}
+
+#[derive(Deserialize)]
+pub(super) struct VersionTwoModel {
+    game: VersionTwoGame,
+    representation: VersionTwoRepresentation,
+    network: VersionTwoNetwork,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum VersionTwoGame {
+    Connect4,
+    Chess,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum VersionTwoRepresentation {
+    Connect4Canonical,
+    ChessClassic,
+    ChessCanonical { history: ChessHistory },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "architecture", content = "config", rename_all = "kebab-case")]
+enum VersionTwoNetwork {
+    Residual(VersionTwoResidual),
+}
+
+#[derive(Deserialize)]
+struct VersionTwoResidual {
+    trunk: VersionTwoTrunk,
+    policy_head: VersionTwoPolicyHead,
+    value_head: ValueHeadSpec,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum VersionTwoTrunk {
+    Basic {
+        blocks: usize,
+        channels: i64,
+    },
+    SqueezeExcitation {
+        blocks: usize,
+        channels: i64,
+        se_hidden: i64,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum VersionTwoPolicyHead {
+    Dense { channels: i64 },
+    ConvolutionalPlanes { planes: i64 },
+}
+
+pub(super) fn migrate_version_two(experiment: VersionTwoExperiment) -> Result<ExperimentConfig> {
+    anyhow::ensure!(
+        experiment.format_version == 2,
+        "expected experiment format version 2, got {}",
+        experiment.format_version
+    );
+    let model = migrate_version_two_model(experiment.model)?;
+
+    Ok(ExperimentConfig {
+        format_version: EXPERIMENT_FORMAT_VERSION,
+        model,
+        self_play: experiment.self_play,
+        replay: experiment.replay,
+        training: experiment.training,
+        inference: experiment.inference,
+        seed: experiment.seed,
+    })
+}
+
+fn migrate_version_two_model(model: VersionTwoModel) -> Result<ModelSpec> {
+    let VersionTwoNetwork::Residual(network) = model.network;
+
+    match (
+        model.game,
+        model.representation,
+        network.trunk,
+        network.policy_head,
+    ) {
+        (
+            VersionTwoGame::Connect4,
+            VersionTwoRepresentation::Connect4Canonical,
+            VersionTwoTrunk::Basic { blocks, channels },
+            VersionTwoPolicyHead::Dense { channels: 2 },
+        ) => Ok(ModelSpec::Connect4Residual {
+            blocks,
+            channels,
+            value_head: network.value_head,
+        }),
+        (
+            VersionTwoGame::Chess,
+            VersionTwoRepresentation::ChessClassic,
+            VersionTwoTrunk::Basic { blocks, channels },
+            VersionTwoPolicyHead::Dense {
+                channels: policy_channels,
+            },
+        ) if policy_channels == 2
+            && network.value_head == ValueHeadSpec::Scalar { hidden: channels } =>
+        {
+            Ok(ModelSpec::ChessClassic { blocks, channels })
+        }
+        (
+            VersionTwoGame::Chess,
+            VersionTwoRepresentation::ChessCanonical { history },
+            VersionTwoTrunk::SqueezeExcitation {
+                blocks,
+                channels,
+                se_hidden,
+            },
+            VersionTwoPolicyHead::ConvolutionalPlanes { planes: 73 },
+        ) => Ok(ModelSpec::ChessSe {
+            history,
+            blocks,
+            channels,
+            se_hidden,
+            value_head: network.value_head,
+        }),
+        _ => anyhow::bail!("version-2 experiment contains an unsupported model combination"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        NetworkSpec, PolicyHeadConfig, RepresentationSpec, ResidualTrunkConfig, ValueHeadConfig,
-    };
 
     #[test]
     fn migrates_the_historical_classic_chess_model_without_changing_its_shape() {
@@ -204,19 +342,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            config.model.representation,
-            RepresentationSpec::ChessClassic
-        );
-        let NetworkSpec::Residual(network) = config.model.network;
-        assert_eq!(
-            network.trunk,
-            ResidualTrunkConfig::Basic {
+            config.model,
+            ModelSpec::ChessClassic {
                 blocks: 10,
                 channels: 64,
             }
         );
-        assert_eq!(network.policy_head, PolicyHeadConfig::Dense { channels: 2 });
-        assert_eq!(network.value_head, ValueHeadConfig::Scalar { hidden: 64 });
     }
 
     #[test]
@@ -238,5 +369,49 @@ mod tests {
         assert!(error
             .to_string()
             .contains("incompatible representation dimensions"));
+    }
+
+    #[test]
+    fn migrates_version_two_nested_chess_se_model() {
+        let experiment = toml::from_str(
+            r#"
+                format_version = 2
+                seed = 7
+
+                [model]
+                game = "chess"
+
+                [model.representation.chess-canonical]
+                history = "four"
+
+                [model.network]
+                architecture = "residual"
+
+                [model.network.config.trunk.squeeze-excitation]
+                blocks = 12
+                channels = 128
+                se_hidden = 16
+
+                [model.network.config.policy_head.convolutional-planes]
+                planes = 73
+
+                [model.network.config.value_head.wdl]
+                hidden = 128
+            "#,
+        )
+        .unwrap();
+        let migrated = migrate_version_two(experiment).unwrap();
+
+        assert_eq!(migrated.format_version, EXPERIMENT_FORMAT_VERSION);
+        assert_eq!(
+            migrated.model,
+            ModelSpec::ChessSe {
+                history: ChessHistory::Four,
+                blocks: 12,
+                channels: 128,
+                se_hidden: 16,
+                value_head: ValueHeadSpec::Wdl { hidden: 128 },
+            }
+        );
     }
 }

@@ -25,9 +25,8 @@ pub use experiment::{
     RunDir, RunState, EXPERIMENT_FORMAT_VERSION, STATE_FORMAT_VERSION,
 };
 pub use network::{
-    ChessHistoryLength, ClassicResidualNet, GameSpec, ModelFingerprint, ModelSpec, Network,
-    NetworkSpec, PolicyHeadConfig, RawNetworkOutput, RawValueOutput, RepresentationSpec,
-    ResidualNetworkConfig, ResidualTrunkConfig, SeResidualNet, SeTrunkSpec, ValueHeadConfig,
+    ChessHistory, GameKind, ModelFingerprint, ModelSpec, Network, RawNetworkOutput, RawValueOutput,
+    ValueHeadSpec,
 };
 pub use replay::{
     Outcome, ReplayBatch, ReplayBuffer, ReplaySample, SampleMetadata, SearchKind, SparsePolicy,
@@ -36,10 +35,11 @@ pub use replay::{
 pub use representation::{Action, AlphaZeroRepresentation};
 pub use rules::{ChessNodeMeta, ChessRepetitionRules};
 pub use search::{
-    CommonSearchConfig, CompletedQConfig, DirichletConfig, EvalTable, EvalTableStats, Evaluation,
-    EvaluationError, FpuConfig, GumbelConfig, InFlightConfig, Mcts, NoExtraRules,
-    PolicyValueEvaluator, PuctConfig, PuctSelectionConfig, RuleResult, SearchConfig,
-    SearchConfigError, SearchDiagnostics, SearchError, SearchResult, SearchRules,
+    CompletedQConfig, DirichletConfig, EvalTable, EvalTableStats, Evaluation, EvaluationError,
+    FpuConfig, FullGumbelConfig, GumbelRootConfig, InFlightConfig, Mcts, NoExtraRules,
+    PolicyValueEvaluator, PuctConfig, PuctSelectionConfig, PuctTreeConfig, RootGumbelPuctConfig,
+    RuleResult, SearchAlgorithm, SearchBudget as MctsSearchBudget, SearchConfig, SearchConfigError,
+    SearchDiagnostics, SearchError, SearchRequest, SearchResult, SearchRules,
 };
 pub use selfplay::{
     select_temperature_action, ChessSelfPlayWorkerFactory, CompletedGame, GameRequest,

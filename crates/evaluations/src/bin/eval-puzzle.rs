@@ -50,13 +50,13 @@ fn main() -> Result<()> {
         &args.checkpoint,
         device(&args.device)?,
         alphazero::SearchConfig::Puct(alphazero::PuctConfig {
-            common: alphazero::CommonSearchConfig {
-                simulations: args.simulations,
-                leaf_batch_size: args.leaf_batch_size,
-            },
+            leaf_batch_size: args.leaf_batch_size,
             root_noise: None,
             ..Default::default()
         }),
+        search::SearchBudget::Puct {
+            simulations: args.simulations,
+        },
     )?;
     if let Some(parent) = args.output.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;

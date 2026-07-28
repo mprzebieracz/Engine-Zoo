@@ -6,6 +6,7 @@ members = [
     "crates/alphazero",
     "crates/app",
     "crates/evaluations",
+    "crates/benchmarks",
 ]
 resolver = "2"
 
@@ -39,3 +40,9 @@ lto = "thin"
 
 [profile.dev]
 opt-level = 1
+
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = false
+lto = "thin"

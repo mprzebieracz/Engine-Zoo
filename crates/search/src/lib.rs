@@ -5,9 +5,10 @@ mod value;
 
 pub use evaluator::{Evaluation, EvaluationError, EvaluationKey, PolicyValueEvaluator};
 pub use mcts::{
-    CommonSearchConfig, CompletedQConfig, DirichletConfig, EvalTable, EvalTableStats, FpuConfig,
-    GumbelConfig, InFlightConfig, Mcts, PuctConfig, PuctSelectionConfig, SearchConfig,
-    SearchConfigError, SearchDiagnostics, SearchError, SearchResult,
+    CompletedQConfig, DirichletConfig, EvalTable, EvalTableStats, FpuConfig, FullGumbelConfig,
+    GumbelRootConfig, InFlightConfig, Mcts, PuctConfig, PuctSelectionConfig, PuctTreeConfig,
+    RootGumbelPuctConfig, SearchAlgorithm, SearchBudget, SearchConfig, SearchConfigError,
+    SearchDiagnostics, SearchError, SearchRequest, SearchResult,
 };
 pub use rules::{NoExtraRules, RuleResult, SearchRules};
 pub use value::{InvalidValue, PositionValue};

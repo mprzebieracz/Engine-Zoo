@@ -1,15 +1,13 @@
 use super::*;
-use crate::{ChessHistoryLength, InferenceEngine, ModelSpec, ValueHeadConfig};
+use crate::{ChessHistory, InferenceEngine, ModelSpec, ValueHeadSpec};
 use std::fs;
+use std::path::Path;
 use tch::{nn, Device};
 
 fn config() -> ExperimentConfig {
     ExperimentConfig {
         format_version: EXPERIMENT_FORMAT_VERSION,
-        model: ModelSpec::chess_se(
-            ChessHistoryLength::One,
-            ValueHeadConfig::Scalar { hidden: 8 },
-        ),
+        model: ModelSpec::chess_se(ChessHistory::One, ValueHeadSpec::Scalar { hidden: 8 }),
         self_play: crate::SelfPlayConfig::default(),
         replay: ReplayConfig { capacity: 8 },
         training: crate::TrainConfig {
@@ -47,6 +45,18 @@ fn experiment_toml_round_trips_and_carries_inference_settings() {
     let parsed: ExperimentConfig = toml::from_str(&expected.to_toml().unwrap()).unwrap();
     assert_eq!(parsed.inference, expected.inference);
     assert_eq!(parsed.fingerprint(), expected.fingerprint());
+}
+
+#[test]
+fn checked_in_experiments_use_the_closed_model_specification() {
+    let experiments = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../experiments");
+    for path in fs::read_dir(experiments).unwrap() {
+        let path = path.unwrap().path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("toml") {
+            ExperimentConfig::read_toml(&path)
+                .unwrap_or_else(|error| panic!("{} does not parse: {error:#}", path.display()));
+        }
+    }
 }
 
 #[test]

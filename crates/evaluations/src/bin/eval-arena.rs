@@ -62,7 +62,7 @@ fn validate_chess_run(run_dir: &Path) -> Result<()> {
         panic!("no experiment found at {}", run_dir.display())
     })?;
     anyhow::ensure!(
-        config.model.game == alphazero::GameSpec::Chess,
+        config.model.game() == alphazero::GameKind::Chess,
         "{} is not a chess run",
         run_dir.display()
     );

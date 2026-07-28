@@ -1,5 +1,7 @@
 use super::core::{LeafBatch, MctsCore, PendingLeaf};
-use super::{CompletedQConfig, GumbelConfig, Node, RootAction, SearchDiagnostics, SearchResult};
+use super::{
+    CompletedQConfig, FullGumbelConfig, Node, RootAction, SearchDiagnostics, SearchResult,
+};
 use crate::PositionValue;
 use engine_core::agent::PolicyMode;
 use engine_core::game::GameState;
@@ -10,12 +12,12 @@ use rand::Rng;
 /// before another one is selected, so it never shares PUCT batching semantics.
 #[derive(Debug)]
 pub(super) struct FullGumbel {
-    pub(super) config: GumbelConfig,
+    pub(super) config: FullGumbelConfig,
     pub(super) root_actions: Vec<RootAction>,
 }
 
-impl From<GumbelConfig> for FullGumbel {
-    fn from(config: GumbelConfig) -> Self {
+impl From<FullGumbelConfig> for FullGumbel {
+    fn from(config: FullGumbelConfig) -> Self {
         Self {
             config,
             root_actions: Vec::new(),
@@ -34,6 +36,8 @@ where
         game: &G,
         context: R::Context<'_>,
         _mode: PolicyMode,
+        simulations: usize,
+        max_considered_actions: usize,
     ) -> Result<SearchResult<G::Move>, super::SearchError> {
         self.clear_tree_common();
         self.nodes
@@ -62,7 +66,7 @@ where
         self.nodes[0].raw_value = root_value;
         self.build_policy_from(evaluation.legal(), evaluation.logits(), false, None);
         self.expand(0);
-        self.init_root_actions();
+        self.init_root_actions(simulations, max_considered_actions);
 
         let mut diagnostics = SearchDiagnostics {
             backend_evaluations: root_stats.backend_evaluations,
@@ -70,10 +74,7 @@ where
             evaluation_cache_misses: root_stats.backend_evaluations,
             ..SearchDiagnostics::default()
         };
-        let schedule = gumbel_visit_schedule(
-            self.variant.root_actions.len(),
-            self.variant.config.simulations,
-        );
+        let schedule = gumbel_visit_schedule(self.variant.root_actions.len(), simulations);
         let mut batch = LeafBatch::with_capacity(1);
         for considered_visits in schedule {
             let child = self
@@ -97,6 +98,8 @@ where
             .expect("root action must be a child move");
         let policy = self.root_improved_policy();
         let root_value = self.nodes[0].completed_q().unwrap_or(root_value);
+        diagnostics.nodes_created = self.nodes.len();
+
         Ok(SearchResult {
             policy,
             selected_move,
@@ -105,7 +108,7 @@ where
         })
     }
 
-    fn init_root_actions(&mut self) {
+    fn init_root_actions(&mut self, simulations: usize, max_considered_actions: usize) {
         self.variant.root_actions.clear();
         let nodes: Vec<_> = self.child_indices(0).collect();
         let actions: Vec<_> = nodes
@@ -115,7 +118,7 @@ where
                 RootAction {
                     node,
                     gumbel_logit: logit
-                        + self.variant.config.gumbel_scale * sample_gumbel(&mut self.rng),
+                        + self.variant.config.root.gumbel_scale * sample_gumbel(&mut self.rng),
                 }
             })
             .collect();
@@ -123,11 +126,8 @@ where
         self.variant
             .root_actions
             .sort_unstable_by(|left, right| right.gumbel_logit.total_cmp(&left.gumbel_logit));
-        let limit = self
-            .variant
-            .config
-            .max_considered_actions
-            .min(self.variant.config.simulations)
+        let limit = max_considered_actions
+            .min(simulations)
             .min(self.variant.root_actions.len());
         self.variant.root_actions.truncate(limit);
     }
@@ -233,7 +233,7 @@ where
             &q_values,
             &visits,
             &priors,
-            self.variant.config.qtransform,
+            self.variant.config.root.completed_q,
         )
     }
 
@@ -334,7 +334,7 @@ pub(super) fn transform_completed_q(
     values
 }
 
-fn softmax(logits: &[f32]) -> Vec<f32> {
+pub(super) fn softmax(logits: &[f32]) -> Vec<f32> {
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut probabilities: Vec<_> = logits.iter().map(|logit| (*logit - max).exp()).collect();
     let total: f32 = probabilities.iter().sum();
@@ -378,7 +378,7 @@ pub(super) fn gumbel_visit_schedule(num_considered: usize, simulations: usize) -
     sequence
 }
 
-fn sample_gumbel<R: Rng + ?Sized>(rng: &mut R) -> f32 {
+pub(super) fn sample_gumbel<R: Rng + ?Sized>(rng: &mut R) -> f32 {
     let uniform = rng.random_range(f32::MIN_POSITIVE..1.0);
     -(-uniform.ln()).ln()
 }

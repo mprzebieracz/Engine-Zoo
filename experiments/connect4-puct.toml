@@ -1,29 +1,18 @@
-format_version = 2
+format_version = 3
 seed = 1
 
 [model]
-game = "connect4"
-representation = "connect4-canonical"
-
-[model.network]
-architecture = "residual"
-
-[model.network.config.trunk.basic]
+architecture = "connect4-residual"
 blocks = 4
 channels = 64
-
-[model.network.config.policy_head.dense]
-channels = 2
-
-[model.network.config.value_head.scalar]
-hidden = 64
+value_head = { scalar = { hidden = 64 } }
 
 [self_play]
 num_games = 64
 threads = 4
 
-[self_play.search.Puct.common]
-simulations = 128
+[self_play.search]
+algorithm = "puct"
 leaf_batch_size = 4
 
 [self_play.budget_schedule.fixed.puct]
@@ -32,4 +21,3 @@ simulations = 128
 [training]
 batch_size = 512
 train_steps = 32
-

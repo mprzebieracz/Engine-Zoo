@@ -128,14 +128,14 @@ pub fn open_existing_run(root: &Path, expected_game: &str) -> Result<(RunDir, Ex
     })?;
     anyhow::ensure!(
         matches!(
-            (&cfg.model.game, expected_game),
-            (alphazero::GameSpec::Connect4, "connect4") | (alphazero::GameSpec::Chess, "chess")
+            (cfg.model.game(), expected_game),
+            (alphazero::GameKind::Connect4, "connect4") | (alphazero::GameKind::Chess, "chess")
         ),
         "run dir {} holds a {} run, not {}",
         root.display(),
-        match cfg.model.game {
-            alphazero::GameSpec::Connect4 => "connect4",
-            alphazero::GameSpec::Chess => "chess",
+        match cfg.model.game() {
+            alphazero::GameKind::Connect4 => "connect4",
+            alphazero::GameKind::Chess => "chess",
         },
         expected_game
     );

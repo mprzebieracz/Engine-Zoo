@@ -1,10 +1,11 @@
+use super::migration::{migrate_version_two, VersionTwoExperiment};
 use crate::{BatcherConfig, InferencePrecision, ModelSpec, SelfPlayConfig, TrainConfig};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const EXPERIMENT_FORMAT_VERSION: u32 = 2;
+pub const EXPERIMENT_FORMAT_VERSION: u32 = 3;
 
 /// Serializable duration used by immutable experiment files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +124,18 @@ pub struct ExperimentConfig {
 
 impl ExperimentConfig {
     pub fn read_toml(path: &Path) -> Result<Self> {
-        let config: Self = toml::from_str(&std::fs::read_to_string(path)?)?;
+        let contents = std::fs::read_to_string(path)?;
+        let version = toml::from_str::<toml::Value>(&contents)?
+            .get("format_version")
+            .and_then(toml::Value::as_integer)
+            .ok_or_else(|| anyhow::anyhow!("experiment format_version must be an integer"))?;
+        let config = match version {
+            2 => migrate_version_two(toml::from_str::<VersionTwoExperiment>(&contents)?)?,
+            version if version == i64::from(EXPERIMENT_FORMAT_VERSION) => {
+                toml::from_str(&contents)?
+            }
+            version => anyhow::bail!("unsupported experiment format version {version}"),
+        };
         config.validate()?;
         Ok(config)
     }

@@ -1,5 +1,8 @@
 use alphazero::representation::{AlphaZeroRepresentation, Connect4AzRepresentation};
-use alphazero::{Batcher, BatcherConfig, Mcts, ModelSpec, RepresentedEvaluator, SearchConfig};
+use alphazero::{
+    Batcher, BatcherConfig, Mcts, MctsSearchBudget, ModelSpec, RepresentedEvaluator, SearchConfig,
+    SearchRequest,
+};
 use anyhow::{Context, Result};
 use engine_core::agent::{Agent, PolicyMode};
 use engine_core::game::GameState;
@@ -143,7 +146,14 @@ impl<G: InteractiveGame> Agent<G> for AlphaZeroAgent<G> {
         let state = game.search_state();
         let result = self
             .mcts
-            .search(&state, game.search_context(), mode)
+            .search(
+                &state,
+                game.search_context(),
+                SearchRequest {
+                    mode,
+                    budget: MctsSearchBudget::Puct { simulations: 800 },
+                },
+            )
             .expect("AlphaZero inference failed");
         if is_puct && mode == PolicyMode::Explore {
             result.sample_move(&mut rand::rng())
@@ -154,12 +164,12 @@ impl<G: InteractiveGame> Agent<G> for AlphaZeroAgent<G> {
     }
 }
 
-fn puct_search(simulations: usize) -> SearchConfig {
-    let mut search = search::PuctConfig::default();
-    search.common.simulations = simulations.max(1);
-    search.common.leaf_batch_size = 1;
-    search.root_noise = None;
-    SearchConfig::Puct(search)
+fn puct_search(_simulations: usize) -> SearchConfig {
+    SearchConfig::Puct(search::PuctConfig {
+        leaf_batch_size: 1,
+        root_noise: None,
+        ..Default::default()
+    })
 }
 
 fn batcher_config(wait_for_count: usize, timeout: Duration) -> BatcherConfig {

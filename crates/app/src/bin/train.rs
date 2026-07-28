@@ -2,7 +2,7 @@ use alphazero::representation::{
     ChessAzRepresentation, ChessClassicRepresentation, Connect4AzRepresentation,
 };
 use alphazero::{
-    Batcher, ChessHistoryLength, ChessSelfPlayWorkerFactory, ExperimentConfig, GameSpec,
+    Batcher, ChessHistory, ChessSelfPlayWorkerFactory, ExperimentConfig, GameKind,
     GenericSelfPlayWorkerFactory, InferenceEngine, Network, ReplayBuffer, RunDir,
     SelfPlayCoordinator, SelfPlayEpoch,
 };
@@ -174,8 +174,8 @@ fn run(args: RunArgs) -> Result<()> {
             )?
         }
     };
-    match experiment.model.game {
-        GameSpec::Connect4 => run_connect4(
+    match experiment.model.game() {
+        GameKind::Connect4 => run_connect4(
             &args,
             &run,
             &experiment,
@@ -185,7 +185,7 @@ fn run(args: RunArgs) -> Result<()> {
             &batcher,
             device,
         ),
-        GameSpec::Chess => run_chess(
+        GameKind::Chess => run_chess(
             &args,
             &run,
             &experiment,
@@ -249,13 +249,13 @@ fn run_chess(
         .chess_history()
         .expect("validated chess model")
     {
-        ChessHistoryLength::One => {
+        ChessHistory::One => {
             run_chess_history::<1>(args, run, experiment, state, vs, net, batcher, device)
         }
-        ChessHistoryLength::Four => {
+        ChessHistory::Four => {
             run_chess_history::<4>(args, run, experiment, state, vs, net, batcher, device)
         }
-        ChessHistoryLength::Eight => {
+        ChessHistory::Eight => {
             run_chess_history::<8>(args, run, experiment, state, vs, net, batcher, device)
         }
     }

@@ -1,6 +1,7 @@
 /target
 /data/runs
 /benchmark
+/benchmark-results
 /scratch
 *.safetensors
 .vscode

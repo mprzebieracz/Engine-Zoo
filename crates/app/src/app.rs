@@ -1,6 +1,6 @@
 use crate::players::{AgentSpec, AlphaZeroAgent, HumanAgent, PlayerAgent};
 use crate::proxy::{open_existing_run, resolve_model, run_dir, serve, GameKind, ServeConfig};
-use alphazero::GameSpec;
+use alphazero::GameKind as ModelGameKind;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use engine_core::agent::{Agent, PolicyMode};
@@ -155,8 +155,8 @@ fn build_agent<G: crate::players::InteractiveGame>(
             let (_, cfg) = open_existing_run(run_dir, interactive_game_name::<G>())?;
             let weights = resolve_model(run_dir, model);
             let compatible = matches!(
-                (&cfg.model.game, interactive_game_name::<G>()),
-                (GameSpec::Connect4, "connect4")
+                (cfg.model.game(), interactive_game_name::<G>()),
+                (ModelGameKind::Connect4, "connect4")
             );
             anyhow::ensure!(
                 compatible,
