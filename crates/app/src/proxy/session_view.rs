@@ -36,9 +36,9 @@ pub(super) fn session_view(session: &LiveSession) -> serde_json::Value {
 pub(super) fn session_view_chess(session: &SessionState<ChessGame>) -> serde_json::Value {
     if let Some(history) = session.chess_history {
         let legal_moves = match history {
-            alphazero::ChessHistoryLength::One => chess_legal_moves::<1>(&session.game),
-            alphazero::ChessHistoryLength::Four => chess_legal_moves::<4>(&session.game),
-            alphazero::ChessHistoryLength::Eight => chess_legal_moves::<8>(&session.game),
+            alphazero::ChessHistory::One => chess_legal_moves::<1>(&session.game),
+            alphazero::ChessHistory::Four => chess_legal_moves::<4>(&session.game),
+            alphazero::ChessHistory::Eight => chess_legal_moves::<8>(&session.game),
         };
         return session_view_chess_with_legal(session, legal_moves);
     }

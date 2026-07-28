@@ -1,6 +1,9 @@
 use super::migration::migrate_old_config;
 use super::state::RunStateV1;
-use super::{ExperimentConfig, RunState, EXPERIMENT_FORMAT_VERSION, STATE_FORMAT_VERSION};
+use super::{
+    migration::{migrate_version_two, VersionTwoExperiment},
+    ExperimentConfig, RunState, STATE_FORMAT_VERSION,
+};
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::fs;
@@ -192,12 +195,25 @@ fn read_experiment(path: &Path) -> Result<ExperimentConfig> {
 }
 
 fn read_legacy_experiment(path: &Path) -> Result<ExperimentConfig> {
-    let config: ExperimentConfig = serde_json::from_str(&fs::read_to_string(path)?)
-        .with_context(|| format!("parsing {}", path.display()))?;
-    let config = match config.format_version {
-        1 => config.upgrade_from_v1()?,
-        version if version == EXPERIMENT_FORMAT_VERSION => config,
+    let contents = fs::read_to_string(path)?;
+    let version = serde_json::from_str::<serde_json::Value>(&contents)?
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+        .context("experiment format_version must be an unsigned integer")?;
+    let config = match version {
+        1 | 3 => serde_json::from_str::<ExperimentConfig>(&contents)
+            .with_context(|| format!("parsing {}", path.display()))?,
+        2 => migrate_version_two(
+            serde_json::from_str::<VersionTwoExperiment>(&contents)
+                .with_context(|| format!("parsing {}", path.display()))?,
+        )?,
         version => anyhow::bail!("unsupported experiment format version {version}"),
+    };
+    let config = if config.format_version == 1 {
+        config.upgrade_from_v1()?
+    }
+    else {
+        config
     };
     config.validate()?;
     Ok(config)

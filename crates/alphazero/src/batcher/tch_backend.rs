@@ -28,11 +28,13 @@ pub struct TchInferenceBackend {
 }
 
 enum LoadedModel {
-    Native {
-        vs: nn::VarStore,
-        net: crate::network::Network,
-    },
+    Native(Box<NativeModel>),
     TensorRtTorchScript(CModule),
+}
+
+struct NativeModel {
+    vs: nn::VarStore,
+    net: crate::network::Network,
 }
 
 impl TchInferenceBackend {
@@ -54,7 +56,7 @@ impl TchInferenceBackend {
             vs.half();
         }
         Ok(Self {
-            model: LoadedModel::Native { vs, net },
+            model: LoadedModel::Native(Box::new(NativeModel { vs, net })),
             spec,
             device,
             input_kind: match precision {
@@ -69,11 +71,23 @@ impl TchInferenceBackend {
         })
     }
 
-    pub fn new_tensor_rt_torchscript(spec: ModelSpec, module: &Path, device: Device) -> Result<Self> {
+    pub fn new_tensor_rt_torchscript(
+        spec: ModelSpec,
+        module: &Path,
+        device: Device,
+    ) -> Result<Self> {
         anyhow::ensure!(device.is_cuda(), "TensorRT inference requires CUDA");
-        anyhow::ensure!(module.is_file(), "missing TensorRT TorchScript module: {}", module.display());
-        let mut module = CModule::load_on_device(module, device)
-            .with_context(|| format!("loading TensorRT TorchScript module from {}", module.display()))?;
+        anyhow::ensure!(
+            module.is_file(),
+            "missing TensorRT TorchScript module: {}",
+            module.display()
+        );
+        let mut module = CModule::load_on_device(module, device).with_context(|| {
+            format!(
+                "loading TensorRT TorchScript module from {}",
+                module.display()
+            )
+        })?;
         module.set_eval();
         Ok(Self {
             model: LoadedModel::TensorRtTorchScript(module),
@@ -119,7 +133,8 @@ impl TchInferenceBackend {
 impl InferenceBackend for TchInferenceBackend {
     fn reload_weights(&mut self, weights: &Path) -> Result<()> {
         match &mut self.model {
-            LoadedModel::Native { vs, .. } => {
+            LoadedModel::Native(native) => {
+                let vs = &mut native.vs;
                 vs.float();
                 vs.load(weights)
                     .with_context(|| format!("loading network weights from {}", weights.display()))?;
@@ -175,9 +190,12 @@ impl TchInferenceBackend {
             .to_device_(self.device, Kind::Float, true, false)
             .to_kind(self.input_kind);
         let (policy, value) = match &self.model {
-            LoadedModel::Native { net, .. } => {
-                let output = net.forward_t(&inputs, false);
-                (output.policy_logits, output.value.expected_value().to_kind(Kind::Float))
+            LoadedModel::Native(native) => {
+                let output = native.net.forward_t(&inputs, false);
+                (
+                    output.policy_logits,
+                    output.value.expected_value().to_kind(Kind::Float),
+                )
             }
             LoadedModel::TensorRtTorchScript(module) => {
                 let output = module
@@ -193,7 +211,10 @@ impl TchInferenceBackend {
                     action_space + 1
                 );
                 let policy = output.narrow(1, 0, action_space);
-                let value = output.narrow(1, action_space, 1).squeeze_dim(1).to_kind(Kind::Float);
+                let value = output
+                    .narrow(1, action_space, 1)
+                    .squeeze_dim(1)
+                    .to_kind(Kind::Float);
                 (policy, value)
             }
         };

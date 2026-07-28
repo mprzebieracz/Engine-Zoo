@@ -203,18 +203,65 @@ impl crate::SearchRules<OnePly> for TerminalRule {
     }
 }
 
-fn puct(simulations: usize) -> SearchConfig {
-    let mut config = PuctConfig::default();
-    config.common.simulations = simulations;
-    config.root_noise = None;
-    SearchConfig::Puct(config)
+fn puct() -> SearchConfig {
+    SearchConfig::Puct(PuctConfig {
+        root_noise: None,
+        ..Default::default()
+    })
+}
+
+fn full_gumbel() -> SearchConfig {
+    SearchConfig::FullGumbel(FullGumbelConfig {
+        root: GumbelRootConfig {
+            gumbel_scale: 0.0,
+            ..Default::default()
+        },
+    })
+}
+
+fn root_gumbel_puct() -> SearchConfig {
+    SearchConfig::RootGumbelPuct(RootGumbelPuctConfig {
+        root: GumbelRootConfig {
+            gumbel_scale: 0.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+}
+
+fn puct_request(simulations: usize, mode: PolicyMode) -> SearchRequest {
+    SearchRequest {
+        mode,
+        budget: SearchBudget::Puct { simulations },
+    }
+}
+
+fn gumbel_request(simulations: usize, mode: PolicyMode) -> SearchRequest {
+    SearchRequest {
+        mode,
+        budget: SearchBudget::Gumbel {
+            simulations,
+            max_considered_actions: 2,
+        },
+    }
+}
+
+fn request_for(config: &SearchConfig, mode: PolicyMode) -> SearchRequest {
+    match config {
+        SearchConfig::Puct(_) => puct_request(1, mode),
+        SearchConfig::RootGumbelPuct(_) | SearchConfig::FullGumbel(_) => gumbel_request(1, mode),
+    }
 }
 
 #[test]
 fn puct_finds_terminal_win_and_returns_visit_policy() {
-    let mut search = Mcts::new(Uniform, puct(12), NoExtraRules);
+    let mut search = Mcts::new(Uniform, puct(), NoExtraRules);
     let result = search
-        .search(&OnePly::default(), (), PolicyMode::Deterministic)
+        .search(
+            &OnePly::default(),
+            (),
+            puct_request(12, PolicyMode::Deterministic),
+        )
         .unwrap();
     assert_eq!(result.best_move(), Move::Win);
     assert!(
@@ -232,9 +279,13 @@ fn puct_finds_terminal_win_and_returns_visit_policy() {
 
 #[test]
 fn puct_tactical_fixture_keeps_the_forced_win_after_backup() {
-    let mut search = Mcts::new(Uniform, puct(8), NoExtraRules);
+    let mut search = Mcts::new(Uniform, puct(), NoExtraRules);
     let result = search
-        .search(&OnePly::default(), (), PolicyMode::Deterministic)
+        .search(
+            &OnePly::default(),
+            (),
+            puct_request(8, PolicyMode::Deterministic),
+        )
         .unwrap();
 
     assert_eq!(result.best_move(), Move::Win);
@@ -245,15 +296,13 @@ fn puct_tactical_fixture_keeps_the_forced_win_after_backup() {
 
 #[test]
 fn full_gumbel_is_sequential_and_policy_covers_all_legal_actions() {
-    let config = SearchConfig::Gumbel(GumbelConfig {
-        simulations: 8,
-        max_considered_actions: 2,
-        gumbel_scale: 0.0,
-        ..GumbelConfig::default()
-    });
-    let mut search = Mcts::new(Uniform, config, NoExtraRules);
+    let mut search = Mcts::new(Uniform, full_gumbel(), NoExtraRules);
     let result = search
-        .search(&OnePly::default(), (), PolicyMode::Explore)
+        .search(
+            &OnePly::default(),
+            (),
+            gumbel_request(8, PolicyMode::Explore),
+        )
         .unwrap();
     assert_eq!(result.diagnostics.completed_simulations, 8);
     assert_eq!(result.diagnostics.backend_evaluations, 1);
@@ -272,10 +321,30 @@ fn full_gumbel_is_sequential_and_policy_covers_all_legal_actions() {
 }
 
 #[test]
+fn root_gumbel_puct_uses_the_gumbel_budget_and_keeps_the_forced_win() {
+    let mut search = Mcts::new(Uniform, root_gumbel_puct(), NoExtraRules);
+    let result = search
+        .search(
+            &OnePly::default(),
+            (),
+            gumbel_request(8, PolicyMode::Deterministic),
+        )
+        .unwrap();
+
+    assert_eq!(result.best_move(), Move::Win);
+    assert_eq!(result.diagnostics.completed_simulations, 8);
+    assert_eq!(result.policy.len(), 3);
+}
+
+#[test]
 fn evaluation_failure_is_reported_without_fabricating_a_value() {
-    let mut search = Mcts::new(Failing, puct(1), NoExtraRules);
+    let mut search = Mcts::new(Failing, puct(), NoExtraRules);
     let error = search
-        .search(&OnePly::default(), (), PolicyMode::Deterministic)
+        .search(
+            &OnePly::default(),
+            (),
+            puct_request(1, PolicyMode::Deterministic),
+        )
         .unwrap_err();
     assert_eq!(
         error.to_string(),
@@ -285,9 +354,13 @@ fn evaluation_failure_is_reported_without_fabricating_a_value() {
 
 #[test]
 fn malformed_evaluator_cardinality_is_a_typed_error() {
-    let mut search = Mcts::new(WrongCardinality, puct(1), NoExtraRules);
+    let mut search = Mcts::new(WrongCardinality, puct(), NoExtraRules);
     let error = search
-        .search(&OnePly::default(), (), PolicyMode::Deterministic)
+        .search(
+            &OnePly::default(),
+            (),
+            puct_request(1, PolicyMode::Deterministic),
+        )
         .unwrap_err();
     assert!(matches!(
         error,
@@ -300,11 +373,13 @@ fn malformed_evaluator_cardinality_is_a_typed_error() {
 
 #[test]
 fn invalid_algorithm_configs_are_rejected() {
-    let mut puct = PuctConfig::default();
-    puct.common.leaf_batch_size = 0;
+    let puct = PuctConfig {
+        leaf_batch_size: 0,
+        ..Default::default()
+    };
     assert!(puct.validate().is_err());
-    let gumbel = GumbelConfig {
-        max_considered_actions: 0,
+    let gumbel = RootGumbelPuctConfig {
+        leaf_batch_size: 0,
         ..Default::default()
     };
     assert!(gumbel.validate().is_err());
@@ -312,19 +387,13 @@ fn invalid_algorithm_configs_are_rejected() {
 
 #[test]
 fn native_terminal_roots_skip_evaluation_for_both_searches() {
-    for config in [
-        puct(1),
-        SearchConfig::Gumbel(GumbelConfig {
-            simulations: 1,
-            max_considered_actions: 1,
-            ..GumbelConfig::default()
-        }),
-    ] {
+    for config in [puct(), full_gumbel(), root_gumbel_puct()] {
         let calls = Arc::new(AtomicUsize::new(0));
         let evaluator = Counting {
             calls: Arc::clone(&calls),
             namespace: Arc::new(AtomicU64::new(0)),
         };
+        let request = request_for(&config, PolicyMode::Deterministic);
         let mut search = Mcts::new(evaluator, config, NoExtraRules);
         let error = search
             .search(
@@ -332,7 +401,7 @@ fn native_terminal_roots_skip_evaluation_for_both_searches() {
                     outcome: Some(TerminalValue::Draw),
                 },
                 (),
-                PolicyMode::Deterministic,
+                request,
             )
             .unwrap_err();
         assert!(matches!(error, SearchError::TerminalRoot { .. }));
@@ -342,22 +411,16 @@ fn native_terminal_roots_skip_evaluation_for_both_searches() {
 
 #[test]
 fn rule_terminal_roots_skip_evaluation() {
-    for config in [
-        puct(1),
-        SearchConfig::Gumbel(GumbelConfig {
-            simulations: 1,
-            max_considered_actions: 1,
-            ..GumbelConfig::default()
-        }),
-    ] {
+    for config in [puct(), full_gumbel(), root_gumbel_puct()] {
         let calls = Arc::new(AtomicUsize::new(0));
         let evaluator = Counting {
             calls: Arc::clone(&calls),
             namespace: Arc::new(AtomicU64::new(0)),
         };
+        let request = request_for(&config, PolicyMode::Deterministic);
         let mut search = Mcts::new(evaluator, config, TerminalRule);
         assert!(matches!(
-            search.search(&OnePly::default(), (), PolicyMode::Deterministic),
+            search.search(&OnePly::default(), (), request),
             Err(SearchError::TerminalRoot {
                 value: PositionValue::DRAW
             })
@@ -368,9 +431,13 @@ fn rule_terminal_roots_skip_evaluation() {
 
 #[test]
 fn non_finite_logits_are_typed_evaluator_errors() {
-    let mut search = Mcts::new(NonFiniteLogit, puct(1), NoExtraRules);
+    let mut search = Mcts::new(NonFiniteLogit, puct(), NoExtraRules);
     assert!(matches!(
-        search.search(&OnePly::default(), (), PolicyMode::Deterministic),
+        search.search(
+            &OnePly::default(),
+            (),
+            puct_request(1, PolicyMode::Deterministic)
+        ),
         Err(SearchError::Evaluation(EvaluationError::NonFiniteLogit {
             row: 0,
             index: 1,
@@ -380,9 +447,13 @@ fn non_finite_logits_are_typed_evaluator_errors() {
 
 #[test]
 fn malformed_logit_counts_are_typed_evaluator_errors() {
-    let mut search = Mcts::new(WrongLogitCount, puct(1), NoExtraRules);
+    let mut search = Mcts::new(WrongLogitCount, puct(), NoExtraRules);
     assert!(matches!(
-        search.search(&OnePly::default(), (), PolicyMode::Deterministic),
+        search.search(
+            &OnePly::default(),
+            (),
+            puct_request(1, PolicyMode::Deterministic)
+        ),
         Err(SearchError::Evaluation(EvaluationError::LogitCardinality {
             row: 0,
             expected: 3,
@@ -393,22 +464,16 @@ fn malformed_logit_counts_are_typed_evaluator_errors() {
 
 #[test]
 fn nonterminal_roots_without_legal_moves_skip_evaluation() {
-    for config in [
-        puct(1),
-        SearchConfig::Gumbel(GumbelConfig {
-            simulations: 1,
-            max_considered_actions: 1,
-            ..GumbelConfig::default()
-        }),
-    ] {
+    for config in [puct(), full_gumbel(), root_gumbel_puct()] {
         let calls = Arc::new(AtomicUsize::new(0));
         let evaluator = Counting {
             calls: Arc::clone(&calls),
             namespace: Arc::new(AtomicU64::new(0)),
         };
+        let request = request_for(&config, PolicyMode::Deterministic);
         let mut search = Mcts::new(evaluator, config, NoExtraRules);
         assert!(matches!(
-            search.search(&NoMoves, (), PolicyMode::Deterministic),
+            search.search(&NoMoves, (), request),
             Err(SearchError::NoLegalMoves)
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -424,24 +489,35 @@ fn cache_namespace_invalidates_previous_model_results() {
         namespace: Arc::clone(&namespace),
     };
     let cache = Arc::new(EvalTable::new(64));
-    let mut search =
-        Mcts::new(evaluator, puct(1), NoExtraRules).with_eval_cache(Arc::clone(&cache));
+    let mut search = Mcts::new(evaluator, puct(), NoExtraRules).with_eval_cache(Arc::clone(&cache));
 
     let first = search
-        .search(&OnePly::default(), (), PolicyMode::Deterministic)
+        .search(
+            &OnePly::default(),
+            (),
+            puct_request(1, PolicyMode::Deterministic),
+        )
         .unwrap();
     assert_eq!(first.diagnostics.backend_evaluations, 1);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 
     let hit = search
-        .search(&OnePly::default(), (), PolicyMode::Deterministic)
+        .search(
+            &OnePly::default(),
+            (),
+            puct_request(1, PolicyMode::Deterministic),
+        )
         .unwrap();
     assert_eq!(hit.diagnostics.backend_evaluations, 0);
     assert_eq!(hit.diagnostics.evaluation_cache_hits, 1);
 
     namespace.store(1, Ordering::Release);
     let reloaded = search
-        .search(&OnePly::default(), (), PolicyMode::Deterministic)
+        .search(
+            &OnePly::default(),
+            (),
+            puct_request(1, PolicyMode::Deterministic),
+        )
         .unwrap();
     assert_eq!(reloaded.diagnostics.backend_evaluations, 1);
     assert_eq!(calls.load(Ordering::Relaxed), 2);

@@ -3,12 +3,15 @@ mod core;
 mod evaluation;
 mod gumbel;
 mod puct;
+mod root_gumbel_puct;
+
 mod traversal;
 
 #[cfg(test)]
 mod tests;
 
 use crate::PositionValue;
+use engine_core::agent::PolicyMode;
 use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -18,9 +21,52 @@ use std::fmt;
 pub use cache::{EvalTable, EvalTableStats};
 pub use core::Mcts;
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "algorithm", rename_all = "kebab-case")]
 pub enum SearchConfig {
     Puct(PuctConfig),
-    Gumbel(GumbelConfig),
+    RootGumbelPuct(RootGumbelPuctConfig),
+    FullGumbel(FullGumbelConfig),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SearchAlgorithm {
+    Puct,
+    RootGumbelPuct,
+    FullGumbel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SearchBudget {
+    Puct {
+        simulations: usize,
+    },
+    Gumbel {
+        simulations: usize,
+        max_considered_actions: usize,
+    },
+}
+
+impl SearchBudget {
+    fn validate(self) -> Result<(), &'static str> {
+        match self {
+            Self::Puct { simulations } if simulations > 0 => Ok(()),
+            Self::Gumbel {
+                simulations,
+                max_considered_actions,
+            } if simulations > 0 && max_considered_actions > 0 => Ok(()),
+            Self::Puct { .. } => Err("PUCT simulations must be positive"),
+            Self::Gumbel { simulations: 0, .. } => Err("Gumbel simulations must be positive"),
+            Self::Gumbel { .. } => Err("Gumbel max_considered_actions must be positive"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SearchRequest {
+    pub mode: PolicyMode,
+    pub budget: SearchBudget,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,7 +84,8 @@ impl SearchConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
             Self::Puct(config) => config.validate(),
-            Self::Gumbel(config) => config.validate(),
+            Self::RootGumbelPuct(config) => config.validate(),
+            Self::FullGumbel(config) => config.validate(),
         }
     }
 }
@@ -49,26 +96,10 @@ impl Default for SearchConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CommonSearchConfig {
-    pub simulations: usize,
-    pub leaf_batch_size: usize,
-}
-
-impl Default for CommonSearchConfig {
-    fn default() -> Self {
-        Self {
-            simulations: 800,
-            leaf_batch_size: 1,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PuctConfig {
-    pub common: CommonSearchConfig,
+    pub leaf_batch_size: usize,
     pub selection: PuctSelectionConfig,
     pub fpu: FpuConfig,
     pub in_flight: InFlightConfig,
@@ -78,7 +109,7 @@ pub struct PuctConfig {
 impl Default for PuctConfig {
     fn default() -> Self {
         Self {
-            common: CommonSearchConfig::default(),
+            leaf_batch_size: 1,
             selection: PuctSelectionConfig::default(),
             fpu: FpuConfig::default(),
             in_flight: InFlightConfig::UnscoredVirtualVisits,
@@ -89,10 +120,7 @@ impl Default for PuctConfig {
 
 impl PuctConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.common.simulations == 0 {
-            return Err("PUCT simulations must be positive");
-        }
-        if self.common.leaf_batch_size == 0 {
+        if self.leaf_batch_size == 0 {
             return Err("PUCT leaf_batch_size must be positive");
         }
         self.selection.validate()?;
@@ -102,6 +130,31 @@ impl PuctConfig {
             noise.validate()?;
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct PuctTreeConfig {
+    pub selection: PuctSelectionConfig,
+    pub fpu: FpuConfig,
+    pub in_flight: InFlightConfig,
+}
+
+impl From<&PuctConfig> for PuctTreeConfig {
+    fn from(config: &PuctConfig) -> Self {
+        Self {
+            selection: config.selection,
+            fpu: config.fpu,
+            in_flight: config.in_flight,
+        }
+    }
+}
+
+impl PuctTreeConfig {
+    fn validate(self) -> Result<(), &'static str> {
+        self.selection.validate()?;
+        self.fpu.validate()?;
+        self.in_flight.validate()
     }
 }
 
@@ -222,36 +275,67 @@ impl DirichletConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub struct GumbelConfig {
-    pub simulations: usize,
-    pub max_considered_actions: usize,
+pub struct GumbelRootConfig {
     pub gumbel_scale: f32,
-    pub qtransform: CompletedQConfig,
+    pub completed_q: CompletedQConfig,
 }
 
-impl Default for GumbelConfig {
+impl Default for GumbelRootConfig {
     fn default() -> Self {
         Self {
-            simulations: 128,
-            max_considered_actions: 16,
             gumbel_scale: 1.0,
-            qtransform: CompletedQConfig::default(),
+            completed_q: CompletedQConfig::default(),
         }
     }
 }
 
-impl GumbelConfig {
+impl GumbelRootConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.simulations == 0 {
-            return Err("Gumbel simulations must be positive");
-        }
-        if self.max_considered_actions == 0 {
-            return Err("Gumbel max_considered_actions must be positive");
-        }
         if !self.gumbel_scale.is_finite() || self.gumbel_scale < 0.0 {
             return Err("Gumbel scale must be finite and non-negative");
         }
-        self.qtransform.validate()
+        self.completed_q.validate()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RootGumbelPuctConfig {
+    pub leaf_batch_size: usize,
+    pub puct: PuctTreeConfig,
+    pub root: GumbelRootConfig,
+}
+
+impl Default for RootGumbelPuctConfig {
+    fn default() -> Self {
+        Self {
+            leaf_batch_size: 1,
+            puct: PuctTreeConfig::from(&PuctConfig::default()),
+            root: GumbelRootConfig::default(),
+        }
+    }
+}
+
+impl RootGumbelPuctConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.leaf_batch_size == 0 {
+            return Err("root-Gumbel-PUCT leaf_batch_size must be positive");
+        }
+
+        self.puct.validate()?;
+        self.root.validate()
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FullGumbelConfig {
+    pub root: GumbelRootConfig,
+}
+
+impl FullGumbelConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.root.validate()
     }
 }
 
@@ -314,12 +398,22 @@ pub struct SearchDiagnostics {
     pub evaluation_cache_hits: usize,
     pub evaluation_cache_misses: usize,
     pub duplicate_leaves: usize,
+    pub nodes_created: usize,
     pub max_depth: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SearchError {
-    TerminalRoot { value: PositionValue },
+    InvalidBudget {
+        message: &'static str,
+    },
+    BudgetAlgorithmMismatch {
+        algorithm: SearchAlgorithm,
+        budget: SearchBudget,
+    },
+    TerminalRoot {
+        value: PositionValue,
+    },
     NoLegalMoves,
     Evaluation(crate::EvaluationError),
 }
@@ -327,6 +421,13 @@ pub enum SearchError {
 impl fmt::Display for SearchError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidBudget { message } => formatter.write_str(message),
+            Self::BudgetAlgorithmMismatch { algorithm, budget } => {
+                write!(
+                    formatter,
+                    "{algorithm:?} search cannot use {budget:?} budget"
+                )
+            }
             Self::TerminalRoot { value } => {
                 write!(
                     formatter,

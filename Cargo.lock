@@ -469,6 +469,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-bench"
+version = "0.1.0"
+dependencies = [
+ "alphazero",
+ "anyhow",
+ "clap",
+ "engine_core",
+ "games",
+ "rand 0.9.4",
+ "search",
+ "serde",
+ "serde_json",
+ "tch",
+]
+
+[[package]]
 name = "engine_app"
 version = "0.1.0"
 dependencies = [

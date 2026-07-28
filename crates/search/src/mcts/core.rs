@@ -1,26 +1,11 @@
 use super::cache::EvalTable;
-use super::{CommonSearchConfig, GumbelConfig, Node, SearchConfig};
+use super::{Node, SearchAlgorithm, SearchBudget, SearchConfig, SearchRequest};
 use crate::{PolicyValueEvaluator, SearchRules};
 use engine_core::game::GameState;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use std::marker::PhantomData;
 use std::sync::Arc;
-
-#[derive(Clone, Copy, Debug)]
-pub(super) struct CoreConfig {
-    pub(super) simulations: usize,
-    pub(super) leaf_batch_size: usize,
-}
-
-impl From<CommonSearchConfig> for CoreConfig {
-    fn from(config: CommonSearchConfig) -> Self {
-        Self {
-            simulations: config.simulations,
-            leaf_batch_size: config.leaf_batch_size,
-        }
-    }
-}
 
 pub struct Mcts<G, E, R>
 where
@@ -38,7 +23,8 @@ where
     R: SearchRules<G>,
 {
     Puct(MctsCore<G, E, R, super::puct::Puct>),
-    Gumbel(MctsCore<G, E, R, super::gumbel::FullGumbel>),
+    RootGumbelPuct(MctsCore<G, E, R, super::root_gumbel_puct::RootGumbelPuct>),
+    FullGumbel(MctsCore<G, E, R, super::gumbel::FullGumbel>),
 }
 
 pub(super) struct MctsCore<G, E, R, V>
@@ -50,7 +36,6 @@ where
 {
     pub(super) evaluator: E,
     pub(super) rules: R,
-    pub(super) cfg: CoreConfig,
     pub(super) nodes: Vec<Node<G::Move, R::NodeMeta>>,
     pub(super) legal_moves: Vec<G::Move>,
     pub(super) offsets: Vec<u32>,
@@ -125,12 +110,7 @@ where
         rules: R,
     ) -> Result<Self, super::SearchConfigError> {
         config.validate().map_err(super::SearchConfigError)?;
-        fn make_core<G, E, R, V>(
-            evaluator: E,
-            rules: R,
-            cfg: CoreConfig,
-            variant: V,
-        ) -> MctsCore<G, E, R, V>
+        fn make_core<G, E, R, V>(evaluator: E, rules: R, variant: V) -> MctsCore<G, E, R, V>
         where
             G: GameState + Clone,
             E: PolicyValueEvaluator<G>,
@@ -140,7 +120,6 @@ where
             MctsCore {
                 evaluator,
                 rules,
-                cfg,
                 nodes: Vec::new(),
                 legal_moves: Vec::new(),
                 offsets: Vec::new(),
@@ -154,26 +133,18 @@ where
         }
         let inner = match config {
             SearchConfig::Puct(config) => {
-                let core = CoreConfig::from(config.common);
-                MctsKind::Puct(make_core(
-                    evaluator,
-                    rules,
-                    core,
-                    super::puct::Puct::from(config),
-                ))
+                MctsKind::Puct(make_core(evaluator, rules, super::puct::Puct::from(config)))
             }
-            SearchConfig::Gumbel(config) => {
-                let core = CoreConfig {
-                    simulations: config.simulations,
-                    leaf_batch_size: 1,
-                };
-                MctsKind::Gumbel(make_core(
-                    evaluator,
-                    rules,
-                    core,
-                    super::gumbel::FullGumbel::from(config),
-                ))
-            }
+            SearchConfig::RootGumbelPuct(config) => MctsKind::RootGumbelPuct(make_core(
+                evaluator,
+                rules,
+                super::root_gumbel_puct::RootGumbelPuct::from(config),
+            )),
+            SearchConfig::FullGumbel(config) => MctsKind::FullGumbel(make_core(
+                evaluator,
+                rules,
+                super::gumbel::FullGumbel::from(config),
+            )),
         };
         Ok(Self { inner })
     }
@@ -181,7 +152,8 @@ where
     pub fn with_eval_cache(mut self, cache: Arc<EvalTable<G::Move>>) -> Self {
         match &mut self.inner {
             MctsKind::Puct(core) => core.eval_cache = Some(cache.clone()),
-            MctsKind::Gumbel(core) => core.eval_cache = Some(cache),
+            MctsKind::RootGumbelPuct(core) => core.eval_cache = Some(cache.clone()),
+            MctsKind::FullGumbel(core) => core.eval_cache = Some(cache),
         }
         self
     }
@@ -196,37 +168,26 @@ where
     pub fn reseed(&mut self, seed: u64) {
         match &mut self.inner {
             MctsKind::Puct(core) => core.rng = SmallRng::seed_from_u64(seed),
-            MctsKind::Gumbel(core) => core.rng = SmallRng::seed_from_u64(seed),
+            MctsKind::RootGumbelPuct(core) => core.rng = SmallRng::seed_from_u64(seed),
+            MctsKind::FullGumbel(core) => core.rng = SmallRng::seed_from_u64(seed),
         }
     }
 
     pub fn config(&self) -> SearchConfig {
         match &self.inner {
-            MctsKind::Puct(core) => SearchConfig::Puct(core.variant.config(core.cfg)),
-            MctsKind::Gumbel(core) => SearchConfig::Gumbel(core.variant.config.clone()),
+            MctsKind::Puct(core) => SearchConfig::Puct(core.variant.config()),
+            MctsKind::RootGumbelPuct(core) => {
+                SearchConfig::RootGumbelPuct(core.variant.config.clone())
+            }
+            MctsKind::FullGumbel(core) => SearchConfig::FullGumbel(core.variant.config.clone()),
         }
     }
 
-    pub fn set_simulations(&mut self, simulations: usize) {
-        assert!(simulations > 0, "search simulations must be positive");
-        match &mut self.inner {
-            MctsKind::Puct(core) => core.cfg.simulations = simulations,
-            MctsKind::Gumbel(core) => {
-                core.cfg.simulations = simulations;
-                core.variant.config.simulations = simulations;
-            }
-        }
-    }
-
-    pub fn set_gumbel_config(&mut self, config: GumbelConfig) -> Result<(), &'static str> {
-        config.validate()?;
-        match &mut self.inner {
-            MctsKind::Gumbel(core) => {
-                core.cfg.simulations = config.simulations;
-                core.variant.config = config;
-                Ok(())
-            }
-            MctsKind::Puct(_) => Err("Gumbel configuration requires Full Gumbel search"),
+    pub fn algorithm(&self) -> SearchAlgorithm {
+        match &self.inner {
+            MctsKind::Puct(_) => SearchAlgorithm::Puct,
+            MctsKind::RootGumbelPuct(_) => SearchAlgorithm::RootGumbelPuct,
+            MctsKind::FullGumbel(_) => SearchAlgorithm::FullGumbel,
         }
     }
 
@@ -234,11 +195,54 @@ where
         &mut self,
         game: &G,
         context: R::Context<'_>,
-        mode: engine_core::agent::PolicyMode,
+        request: SearchRequest,
     ) -> Result<super::SearchResult<G::Move>, super::SearchError> {
+        request
+            .budget
+            .validate()
+            .map_err(|message| super::SearchError::InvalidBudget { message })?;
         match &mut self.inner {
-            MctsKind::Puct(core) => core.search_inner(game, context, mode),
-            MctsKind::Gumbel(core) => core.search_inner(game, context, mode),
+            MctsKind::Puct(core) => match request.budget {
+                SearchBudget::Puct { simulations } => {
+                    core.search_inner(game, context, request.mode, simulations)
+                }
+                budget => Err(super::SearchError::BudgetAlgorithmMismatch {
+                    algorithm: SearchAlgorithm::Puct,
+                    budget,
+                }),
+            },
+            MctsKind::RootGumbelPuct(core) => match request.budget {
+                SearchBudget::Gumbel {
+                    simulations,
+                    max_considered_actions,
+                } => core.search_inner(
+                    game,
+                    context,
+                    request.mode,
+                    simulations,
+                    max_considered_actions,
+                ),
+                budget => Err(super::SearchError::BudgetAlgorithmMismatch {
+                    algorithm: SearchAlgorithm::RootGumbelPuct,
+                    budget,
+                }),
+            },
+            MctsKind::FullGumbel(core) => match request.budget {
+                SearchBudget::Gumbel {
+                    simulations,
+                    max_considered_actions,
+                } => core.search_inner(
+                    game,
+                    context,
+                    request.mode,
+                    simulations,
+                    max_considered_actions,
+                ),
+                budget => Err(super::SearchError::BudgetAlgorithmMismatch {
+                    algorithm: SearchAlgorithm::FullGumbel,
+                    budget,
+                }),
+            },
         }
     }
 }

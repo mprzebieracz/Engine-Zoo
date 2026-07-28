@@ -1,7 +1,7 @@
 use alphazero::representation::{ChessAzRepresentation, ChessClassicRepresentation};
 use alphazero::ChessRepetitionRules;
 use alphazero::{
-    Batcher, BatcherConfig, ChessHistoryLength, ExperimentConfig, GameSpec, Mcts, ModelSpec,
+    Batcher, BatcherConfig, ChessHistory, ExperimentConfig, GameKind, Mcts, ModelSpec,
     RepresentedEvaluator, RunDir, SearchConfig,
 };
 use anyhow::{Context, Result};
@@ -126,13 +126,13 @@ impl ChessUciEngine {
         let model = &self.loaded.as_ref().expect("model loaded").model;
         let sampled = self.position_moves.len() < self.settings.opening_plies;
         let bestmove = match model.chess_history() {
-            Some(ChessHistoryLength::One) => {
+            Some(ChessHistory::One) => {
                 chess_action::<1>(evaluator, &self.game, simulations, sampled)
             }
-            Some(ChessHistoryLength::Four) => {
+            Some(ChessHistory::Four) => {
                 chess_action::<4>(evaluator, &self.game, simulations, sampled)
             }
-            Some(ChessHistoryLength::Eight) => {
+            Some(ChessHistory::Eight) => {
                 chess_action::<8>(evaluator, &self.game, simulations, sampled)
             }
             None if model.is_chess_classic() => {
@@ -155,16 +155,7 @@ fn classic_chess_action(
         puct_search(simulations),
         NoExtraRules,
     );
-    let result = mcts.search(
-        &game.position(),
-        (),
-        if sampled {
-            PolicyMode::Explore
-        }
-        else {
-            PolicyMode::Deterministic
-        },
-    )?;
+    let result = mcts.search(&game.position(), (), search_request(simulations, sampled))?;
     let mv = if sampled {
         result.sample_move(&mut rand::rng())
     }
@@ -188,12 +179,7 @@ fn chess_action<const HISTORY: usize>(
     let result = mcts.search(
         &alphazero::representation::ChessAzState::from_game(game),
         game.repetition_context(),
-        if sampled {
-            PolicyMode::Explore
-        }
-        else {
-            PolicyMode::Deterministic
-        },
+        search_request(simulations, sampled),
     )?;
     let mv = if sampled {
         result.sample_move(&mut rand::rng())
@@ -209,7 +195,7 @@ fn load_config_and_model(run_dir: &Path, model: &str) -> Result<(PathBuf, Experi
         panic!("no experiment found at {}", run_dir.display())
     })?;
     anyhow::ensure!(
-        config.model.game == GameSpec::Chess,
+        config.model.game() == GameKind::Chess,
         "run is not a chess model"
     );
     let path = PathBuf::from(model);
@@ -255,12 +241,26 @@ fn existing_classic_checkpoint(run_dir: &Path, name: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-fn puct_search(simulations: usize) -> SearchConfig {
-    let mut search = search::PuctConfig::default();
-    search.common.simulations = simulations.max(1);
-    search.common.leaf_batch_size = 1;
-    search.root_noise = None;
-    SearchConfig::Puct(search)
+fn puct_search(_simulations: usize) -> SearchConfig {
+    SearchConfig::Puct(search::PuctConfig {
+        leaf_batch_size: 1,
+        root_noise: None,
+        ..Default::default()
+    })
+}
+
+fn search_request(simulations: usize, sampled: bool) -> alphazero::SearchRequest {
+    alphazero::SearchRequest {
+        mode: if sampled {
+            PolicyMode::Explore
+        }
+        else {
+            PolicyMode::Deterministic
+        },
+        budget: alphazero::MctsSearchBudget::Puct {
+            simulations: simulations.max(1),
+        },
+    }
 }
 
 fn batcher_config() -> BatcherConfig {

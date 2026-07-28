@@ -1,5 +1,6 @@
 use anyhow::{ensure, Result};
-use search::SearchConfig;
+use engine_core::agent::PolicyMode;
+use search::{SearchConfig, SearchRequest};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,7 +26,8 @@ impl SearchBudget {
         matches!(
             (self, search),
             (Self::Puct { .. }, SearchConfig::Puct(_))
-                | (Self::Gumbel { .. }, SearchConfig::Gumbel(_))
+                | (Self::Gumbel { .. }, SearchConfig::RootGumbelPuct(_))
+                | (Self::Gumbel { .. }, SearchConfig::FullGumbel(_))
         )
     }
 
@@ -64,13 +66,13 @@ pub enum SearchBudgetSchedule {
 impl SearchBudgetSchedule {
     pub fn fixed(search: &SearchConfig) -> Self {
         match search {
-            SearchConfig::Puct(config) => Self::Fixed(SearchBudget::Puct {
-                simulations: config.common.simulations,
-            }),
-            SearchConfig::Gumbel(config) => Self::Fixed(SearchBudget::Gumbel {
-                simulations: config.simulations,
-                max_considered_actions: config.max_considered_actions,
-            }),
+            SearchConfig::Puct(_) => Self::Fixed(SearchBudget::Puct { simulations: 800 }),
+            SearchConfig::RootGumbelPuct(_) | SearchConfig::FullGumbel(_) => {
+                Self::Fixed(SearchBudget::Gumbel {
+                    simulations: 128,
+                    max_considered_actions: 16,
+                })
+            }
         }
     }
 
@@ -122,6 +124,28 @@ impl SearchBudgetSchedule {
             }
         }
         Ok(())
+    }
+}
+
+impl From<SearchBudget> for search::SearchBudget {
+    fn from(budget: SearchBudget) -> Self {
+        match budget {
+            SearchBudget::Puct { simulations } => Self::Puct { simulations },
+            SearchBudget::Gumbel {
+                simulations,
+                max_considered_actions,
+            } => Self::Gumbel {
+                simulations,
+                max_considered_actions,
+            },
+        }
+    }
+}
+
+pub(crate) fn search_request(budget: SearchBudget, mode: PolicyMode) -> SearchRequest {
+    SearchRequest {
+        mode,
+        budget: budget.into(),
     }
 }
 

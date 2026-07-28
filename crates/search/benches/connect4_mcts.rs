@@ -35,25 +35,24 @@ fn main() {
     let mut mcts = Mcts::new(
         UniformEvaluator,
         SearchConfig::Puct(PuctConfig {
-            common: search::CommonSearchConfig {
-                simulations: SIMULATIONS,
-                leaf_batch_size: 1,
-            },
+            leaf_batch_size: 1,
             root_noise: None,
             ..PuctConfig::default()
         }),
         NoExtraRules,
     );
 
-    let _ = mcts.search(&game, (), PolicyMode::Deterministic);
+    let request = search::SearchRequest {
+        mode: PolicyMode::Deterministic,
+        budget: search::SearchBudget::Puct {
+            simulations: SIMULATIONS,
+        },
+    };
+    let _ = mcts.search(&game, (), request);
     let started = Instant::now();
     for _ in 0..SEARCHES {
-        std::hint::black_box(mcts.search(
-            std::hint::black_box(&game),
-            (),
-            PolicyMode::Deterministic,
-        ))
-        .expect("uniform benchmark evaluation must succeed");
+        std::hint::black_box(mcts.search(std::hint::black_box(&game), (), request))
+            .expect("uniform benchmark evaluation must succeed");
     }
 
     let elapsed = started.elapsed();

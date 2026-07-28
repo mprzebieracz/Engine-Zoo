@@ -9,7 +9,6 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use clap::ValueEnum;
-use engine_core::agent::PolicyMode;
 use engine_core::game::GameState;
 use games::chess::notation;
 use games::setup::{ChessSetup, Connect4Setup, GameSetup};
@@ -41,12 +40,12 @@ use crate::visualization::render_chess_play_page;
 
 const BATCH_TIMEOUT: Duration = Duration::from_millis(2);
 
-fn puct_search(simulations: usize) -> SearchConfig {
-    let mut search = search::PuctConfig::default();
-    search.common.simulations = simulations.max(1);
-    search.common.leaf_batch_size = 1;
-    search.root_noise = None;
-    SearchConfig::Puct(search)
+fn puct_search(_simulations: usize) -> SearchConfig {
+    SearchConfig::Puct(search::PuctConfig {
+        leaf_batch_size: 1,
+        root_noise: None,
+        ..Default::default()
+    })
 }
 
 fn batcher_config(wait_for_count: usize, timeout: Duration) -> BatcherConfig {
@@ -128,7 +127,7 @@ struct SessionState<G: GameState> {
     human_turn: bool,
     simulations: usize,
     wait_for_count: usize,
-    chess_history: Option<alphazero::ChessHistoryLength>,
+    chess_history: Option<alphazero::ChessHistory>,
 }
 
 pub async fn serve(cfg: ServeConfig) -> Result<()> {
@@ -243,9 +242,9 @@ mod tests {
             simulations: 1,
             wait_for_count: 1,
             chess_history: Some(match HISTORY {
-                1 => alphazero::ChessHistoryLength::One,
-                4 => alphazero::ChessHistoryLength::Four,
-                8 => alphazero::ChessHistoryLength::Eight,
+                1 => alphazero::ChessHistory::One,
+                4 => alphazero::ChessHistory::Four,
+                8 => alphazero::ChessHistory::Eight,
                 _ => unreachable!(),
             }),
         };
@@ -278,9 +277,9 @@ mod tests {
         assert_eq!(
             session.chess_history,
             Some(match HISTORY {
-                1 => alphazero::ChessHistoryLength::One,
-                4 => alphazero::ChessHistoryLength::Four,
-                8 => alphazero::ChessHistoryLength::Eight,
+                1 => alphazero::ChessHistory::One,
+                4 => alphazero::ChessHistory::Four,
+                8 => alphazero::ChessHistory::Eight,
                 _ => unreachable!(),
             })
         );

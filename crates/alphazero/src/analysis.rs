@@ -1,14 +1,14 @@
 use crate::representation::AlphaZeroRepresentation;
 use crate::ChessRepetitionRules;
 use crate::RepresentedEvaluator;
-use crate::{EncodedEvaluator, Mcts, SearchConfig};
+use crate::{EncodedEvaluator, Mcts, SearchAlgorithm, SearchConfig, SearchRequest};
 use anyhow::Result;
 use engine_core::agent::PolicyMode;
 use engine_core::game::GameState;
 use engine_core::notation::GameNotation;
 use games::ChessRepetitionContext;
 use games::ChessRepetitionState;
-use search::{PolicyValueEvaluator, SearchRules};
+use search::{PolicyValueEvaluator, SearchBudget, SearchRules};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -96,7 +96,21 @@ where
     Rep: AlphaZeroRepresentation<G>,
     Notation: GameNotation<G>,
 {
-    let result = mcts.search(&game, context, PolicyMode::Deterministic)?;
+    let budget = match mcts.algorithm() {
+        SearchAlgorithm::Puct => SearchBudget::Puct { simulations: 800 },
+        SearchAlgorithm::RootGumbelPuct | SearchAlgorithm::FullGumbel => SearchBudget::Gumbel {
+            simulations: 128,
+            max_considered_actions: 16,
+        },
+    };
+    let result = mcts.search(
+        &game,
+        context,
+        SearchRequest {
+            mode: PolicyMode::Deterministic,
+            budget,
+        },
+    )?;
     let legal: Vec<_> = game.legal_moves().collect();
     let policy: Vec<MoveScore> = legal
         .into_iter()

@@ -2,7 +2,7 @@ use super::coordinator::{
     CompletedGame, GameRequest, SelfPlayWorker, SelfPlayWorkerFactory, BUDGET_SEED, MOVE_SEED,
     RESIGNATION_SEED, SEARCH_SEED,
 };
-use super::generic::{assign_outcomes, last_mover_outcome, set_budget};
+use super::generic::{assign_outcomes, last_mover_outcome};
 use super::{select_temperature_action, GumbelMoveSelection, SelfPlayConfig, SelfPlayStats};
 use crate::representation::{ChessAzRepresentation, ChessAzState};
 use crate::{
@@ -87,20 +87,22 @@ impl<const HISTORY: usize> SelfPlayWorker<ChessAzState<HISTORY>> for ChessSelfPl
         while !game.is_terminal() && trajectory.len() < self.config.max_moves {
             let state = ChessAzState::from_game(&game);
             let (budget, policy_weight, full) = self.config.budget_schedule.choose(&mut budget_rng);
-            set_budget(&mut self.mcts, budget)?;
             if full {
                 stats.full_searches += 1;
             }
             else {
                 stats.fast_searches += 1;
             }
-            let result =
-                self.mcts
-                    .search(&state, game.repetition_context(), PolicyMode::Explore)?;
+            let result = self.mcts.search(
+                &state,
+                game.repetition_context(),
+                super::config::search_request(budget, PolicyMode::Explore),
+            )?;
             let action = match (self.mcts.config(), self.config.gumbel_move_selection) {
-                (SearchConfig::Gumbel(_), GumbelMoveSelection::ProposedAction) => {
-                    result.selected_move
-                }
+                (
+                    SearchConfig::RootGumbelPuct(_) | SearchConfig::FullGumbel(_),
+                    GumbelMoveSelection::ProposedAction,
+                ) => result.selected_move,
                 _ => select_temperature_action(
                     &result,
                     self.config.temperature.at_ply(trajectory.len()),

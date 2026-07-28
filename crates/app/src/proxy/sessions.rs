@@ -158,13 +158,13 @@ pub(super) fn play_chess_engine_turn(
             },
         )?;
         let mv = match history {
-            alphazero::ChessHistoryLength::One => {
+            alphazero::ChessHistory::One => {
                 chess_best_action_for::<1>(batcher.client(), &session.game, session.simulations)?
             }
-            alphazero::ChessHistoryLength::Four => {
+            alphazero::ChessHistory::Four => {
                 chess_best_action_for::<4>(batcher.client(), &session.game, session.simulations)?
             }
-            alphazero::ChessHistoryLength::Eight => {
+            alphazero::ChessHistory::Eight => {
                 chess_best_action_for::<8>(batcher.client(), &session.game, session.simulations)?
             }
         };
@@ -197,7 +197,11 @@ pub(super) fn play_chess_engine_turn(
         puct_search(session.simulations),
         NoExtraRules,
     )
-    .search(&session.game.position(), (), PolicyMode::Deterministic)?
+    .search(
+        &session.game.position(),
+        (),
+        search_request(session.simulations),
+    )?
     .best_move();
     let uci = games::chess::ChessUciNotation.format_move(&session.game.position(), native);
     let san = games::chess::notation::san(session.game.board(), native);
@@ -218,7 +222,7 @@ pub(super) fn play_engine_turn_for(
     }
     let (_, cfg) = open_existing_run(run_dir, "connect4")?;
     anyhow::ensure!(
-        cfg.model.game == alphazero::GameSpec::Connect4,
+        cfg.model.game() == alphazero::GameKind::Connect4,
         "run model is not Connect4"
     );
     let batcher = Batcher::new_with_model(
@@ -233,7 +237,7 @@ pub(super) fn play_engine_turn_for(
         NoExtraRules,
     );
     let native = mcts
-        .search(&session.game, (), PolicyMode::Deterministic)?
+        .search(&session.game, (), search_request(session.simulations))?
         .best_move();
     let mv = games::connect4::notation::Connect4Notation.format_move(&session.game, native);
     session.game.play(native);
@@ -254,7 +258,16 @@ fn chess_best_action_for<const HISTORY: usize>(
         puct_search(simulations),
         ChessRepetitionRules,
     )
-    .search(&state, context, PolicyMode::Deterministic)?
+    .search(&state, context, search_request(simulations))?
     .best_move();
     Ok(mv)
+}
+
+fn search_request(simulations: usize) -> alphazero::SearchRequest {
+    alphazero::SearchRequest {
+        mode: engine_core::agent::PolicyMode::Deterministic,
+        budget: alphazero::MctsSearchBudget::Puct {
+            simulations: simulations.max(1),
+        },
+    }
 }
