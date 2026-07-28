@@ -1,16 +1,8 @@
-use alphazero::representation::{
-    ChessAzRepresentation, ChessClassicRepresentation, Connect4AzRepresentation,
-};
-use alphazero::{
-    Batcher, ChessHistory, ChessSelfPlayWorkerFactory, ExperimentConfig, GameKind,
-    GenericSelfPlayWorkerFactory, InferenceEngine, Network, ReplayBuffer, RunDir,
-    SelfPlayCoordinator, SelfPlayEpoch,
-};
+use alphazero::{ExperimentConfig, RunDir, RunLimit, TrainingRun};
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use games::{ChessPosition, Connect4};
 use std::path::PathBuf;
-use tch::{nn, CModule, Device, Kind, Tensor};
+use tch::Device;
 
 #[derive(Clone, Copy, ValueEnum)]
 enum DeviceKind {
@@ -42,17 +34,6 @@ enum Command {
         #[arg(long)]
         run_dir: PathBuf,
     },
-    /// Export a checkpoint as a TorchScript module for TensorRT compilation.
-    ExportTorchScript {
-        #[arg(long)]
-        experiment: PathBuf,
-        #[arg(long)]
-        checkpoint: PathBuf,
-        #[arg(long)]
-        output: PathBuf,
-        #[arg(long, value_enum, default_value_t = DeviceKind::Auto)]
-        device: DeviceKind,
-    },
 }
 
 #[derive(Parser)]
@@ -72,323 +53,37 @@ fn main() -> Result<()> {
         Command::Init {
             experiment,
             run_dir,
-        } => {
-            let config = ExperimentConfig::read_toml(&experiment)?;
-            RunDir::initialize(&run_dir, config)?;
-            println!("initialized {}", run_dir.display());
-            Ok(())
-        }
-        Command::Inspect { run_dir } => {
-            let (_, experiment, state) = RunDir::open(&run_dir)?;
-            println!("{}", experiment.to_toml()?);
-            println!("state:");
-            println!("{}", serde_json::to_string_pretty(&state)?);
-            Ok(())
-        }
-        Command::ExportTorchScript {
-            experiment,
-            checkpoint,
-            output,
-            device,
-        } => export_torchscript(experiment, checkpoint, output, select_device(device)?),
+        } => initialize(experiment, run_dir),
         Command::Run(args) => run(args),
+        Command::Inspect { run_dir } => inspect(run_dir),
     }
 }
 
-fn export_torchscript(
-    experiment_path: PathBuf,
-    checkpoint: PathBuf,
-    output: PathBuf,
-    device: Device,
-) -> Result<()> {
+fn initialize(experiment_path: PathBuf, run_dir: PathBuf) -> Result<()> {
     let experiment = ExperimentConfig::read_toml(&experiment_path)?;
-    let mut vs = nn::VarStore::new(device);
-    let net = Network::new(&vs.root(), &experiment.model)?;
-    vs.load(&checkpoint)?;
-    vs.freeze();
+    RunDir::initialize(&run_dir, experiment)?;
 
-    let [channels, height, width] = experiment.model.state_shape();
-    let input = Tensor::zeros([1, channels, height, width], (Kind::Float, device));
-    let mut forward = |inputs: &[Tensor]| {
-        let output = net.forward_t(&inputs[0], false);
-        let scalar = output.value.expected_value();
-        vec![Tensor::cat(&[output.policy_logits, scalar], 1)]
-    };
-    let module = CModule::create_by_tracing("engine_zoo", "forward", &[input], &mut forward)?;
-    module.save(&output)?;
-    println!("exported {}", output.display());
+    println!("initialized {}", run_dir.display());
     Ok(())
 }
 
 fn run(args: RunArgs) -> Result<()> {
-    let (run, experiment, mut state) = RunDir::open(&args.run_dir)?;
-    let device = select_device(args.device)?;
-    let mut vs = nn::VarStore::new(device);
-    let net = Network::new(&vs.root(), &experiment.model)?;
-    if let Some(checkpoint) = run.latest_checkpoint(&state) {
-        vs.load(checkpoint)?;
-        state.mark_weights_only_resume();
-        run.write_state(&state)?;
-        eprintln!(
-            "WARNING: resumed checkpoint weights only; replay and optimizer moments were reset."
-        );
-        run.log_metrics(serde_json::json!({
-            "event": "resume",
-            "resume_kind": "weights-only",
-            "replay_restored": false,
-            "optimizer_moments_restored": false,
-        }))?;
+    let mut run = TrainingRun::open(&args.run_dir, select_device(args.device)?)?;
+    let limit = if args.forever {
+        RunLimit::Forever
     }
     else {
-        run.write_latest(&mut state, |path| Ok(vs.save(path)?))?;
-    }
-    let batcher = match experiment.inference.engine {
-        InferenceEngine::Native => Batcher::new_with_model_precision(
-            experiment.model.clone(),
-            &run.latest_path(),
-            device,
-            experiment.inference.batcher_config(),
-            experiment.inference.precision,
-        )?,
-        InferenceEngine::TensorRtTorchScript => {
-            anyhow::ensure!(
-                !args.forever && args.iterations == 1,
-                "TensorRT TorchScript inference supports one generation per run; compile a module for each new checkpoint"
-            );
-            let module = experiment
-                .inference
-                .tensor_rt_module
-                .as_deref()
-                .expect("validated TensorRT module path");
-            let module = if module.is_absolute() {
-                module.to_path_buf()
-            }
-            else {
-                run.root().join(module)
-            };
-            Batcher::new_with_tensor_rt_torchscript(
-                experiment.model.clone(),
-                &module,
-                device,
-                experiment.inference.batcher_config(),
-            )?
-        }
+        RunLimit::Iterations(args.iterations)
     };
-    match experiment.model.game() {
-        GameKind::Connect4 => run_connect4(
-            &args,
-            &run,
-            &experiment,
-            &mut state,
-            &vs,
-            &net,
-            &batcher,
-            device,
-        ),
-        GameKind::Chess => run_chess(
-            &args,
-            &run,
-            &experiment,
-            &mut state,
-            &vs,
-            &net,
-            &batcher,
-            device,
-        ),
-    }
+
+    run.run(limit)
 }
 
-#[allow(clippy::too_many_arguments)] // Concrete model dispatch keeps the generic training loop type-safe.
-fn run_connect4(
-    args: &RunArgs,
-    run: &RunDir,
-    experiment: &ExperimentConfig,
-    state: &mut alphazero::RunState,
-    vs: &nn::VarStore,
-    net: &Network,
-    batcher: &Batcher,
-    device: Device,
-) -> Result<()> {
-    let replay =
-        ReplayBuffer::<Connect4>::new(experiment.replay.capacity, experiment.model.action_size());
-    let factory = GenericSelfPlayWorkerFactory::<Connect4, Connect4AzRepresentation>::new(
-        batcher,
-        experiment.self_play.clone(),
-    )?;
-    run_iterations(
-        args,
-        run,
-        experiment,
-        state,
-        vs,
-        net,
-        batcher,
-        device,
-        &replay,
-        &Connect4AzRepresentation,
-        &factory,
-    )
-}
-
-#[allow(clippy::too_many_arguments)] // Concrete model dispatch keeps the generic training loop type-safe.
-fn run_chess(
-    args: &RunArgs,
-    run: &RunDir,
-    experiment: &ExperimentConfig,
-    state: &mut alphazero::RunState,
-    vs: &nn::VarStore,
-    net: &Network,
-    batcher: &Batcher,
-    device: Device,
-) -> Result<()> {
-    if experiment.model.is_chess_classic() {
-        return run_chess_classic(args, run, experiment, state, vs, net, batcher, device);
-    }
-    match experiment
-        .model
-        .chess_history()
-        .expect("validated chess model")
-    {
-        ChessHistory::One => {
-            run_chess_history::<1>(args, run, experiment, state, vs, net, batcher, device)
-        }
-        ChessHistory::Four => {
-            run_chess_history::<4>(args, run, experiment, state, vs, net, batcher, device)
-        }
-        ChessHistory::Eight => {
-            run_chess_history::<8>(args, run, experiment, state, vs, net, batcher, device)
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)] // Concrete model dispatch keeps the generic training loop type-safe.
-fn run_chess_classic(
-    args: &RunArgs,
-    run: &RunDir,
-    experiment: &ExperimentConfig,
-    state: &mut alphazero::RunState,
-    vs: &nn::VarStore,
-    net: &Network,
-    batcher: &Batcher,
-    device: Device,
-) -> Result<()> {
-    let replay = ReplayBuffer::new(experiment.replay.capacity, experiment.model.action_size());
-    let factory = GenericSelfPlayWorkerFactory::<ChessPosition, ChessClassicRepresentation>::new(
-        batcher,
-        experiment.self_play.clone(),
-    )?;
-    run_iterations(
-        args,
-        run,
-        experiment,
-        state,
-        vs,
-        net,
-        batcher,
-        device,
-        &replay,
-        &ChessClassicRepresentation,
-        &factory,
-    )
-}
-
-#[allow(clippy::too_many_arguments)] // Concrete model dispatch keeps the generic training loop type-safe.
-fn run_chess_history<const HISTORY: usize>(
-    args: &RunArgs,
-    run: &RunDir,
-    experiment: &ExperimentConfig,
-    state: &mut alphazero::RunState,
-    vs: &nn::VarStore,
-    net: &Network,
-    batcher: &Batcher,
-    device: Device,
-) -> Result<()> {
-    let replay = ReplayBuffer::new(experiment.replay.capacity, experiment.model.action_size());
-    let factory =
-        ChessSelfPlayWorkerFactory::<HISTORY>::new(batcher, experiment.self_play.clone())?;
-    run_iterations(
-        args,
-        run,
-        experiment,
-        state,
-        vs,
-        net,
-        batcher,
-        device,
-        &replay,
-        &ChessAzRepresentation::<HISTORY>,
-        &factory,
-    )
-}
-
-#[allow(clippy::too_many_arguments)] // Generic state, representation, model, and worker inputs meet here once.
-fn run_iterations<S, R, F>(
-    args: &RunArgs,
-    run: &RunDir,
-    experiment: &ExperimentConfig,
-    state: &mut alphazero::RunState,
-    vs: &nn::VarStore,
-    net: &Network,
-    batcher: &Batcher,
-    device: Device,
-    replay: &ReplayBuffer<S>,
-    representation: &R,
-    factory: &F,
-) -> Result<()>
-where
-    S: engine_core::GameState + Clone + Send + Sync + 'static,
-    S::Move: Send + Sync,
-    R: alphazero::AlphaZeroRepresentation<S>,
-    F: alphazero::SelfPlayWorkerFactory<S>,
-{
-    let mut optimizer = alphazero::build_optimizer(vs, &experiment.training)?;
-    let coordinator = SelfPlayCoordinator::new(experiment.self_play.clone(), experiment.seed)?;
-    let mut completed = 0;
-    while args.forever || completed < args.iterations {
-        let epoch = SelfPlayEpoch {
-            model_generation: state.model_generation,
-            first_game_id: state.total_games_generated,
-        };
-        let stats = coordinator.run(factory, replay, epoch)?;
-        state.total_games_generated += stats.games as u64;
-        let metrics = alphazero::train(
-            net,
-            &mut optimizer,
-            replay,
-            representation,
-            device,
-            &experiment.training,
-            experiment.seed,
-            state.global_step,
-        );
-        state.iteration += 1;
-        state.model_generation += 1;
-        state.global_step += metrics
-            .as_ref()
-            .map_or(0, |metrics| metrics.train_steps as u64);
-        state.replay_sample_count = replay.len();
-        state.optimizer_moments_restored = false;
-        run.write_latest(state, |path| Ok(vs.save(path)?))?;
-        if experiment.inference.engine == InferenceEngine::Native {
-            batcher
-                .reload_weights(&run.latest_path())
-                .map_err(anyhow::Error::msg)?;
-        }
-        run.log_metrics(serde_json::json!({
-            "iteration": state.iteration,
-            "model_generation": state.model_generation,
-            "total_games_generated": state.total_games_generated,
-            "games": stats.games,
-            "moves": stats.moves,
-            "replay_samples": replay.len(),
-            "policy_loss": metrics.as_ref().map(|metrics| metrics.policy_loss),
-            "value_loss": metrics.as_ref().map(|metrics| metrics.value_loss),
-            "learning_rate": metrics.as_ref().map(|metrics| metrics.learning_rate),
-            "training": metrics,
-            "batcher": batcher.stats(),
-        }))?;
-        completed += 1;
-    }
+fn inspect(run_dir: PathBuf) -> Result<()> {
+    let (_, experiment, state) = RunDir::open(&run_dir)?;
+    println!("{}", experiment.to_toml()?);
+    println!("state:");
+    println!("{}", serde_json::to_string_pretty(&state)?);
     Ok(())
 }
 

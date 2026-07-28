@@ -1,14 +1,12 @@
 use alphazero::representation::{ChessAzRepresentation, ChessClassicRepresentation};
 use alphazero::ChessRepetitionRules;
-use alphazero::{
-    Batcher, BatcherConfig, ChessHistory, GameKind, Mcts, RepresentedEvaluator, SearchConfig,
-};
+use alphazero::{Batcher, BatcherConfig, ChessHistory, GameKind, RepresentedEvaluator};
 use anyhow::{Context, Result};
 use engine_core::notation::GameNotation;
 use games::chess::ChessUciNotation;
 use games::ChessGame;
 use search::NoExtraRules;
-use search::{SearchBudget, SearchRequest};
+use search::{Mcts, SearchBudget, SearchConfig, SearchRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -65,6 +63,46 @@ pub struct PuzzleSummary {
     pub tier: BTreeMap<String, AggregateStats>,
 }
 
+impl PuzzleSummary {
+    fn record(&mut self, correct: bool, category: Option<&str>, tier: Option<&str>) {
+        self.total += 1;
+        self.correct += usize::from(correct);
+
+        if let Some(category) = category {
+            self.category
+                .entry(category.to_owned())
+                .or_default()
+                .add(correct);
+        }
+
+        if let Some(tier) = tier {
+            self.tier.entry(tier.to_owned()).or_default().add(correct);
+        }
+    }
+
+    fn finish(&mut self) {
+        self.accuracy = if self.total == 0 {
+            0.0
+        }
+        else {
+            self.correct as f64 / self.total as f64
+        };
+    }
+}
+
+impl Default for PuzzleSummary {
+    fn default() -> Self {
+        Self {
+            record_type: "summary",
+            total: 0,
+            correct: 0,
+            accuracy: 0.0,
+            category: BTreeMap::new(),
+            tier: BTreeMap::new(),
+        }
+    }
+}
+
 pub fn read_puzzles(reader: impl BufRead) -> Result<Vec<Puzzle>> {
     let mut puzzles = Vec::new();
     for (line_no, line) in reader.lines().enumerate() {
@@ -84,82 +122,91 @@ pub fn evaluate_moves(
     mut candidate_move: impl FnMut(&Puzzle) -> Result<String>,
 ) -> Result<(Vec<PuzzleResult>, PuzzleSummary)> {
     let mut results = Vec::with_capacity(puzzles.len());
-    let mut summary = PuzzleSummary {
-        record_type: "summary",
-        total: 0,
-        correct: 0,
-        accuracy: 0.0,
-        category: BTreeMap::new(),
-        tier: BTreeMap::new(),
-    };
+    let mut summary = PuzzleSummary::default();
 
     for puzzle in puzzles {
-        let game = ChessGame::from_fen(&puzzle.fen)
-            .with_context(|| format!("invalid FEN for puzzle {}", puzzle.id))?;
-        for accepted in &puzzle.accepted_moves {
-            let action = ChessUciNotation
-                .parse_move(&game.position(), accepted)
-                .with_context(|| {
-                    format!(
-                        "puzzle {} has illegal accepted UCI move {accepted}",
-                        puzzle.id
-                    )
-                })?;
-            anyhow::ensure!(
-                ChessUciNotation.format_move(&game.position(), action) == *accepted,
-                "puzzle {} has non-canonical accepted UCI move {accepted}",
-                puzzle.id
-            );
-        }
-        anyhow::ensure!(
-            !puzzle.accepted_moves.is_empty(),
-            "puzzle {} has no accepted moves",
-            puzzle.id
+        let result = evaluate_puzzle(puzzle, &mut candidate_move)?;
+
+        summary.record(
+            result.correct,
+            result.category.as_deref(),
+            result.tier.as_deref(),
         );
-        let move_played = candidate_move(puzzle)?;
+        results.push(result);
+    }
+
+    summary.finish();
+
+    Ok((results, summary))
+}
+
+fn evaluate_puzzle(
+    puzzle: &Puzzle,
+    candidate_move: &mut impl FnMut(&Puzzle) -> Result<String>,
+) -> Result<PuzzleResult> {
+    let game = ChessGame::from_fen(&puzzle.fen)
+        .with_context(|| format!("invalid FEN for puzzle {}", puzzle.id))?;
+
+    validate_accepted_moves(puzzle, &game)?;
+
+    let move_played = candidate_move(puzzle)?;
+    validate_candidate_move(puzzle, &game, &move_played)?;
+
+    let correct = puzzle.accepted_moves.iter().any(|mv| mv == &move_played);
+
+    Ok(PuzzleResult {
+        record_type: "puzzle",
+        id: puzzle.id.clone(),
+        candidate_move: move_played,
+        accepted_moves: puzzle.accepted_moves.clone(),
+        correct,
+        category: puzzle.category.clone(),
+        tier: puzzle.tier.clone(),
+    })
+}
+
+fn validate_accepted_moves(puzzle: &Puzzle, game: &ChessGame) -> Result<()> {
+    anyhow::ensure!(
+        !puzzle.accepted_moves.is_empty(),
+        "puzzle {} has no accepted moves",
+        puzzle.id
+    );
+
+    for accepted in &puzzle.accepted_moves {
         let action = ChessUciNotation
-            .parse_move(&game.position(), &move_played)
+            .parse_move(&game.position(), accepted)
             .with_context(|| {
                 format!(
-                    "candidate returned illegal UCI move {move_played} for puzzle {}",
+                    "puzzle {} has illegal accepted UCI move {accepted}",
                     puzzle.id
                 )
             })?;
         anyhow::ensure!(
-            ChessUciNotation.format_move(&game.position(), action) == move_played,
-            "candidate returned non-canonical UCI move {move_played} for puzzle {}",
+            ChessUciNotation.format_move(&game.position(), action) == *accepted,
+            "puzzle {} has non-canonical accepted UCI move {accepted}",
             puzzle.id
         );
-        let correct = puzzle.accepted_moves.iter().any(|mv| mv == &move_played);
-        results.push(PuzzleResult {
-            record_type: "puzzle",
-            id: puzzle.id.clone(),
-            candidate_move: move_played,
-            accepted_moves: puzzle.accepted_moves.clone(),
-            correct,
-            category: puzzle.category.clone(),
-            tier: puzzle.tier.clone(),
-        });
-        summary.total += 1;
-        summary.correct += usize::from(correct);
-        if let Some(category) = &puzzle.category {
-            summary
-                .category
-                .entry(category.clone())
-                .or_default()
-                .add(correct);
-        }
-        if let Some(tier) = &puzzle.tier {
-            summary.tier.entry(tier.clone()).or_default().add(correct);
-        }
     }
-    summary.accuracy = if summary.total == 0 {
-        0.0
-    }
-    else {
-        summary.correct as f64 / summary.total as f64
-    };
-    Ok((results, summary))
+
+    Ok(())
+}
+
+fn validate_candidate_move(puzzle: &Puzzle, game: &ChessGame, move_played: &str) -> Result<()> {
+    let action = ChessUciNotation
+        .parse_move(&game.position(), move_played)
+        .with_context(|| {
+            format!(
+                "candidate returned illegal UCI move {move_played} for puzzle {}",
+                puzzle.id
+            )
+        })?;
+    anyhow::ensure!(
+        ChessUciNotation.format_move(&game.position(), action) == move_played,
+        "candidate returned non-canonical UCI move {move_played} for puzzle {}",
+        puzzle.id
+    );
+
+    Ok(())
 }
 
 pub fn write_jsonl(

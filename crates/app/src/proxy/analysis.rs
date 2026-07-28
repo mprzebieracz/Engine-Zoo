@@ -5,7 +5,7 @@ use alphazero::representation::{
 use alphazero::ChessRepetitionRules;
 use engine_core::game::{GameState, TerminalValue};
 use engine_core::notation::GameNotation;
-use search::NoExtraRules;
+use search::{Mcts, NoExtraRules};
 
 struct ChessHistoryNotation;
 
@@ -33,6 +33,17 @@ pub fn analyze_request(
     req: AnalyzeRequest,
     device: Device,
 ) -> Result<Analysis> {
+    let registry = ModelRegistry::new();
+    analyze_request_with_registry(game, run_dir, req, device, &registry)
+}
+
+pub(super) fn analyze_request_with_registry(
+    game: GameKind,
+    run_dir: PathBuf,
+    req: AnalyzeRequest,
+    device: Device,
+    registry: &ModelRegistry,
+) -> Result<Analysis> {
     let mode = req.mode.unwrap_or(AnalyzeMode::Net);
     let cfg = AnalyzeConfig {
         mode,
@@ -43,35 +54,47 @@ pub fn analyze_request(
     match (game, req.position) {
         (GameKind::Chess, GameSetup::Chess(position)) => {
             let (_, run_cfg) = open_existing_run(&run_dir, "chess")?;
-            let weights = resolve_model(&run_dir, &req.model);
+            let checkpoint = resolve_model(&run_dir, &req.model);
+            let inference = server_inference_config(
+                &run_cfg.inference,
+                cfg.wait_for_count,
+                cfg.timeout,
+                device,
+            );
+            let loaded = registry.load(&run_cfg.model, &checkpoint, device, &inference)?;
             match run_cfg.model.chess_history() {
                 Some(alphazero::ChessHistory::One) => {
-                    analyze_chess::<1>(&run_cfg.model, &weights, &position, device, &cfg)
+                    analyze_chess::<1>(loaded.inference.client(), &position, &cfg)
                 }
                 Some(alphazero::ChessHistory::Four) => {
-                    analyze_chess::<4>(&run_cfg.model, &weights, &position, device, &cfg)
+                    analyze_chess::<4>(loaded.inference.client(), &position, &cfg)
                 }
                 Some(alphazero::ChessHistory::Eight) => {
-                    analyze_chess::<8>(&run_cfg.model, &weights, &position, device, &cfg)
+                    analyze_chess::<8>(loaded.inference.client(), &position, &cfg)
                 }
                 None if run_cfg.model.is_chess_classic() => {
-                    analyze_classic_chess(&run_cfg.model, &weights, &position, device, &cfg)
+                    analyze_classic_chess(loaded.inference.client(), &position, &cfg)
                 }
                 None => anyhow::bail!("run config is not a chess model"),
             }
         }
         (GameKind::Connect4, GameSetup::Connect4(position)) => {
             let (_, run_cfg) = open_existing_run(&run_dir, "connect4")?;
-            let weights = resolve_model(&run_dir, &req.model);
+            let checkpoint = resolve_model(&run_dir, &req.model);
             anyhow::ensure!(
                 run_cfg.model.game() == alphazero::GameKind::Connect4,
                 "run config is not a Connect4 model"
             );
-            analyze_connect4(
-                &run_cfg.model,
-                &weights,
-                &Connect4::from_setup(&position)?,
+            let inference = server_inference_config(
+                &run_cfg.inference,
+                cfg.wait_for_count,
+                cfg.timeout,
                 device,
+            );
+            let loaded = registry.load(&run_cfg.model, &checkpoint, device, &inference)?;
+            analyze_connect4(
+                loaded.inference.client(),
+                &Connect4::from_setup(&position)?,
                 &cfg,
             )
         }
@@ -84,24 +107,15 @@ pub fn analyze_request(
 }
 
 fn analyze_classic_chess(
-    model: &alphazero::ModelSpec,
-    weights: &Path,
+    client: alphazero::InferenceClient,
     position: &ChessSetup,
-    device: Device,
     cfg: &AnalyzeConfig,
 ) -> Result<Analysis> {
     let game = ChessGame::from_setup(position)?;
     let state = game.position();
-    let batcher = Batcher::new_with_model_precision(
-        model.clone(),
-        weights,
-        device,
-        batcher_config(cfg.wait_for_count, cfg.timeout),
-        inference_precision(device),
-    )?;
     let network = analyze_game_net(
         state,
-        batcher.client(),
+        client.clone(),
         &ChessClassicRepresentation,
         &notation::ChessUciNotation,
     )?;
@@ -109,7 +123,7 @@ fn analyze_classic_chess(
         return Ok(network);
     }
     let mut mcts = Mcts::new(
-        alphazero::RepresentedEvaluator::new(ChessClassicRepresentation, batcher.client()),
+        alphazero::RepresentedEvaluator::new(ChessClassicRepresentation, client),
         cfg.mcts.clone(),
         NoExtraRules,
     );
@@ -124,21 +138,13 @@ fn analyze_classic_chess(
 }
 
 fn analyze_connect4(
-    model: &alphazero::ModelSpec,
-    weights: &Path,
+    client: alphazero::InferenceClient,
     game: &Connect4,
-    device: Device,
     cfg: &AnalyzeConfig,
 ) -> Result<Analysis> {
-    let batcher = Batcher::new_with_model(
-        model.clone(),
-        weights,
-        device,
-        batcher_config(cfg.wait_for_count, cfg.timeout),
-    )?;
     let network = analyze_game_net(
         *game,
-        batcher.client(),
+        client.clone(),
         &Connect4AzRepresentation,
         &games::connect4::notation::Connect4Notation,
     )?;
@@ -146,7 +152,7 @@ fn analyze_connect4(
         return Ok(network);
     }
     let mut mcts = Mcts::new(
-        alphazero::RepresentedEvaluator::new(Connect4AzRepresentation, batcher.client()),
+        alphazero::RepresentedEvaluator::new(Connect4AzRepresentation, client),
         cfg.mcts.clone(),
         NoExtraRules,
     );
@@ -170,20 +176,9 @@ fn chess_az_state_snapshot<const HISTORY: usize>(
     Ok((game, state))
 }
 
-fn inference_precision(device: Device) -> InferencePrecision {
-    if device.is_cuda() {
-        InferencePrecision::Fp16
-    }
-    else {
-        InferencePrecision::Fp32
-    }
-}
-
 fn analyze_chess<const HISTORY: usize>(
-    model: &alphazero::ModelSpec,
-    weights: &Path,
+    client: alphazero::InferenceClient,
     position: &ChessSetup,
-    device: Device,
     cfg: &AnalyzeConfig,
 ) -> Result<Analysis> {
     let (game, state) = chess_az_state_snapshot::<HISTORY>(position)?;
@@ -199,16 +194,9 @@ fn analyze_chess<const HISTORY: usize>(
             mcts_policy: Vec::new(),
         });
     }
-    let batcher = Batcher::new_with_model_precision(
-        model.clone(),
-        weights,
-        device,
-        batcher_config(cfg.wait_for_count, cfg.timeout),
-        inference_precision(device),
-    )?;
     let network = analyze_game_net(
         state,
-        batcher.client(),
+        client.clone(),
         &ChessAzRepresentation::<HISTORY>,
         &ChessHistoryNotation,
     )?;
@@ -217,7 +205,7 @@ fn analyze_chess<const HISTORY: usize>(
     }
     let mcts_cfg = cfg.mcts.clone();
     let mut mcts = Mcts::new(
-        alphazero::RepresentedEvaluator::new(ChessAzRepresentation::<HISTORY>, batcher.client()),
+        alphazero::RepresentedEvaluator::new(ChessAzRepresentation::<HISTORY>, client),
         mcts_cfg,
         ChessRepetitionRules,
     );

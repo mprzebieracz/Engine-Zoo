@@ -19,9 +19,28 @@ pub(super) struct MoveEffect {
 }
 
 impl MoveEffect {
+    fn between(before: &Board, after: &Board, mv: ChessMove) -> Self {
+        let moved_piece = before.piece_on(mv.get_source());
+        let is_pawn_move = moved_piece == Some(Piece::Pawn);
+        let is_capture = before.piece_on(mv.get_dest()).is_some();
+        let castling_rights_changed = castling_rights(before) != castling_rights(after);
+
+        Self {
+            resets_halfmove_clock: is_pawn_move || is_capture,
+            clears_repetition_history: is_pawn_move || is_capture || castling_rights_changed,
+        }
+    }
+
     pub(super) fn clears_repetition_history(self) -> bool {
         self.clears_repetition_history
     }
+}
+
+fn castling_rights(board: &Board) -> (chess::CastleRights, chess::CastleRights) {
+    (
+        board.castle_rights(Color::White),
+        board.castle_rights(Color::Black),
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -78,44 +97,26 @@ impl ChessPosition {
     pub(super) fn play_with_effect(&mut self, mv: ChessMove) -> MoveEffect {
         debug_assert!(self.board.legal(mv), "illegal move {mv} in {}", self.board);
 
-        let source = mv.get_source();
-        let dest = mv.get_dest();
+        let board_before = self.board;
 
-        let moved_piece = self.board.piece_on(source);
-
-        let is_pawn = moved_piece == Some(Piece::Pawn);
-        let is_capture = self.board.piece_on(dest).is_some();
-
-        let castle_rights_before = (
-            self.board.castle_rights(Color::White),
-            self.board.castle_rights(Color::Black),
-        );
-
-        self.board = self.board.make_move_new(mv);
+        self.board = board_before.make_move_new(mv);
         self.ply += 1;
 
-        let castle_rights_after = (
-            self.board.castle_rights(Color::White),
-            self.board.castle_rights(Color::Black),
-        );
+        let effect = MoveEffect::between(&board_before, &self.board, mv);
+        self.advance_halfmove_clock(effect);
 
-        let castle_rights_changed = castle_rights_before != castle_rights_after;
+        self.refresh_status_without_repetition();
 
-        let effect = MoveEffect {
-            resets_halfmove_clock: is_pawn || is_capture,
-            clears_repetition_history: is_pawn || is_capture || castle_rights_changed,
-        };
+        effect
+    }
 
+    fn advance_halfmove_clock(&mut self, effect: MoveEffect) {
         if effect.resets_halfmove_clock {
             self.halfmove_clock = 0;
         }
         else {
             self.halfmove_clock += 1;
         }
-
-        self.refresh_status_without_repetition();
-
-        effect
     }
 
     /// Resolves automatic terminals other than authoritative repetition.
@@ -164,11 +165,16 @@ impl ChessPosition {
         }
 
         let first = bishops.into_iter().next().expect("two bishops exist");
-        let colour = (first.get_file().to_index() + first.get_rank().to_index()) % 2;
-        bishops.into_iter().all(|square| {
-            (square.get_file().to_index() + square.get_rank().to_index()) % 2 == colour
-        })
+        let colour = square_colour(first);
+
+        bishops
+            .into_iter()
+            .all(|square| square_colour(square) == colour)
     }
+}
+
+fn square_colour(square: Square) -> usize {
+    (square.get_file().to_index() + square.get_rank().to_index()) % 2
 }
 
 impl super::ChessRepetitionState for ChessPosition {

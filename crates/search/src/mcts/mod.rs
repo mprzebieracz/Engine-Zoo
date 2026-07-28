@@ -69,6 +69,15 @@ pub struct SearchRequest {
     pub budget: SearchBudget,
 }
 
+impl SearchRequest {
+    pub const fn deterministic_puct(simulations: usize) -> Self {
+        Self {
+            mode: PolicyMode::Deterministic,
+            budget: SearchBudget::Puct { simulations },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchConfigError(&'static str);
 
@@ -119,6 +128,15 @@ impl Default for PuctConfig {
 }
 
 impl PuctConfig {
+    /// Single-position application analysis defaults.
+    pub fn analysis_default(leaf_batch_size: usize) -> Self {
+        Self {
+            leaf_batch_size,
+            root_noise: None,
+            ..Self::default()
+        }
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.leaf_batch_size == 0 {
             return Err("PUCT leaf_batch_size must be positive");

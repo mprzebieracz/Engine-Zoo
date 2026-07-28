@@ -81,26 +81,15 @@ pub fn full_gumbel(
     )
 }
 
-pub(crate) fn new_puct(simulations: usize) -> Mcts<Connect4, UniformEvaluator, NoExtraRules> {
-    let _ = simulations;
-    Mcts::new(
-        UniformEvaluator,
-        SearchConfig::Puct(PuctConfig {
-            leaf_batch_size: 1,
-            root_noise: None,
-            ..PuctConfig::default()
-        }),
-        NoExtraRules,
-    )
-    .with_seed(1)
-}
-
-pub(crate) fn run(
-    search: &mut Mcts<Connect4, UniformEvaluator, NoExtraRules>,
+pub(crate) fn run<E>(
+    search: &mut Mcts<Connect4, E, NoExtraRules>,
     game: &Connect4,
     simulations: usize,
     mode: PolicyMode,
-) -> search::SearchResult<games::Connect4Move> {
+) -> search::SearchResult<games::Connect4Move>
+where
+    E: PolicyValueEvaluator<Connect4>,
+{
     search
         .search(
             game,

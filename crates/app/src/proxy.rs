@@ -1,7 +1,5 @@
 use alphazero::{analyze_game_mcts, analyze_game_net, Analysis, AnalyzeConfig, AnalyzeMode};
-use alphazero::{
-    Batcher, BatcherConfig, ExperimentConfig, InferencePrecision, Mcts, RunDir, SearchConfig,
-};
+use alphazero::{ExperimentConfig, InferencePrecision, RunDir};
 use anyhow::Result;
 use axum::extract::State;
 use axum::http::{header, Method, StatusCode};
@@ -13,8 +11,10 @@ use engine_core::game::GameState;
 use games::chess::notation;
 use games::setup::{ChessSetup, Connect4Setup, GameSetup};
 use games::{ChessGame, Connect4};
+use search::SearchConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,7 @@ mod session_view;
 mod sessions;
 
 pub use analysis::analyze_request;
+use analysis::analyze_request_with_registry;
 use http::*;
 pub use http::{game_name, open_existing_run, resolve_model, run_dir};
 use session_view::*;
@@ -46,15 +47,6 @@ fn puct_search(_simulations: usize) -> SearchConfig {
         root_noise: None,
         ..Default::default()
     })
-}
-
-fn batcher_config(wait_for_count: usize, timeout: Duration) -> BatcherConfig {
-    BatcherConfig {
-        preferred_batch_size: wait_for_count.max(1),
-        max_batch_size: 256,
-        max_wait: timeout,
-        max_queued_states: 4096,
-    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
@@ -110,7 +102,102 @@ struct AppState {
     device: Device,
     sessions: Arc<Mutex<Vec<LiveSession>>>,
     next_session: Arc<AtomicU64>,
+    models: Arc<ModelRegistry>,
     evaluations: EvaluationService,
+}
+
+struct ModelRegistry {
+    models: Mutex<HashMap<ModelKey, Arc<LoadedModel>>>,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct ModelKey {
+    checkpoint: PathBuf,
+    checkpoint_modified: Option<std::time::SystemTime>,
+    checkpoint_size: u64,
+    model: alphazero::ModelFingerprint,
+    preferred_batch_size: usize,
+    max_batch_size: usize,
+    wait_milliseconds: u64,
+    precision_is_fp16: bool,
+    cuda: bool,
+}
+
+struct LoadedModel {
+    model: alphazero::ModelSpec,
+    inference: alphazero::InferenceService,
+}
+
+impl ModelRegistry {
+    fn new() -> Self {
+        Self {
+            models: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn load(
+        &self,
+        model: &alphazero::ModelSpec,
+        checkpoint: &Path,
+        device: Device,
+        config: &alphazero::InferenceConfig,
+    ) -> Result<Arc<LoadedModel>> {
+        let metadata = fs::metadata(checkpoint)?;
+        let key = ModelKey {
+            checkpoint: checkpoint.to_path_buf(),
+            checkpoint_modified: metadata.modified().ok(),
+            checkpoint_size: metadata.len(),
+            model: model.fingerprint(),
+            preferred_batch_size: config.preferred_batch_size,
+            max_batch_size: config.max_batch_size,
+            wait_milliseconds: config.max_wait.milliseconds,
+            precision_is_fp16: config.precision == InferencePrecision::Fp16,
+            cuda: device.is_cuda(),
+        };
+        let mut models = self.models.lock().unwrap();
+        if let Some(loaded) = models.get(&key) {
+            return Ok(Arc::clone(loaded));
+        }
+
+        let inference = alphazero::InferenceService::load(
+            model,
+            alphazero::InferenceSource::Checkpoint(checkpoint),
+            device,
+            config,
+        )?;
+        let loaded = Arc::new(LoadedModel {
+            model: model.clone(),
+            inference,
+        });
+        models.insert(key, Arc::clone(&loaded));
+
+        Ok(loaded)
+    }
+}
+
+fn server_inference_config(
+    config: &alphazero::InferenceConfig,
+    wait_for_count: usize,
+    timeout: Duration,
+    device: Device,
+) -> alphazero::InferenceConfig {
+    let mut config = config.clone();
+    // Server model aliases resolve to checkpoint files. Preserve the previous
+    // HTTP behavior by using reloadable native inference for those aliases.
+    config.engine = alphazero::InferenceEngine::Native;
+    config.tensor_rt_module = None;
+    config.preferred_batch_size = wait_for_count.max(1);
+    config.max_wait = alphazero::DurationConfig {
+        milliseconds: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+    };
+    config.precision = if device.is_cuda() {
+        InferencePrecision::Fp16
+    }
+    else {
+        InferencePrecision::Fp32
+    };
+
+    config
 }
 
 enum LiveSession {
@@ -138,6 +225,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         device: Device::cuda_if_available(),
         sessions: Arc::new(Mutex::new(Vec::new())),
         next_session: Arc::new(AtomicU64::new(1)),
+        models: Arc::new(ModelRegistry::new()),
         evaluations,
     };
     let app = Router::new()

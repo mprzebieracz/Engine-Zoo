@@ -1,5 +1,6 @@
 mod batcher;
 mod cli;
+mod device;
 mod environment;
 mod harness;
 mod inference;

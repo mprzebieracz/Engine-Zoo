@@ -277,7 +277,7 @@ impl Batcher {
         });
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::Builder::new()
-            .name("batcher".into())
+            .name("inference-batcher".into())
             .spawn(move || run_worker(Box::new(backend), worker_shared))
             .context("spawning batcher worker")?;
         Ok(Self {

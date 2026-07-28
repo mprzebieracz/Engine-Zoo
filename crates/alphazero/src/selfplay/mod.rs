@@ -1,11 +1,10 @@
 //! Deterministic AlphaZero self-play orchestration.
 
-mod chess;
 mod config;
 mod coordinator;
-mod generic;
+mod domain;
+mod worker;
 
-pub use chess::ChessSelfPlayWorkerFactory;
 pub use config::{
     GumbelMoveSelection, ResignationConfig, SearchBudget, SearchBudgetSchedule, SelfPlayConfig,
     TemperaturePhase, TemperatureSchedule,
@@ -14,7 +13,11 @@ pub use coordinator::{
     CompletedGame, GameRequest, SelfPlayCoordinator, SelfPlayEpoch, SelfPlayStats, SelfPlayWorker,
     SelfPlayWorkerFactory,
 };
-pub use generic::GenericSelfPlayWorkerFactory;
+pub use domain::{
+    ChessCanonicalSelfPlayDomain, ChessClassicSelfPlayDomain, SelfPlayDomain,
+    StandardSelfPlayDomain,
+};
+pub use worker::DomainSelfPlayWorkerFactory;
 
 use rand::distr::Distribution;
 use rand::Rng;

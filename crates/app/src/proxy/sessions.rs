@@ -1,10 +1,7 @@
 use super::*;
-use alphazero::representation::{
-    ChessAzRepresentation, ChessClassicRepresentation, Connect4AzRepresentation,
-};
-use alphazero::ChessRepetitionRules;
+use alphazero::representation::Connect4AzRepresentation;
 use engine_core::notation::GameNotation;
-use search::NoExtraRules;
+use search::{Mcts, NoExtraRules, SearchRequest};
 
 pub(super) fn create_session_inner(
     state: &AppState,
@@ -85,7 +82,7 @@ pub(super) fn session_engine_move_inner(state: AppState, id: u64) -> Result<serd
         .ok_or_else(|| anyhow::anyhow!("unknown session"))?;
     anyhow::ensure!(!session_human_turn(session), "not the engine's turn");
     if !session_terminal(session) && !session_human_turn(session) {
-        play_engine_turn(&state.run_dir, state.device, session)?;
+        play_engine_turn(&state, session)?;
     }
     Ok(session_view(session))
 }
@@ -120,89 +117,52 @@ pub(super) fn play_chess_human_turn(session: &mut SessionState<ChessGame>, mv: &
     Ok(())
 }
 
-pub(super) fn play_engine_turn(
-    run_dir: &Path,
-    device: Device,
-    session: &mut LiveSession,
-) -> Result<()> {
+pub(super) fn play_engine_turn(state: &AppState, session: &mut LiveSession) -> Result<()> {
     match session {
-        LiveSession::Chess(s) => play_chess_engine_turn(run_dir, device, s),
-        LiveSession::Connect4(s) => play_engine_turn_for(run_dir, device, s),
+        LiveSession::Chess(s) => play_chess_engine_turn(state, s),
+        LiveSession::Connect4(s) => play_engine_turn_for(state, s),
     }
 }
 
 pub(super) fn play_chess_engine_turn(
-    run_dir: &Path,
-    device: Device,
+    state: &AppState,
     session: &mut SessionState<ChessGame>,
 ) -> Result<()> {
     if session.game.is_terminal() {
         return Ok(());
     }
-    let (_, cfg) = open_existing_run(run_dir, "chess")?;
+    let (_, cfg) = open_existing_run(&state.run_dir, "chess")?;
     if let Some(history) = session.chess_history {
         anyhow::ensure!(
             cfg.model.chess_history() == Some(history),
             "session model no longer matches its run"
         );
-        let batcher = Batcher::new_with_model_precision(
-            cfg.model.clone(),
-            &resolve_model(run_dir, &session.model),
-            device,
-            batcher_config(session.wait_for_count, Duration::from_millis(1)),
-            if device.is_cuda() {
-                InferencePrecision::Fp16
-            }
-            else {
-                InferencePrecision::Fp32
-            },
-        )?;
-        let mv = match history {
-            alphazero::ChessHistory::One => {
-                chess_best_action_for::<1>(batcher.client(), &session.game, session.simulations)?
-            }
-            alphazero::ChessHistory::Four => {
-                chess_best_action_for::<4>(batcher.client(), &session.game, session.simulations)?
-            }
-            alphazero::ChessHistory::Eight => {
-                chess_best_action_for::<8>(batcher.client(), &session.game, session.simulations)?
-            }
-        };
-        let uci = games::chess::ChessUciNotation.format_move(&session.game.position(), mv);
-        let san = games::chess::notation::san(session.game.board(), mv);
-        session.game.play(mv);
-        session.moves.push(uci);
-        session.san_moves.push(san);
-        session.human_turn = true;
-        return Ok(());
     }
-    anyhow::ensure!(
-        cfg.model.is_chess_classic(),
-        "chess session model no longer matches its run"
+    else {
+        anyhow::ensure!(
+            cfg.model.is_chess_classic(),
+            "chess session model no longer matches its run"
+        );
+    }
+
+    let checkpoint = resolve_model(&state.run_dir, &session.model);
+    let config = server_inference_config(
+        &cfg.inference,
+        session.wait_for_count,
+        Duration::from_millis(1),
+        state.device,
     );
-    let batcher = Batcher::new_with_model_precision(
-        cfg.model.clone(),
-        &resolve_model(run_dir, &session.model),
-        device,
-        batcher_config(session.wait_for_count, Duration::from_millis(1)),
-        if device.is_cuda() {
-            InferencePrecision::Fp16
-        }
-        else {
-            InferencePrecision::Fp32
-        },
+    let loaded = state
+        .models
+        .load(&cfg.model, &checkpoint, state.device, &config)?;
+    let mut engine = alphazero::ChessAlphaZeroEngine::from_client(
+        loaded.model.clone(),
+        loaded.inference.client(),
     )?;
-    let native = Mcts::new(
-        alphazero::RepresentedEvaluator::new(ChessClassicRepresentation, batcher.client()),
-        puct_search(session.simulations),
-        NoExtraRules,
-    )
-    .search(
-        &session.game.position(),
-        (),
-        search_request(session.simulations),
-    )?
-    .best_move();
+    let native = engine.select_move(
+        &session.game,
+        SearchRequest::deterministic_puct(session.simulations.max(1)),
+    )?;
     let uci = games::chess::ChessUciNotation.format_move(&session.game.position(), native);
     let san = games::chess::notation::san(session.game.board(), native);
     session.game.play(native);
@@ -213,61 +173,42 @@ pub(super) fn play_chess_engine_turn(
 }
 
 pub(super) fn play_engine_turn_for(
-    run_dir: &Path,
-    device: Device,
+    state: &AppState,
     session: &mut SessionState<Connect4>,
 ) -> Result<()> {
     if session.game.is_terminal() {
         return Ok(());
     }
-    let (_, cfg) = open_existing_run(run_dir, "connect4")?;
+    let (_, cfg) = open_existing_run(&state.run_dir, "connect4")?;
     anyhow::ensure!(
         cfg.model.game() == alphazero::GameKind::Connect4,
         "run model is not Connect4"
     );
-    let batcher = Batcher::new_with_model(
-        cfg.model.clone(),
-        &resolve_model(run_dir, &session.model),
-        device,
-        batcher_config(session.wait_for_count, Duration::from_millis(1)),
-    )?;
+    let checkpoint = resolve_model(&state.run_dir, &session.model);
+    let config = server_inference_config(
+        &cfg.inference,
+        session.wait_for_count,
+        Duration::from_millis(1),
+        state.device,
+    );
+    let loaded = state
+        .models
+        .load(&cfg.model, &checkpoint, state.device, &config)?;
     let mut mcts = Mcts::new(
-        alphazero::RepresentedEvaluator::new(Connect4AzRepresentation, batcher.client()),
+        alphazero::RepresentedEvaluator::new(Connect4AzRepresentation, loaded.inference.client()),
         puct_search(session.simulations),
         NoExtraRules,
     );
     let native = mcts
-        .search(&session.game, (), search_request(session.simulations))?
+        .search(
+            &session.game,
+            (),
+            SearchRequest::deterministic_puct(session.simulations.max(1)),
+        )?
         .best_move();
     let mv = games::connect4::notation::Connect4Notation.format_move(&session.game, native);
     session.game.play(native);
     session.moves.push(mv);
     session.human_turn = true;
     Ok(())
-}
-
-fn chess_best_action_for<const HISTORY: usize>(
-    evaluator: alphazero::BatcherClient,
-    game: &ChessGame,
-    simulations: usize,
-) -> Result<<ChessGame as GameState>::Move> {
-    let state = alphazero::representation::ChessAzState::from_game(game);
-    let context = game.repetition_context();
-    let mv = Mcts::new(
-        alphazero::RepresentedEvaluator::new(ChessAzRepresentation::<HISTORY>, evaluator),
-        puct_search(simulations),
-        ChessRepetitionRules,
-    )
-    .search(&state, context, search_request(simulations))?
-    .best_move();
-    Ok(mv)
-}
-
-fn search_request(simulations: usize) -> alphazero::SearchRequest {
-    alphazero::SearchRequest {
-        mode: engine_core::agent::PolicyMode::Deterministic,
-        budget: alphazero::MctsSearchBudget::Puct {
-            simulations: simulations.max(1),
-        },
-    }
 }

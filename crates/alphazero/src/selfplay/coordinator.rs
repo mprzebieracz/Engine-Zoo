@@ -1,5 +1,7 @@
 use crate::{ReplayBuffer, ReplaySample};
 use anyhow::{ensure, Result};
+use search::SearchDiagnostics;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -55,16 +57,19 @@ pub trait SelfPlayWorkerFactory<S>: Sync {
     fn create(&self, worker_id: usize, seed: u64) -> Result<Self::Worker>;
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct SelfPlayStats {
     pub games: usize,
     pub moves: usize,
     pub full_searches: usize,
     pub fast_searches: usize,
     pub resignations: usize,
-    pub tt_hits: u64,
-    pub tt_misses: u64,
-    pub tt_inserts: u64,
+    pub completed_simulations: u64,
+    pub backend_evaluations: u64,
+    pub evaluation_cache_hits: u64,
+    pub duplicate_leaves: u64,
+    pub nodes_created: u64,
+    pub maximum_search_depth: usize,
 }
 
 impl SelfPlayStats {
@@ -78,9 +83,21 @@ impl SelfPlayStats {
         self.full_searches += other.full_searches;
         self.fast_searches += other.fast_searches;
         self.resignations += other.resignations;
-        self.tt_hits += other.tt_hits;
-        self.tt_misses += other.tt_misses;
-        self.tt_inserts += other.tt_inserts;
+        self.completed_simulations += other.completed_simulations;
+        self.backend_evaluations += other.backend_evaluations;
+        self.evaluation_cache_hits += other.evaluation_cache_hits;
+        self.duplicate_leaves += other.duplicate_leaves;
+        self.nodes_created += other.nodes_created;
+        self.maximum_search_depth = self.maximum_search_depth.max(other.maximum_search_depth);
+    }
+
+    pub(crate) fn add_search_diagnostics(&mut self, diagnostics: SearchDiagnostics) {
+        self.completed_simulations += diagnostics.completed_simulations as u64;
+        self.backend_evaluations += diagnostics.backend_evaluations as u64;
+        self.evaluation_cache_hits += diagnostics.evaluation_cache_hits as u64;
+        self.duplicate_leaves += diagnostics.duplicate_leaves as u64;
+        self.nodes_created += diagnostics.nodes_created as u64;
+        self.maximum_search_depth = self.maximum_search_depth.max(diagnostics.max_depth);
     }
 }
 

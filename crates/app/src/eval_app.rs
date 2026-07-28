@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use games::setup::{ChessSetup, Connect4Setup, GameSetup};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -114,6 +113,46 @@ struct BenchResult {
     analysis: Analysis,
 }
 
+#[derive(Serialize)]
+struct BenchSummary {
+    cases: usize,
+    correct: usize,
+    accuracy: f64,
+}
+
+struct BenchRunner {
+    game: GameKind,
+    run_dir: PathBuf,
+    device: Device,
+    server: Option<String>,
+}
+
+impl BenchRunner {
+    fn from_args(args: &BenchArgs) -> Self {
+        Self {
+            game: args.game,
+            run_dir: run_dir(args.game, args.run_dir.clone()),
+            device: Device::cuda_if_available(),
+            server: args.server.clone(),
+        }
+    }
+
+    fn analyze(&self, args: &BenchArgs, position: GameSetup) -> Result<Analysis> {
+        let request = AnalyzeRequest {
+            position,
+            model: args.model.clone(),
+            mode: Some(args.mode.into()),
+            simulations: args.simulations,
+            wait_for_count: args.wait_for_count,
+        };
+
+        match self.server.as_deref() {
+            Some(server) => remote_analyze_request(server, &request),
+            None => analyze_request(self.game, self.run_dir.clone(), request, self.device),
+        }
+    }
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -145,83 +184,118 @@ fn analyze_cmd(args: AnalyzeArgs) -> Result<()> {
 }
 
 fn bench_cmd(args: BenchArgs) -> Result<()> {
-    let run_dir = run_dir(args.game, args.run_dir);
-    let device = Device::cuda_if_available();
-    let server = args.server.clone();
+    let cases = read_bench_cases(&args.suite)?;
+    let runner = BenchRunner::from_args(&args);
+
     let mut rows = Vec::new();
     let mut report_rows = Vec::new();
-    for (line_no, line) in fs::read_to_string(&args.suite)?.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let case: BenchCase = serde_json::from_str(line)
-            .with_context(|| format!("parsing {}:{}", args.suite.display(), line_no + 1))?;
-        let req = AnalyzeRequest {
-            position: case.position.clone(),
-            model: args.model.clone(),
-            mode: Some(args.mode.into()),
-            simulations: args.simulations,
-            wait_for_count: args.wait_for_count,
-        };
-        let analysis = match &server {
-            Some(server) => remote_analyze_request(server, &req)?,
-            None => analyze_request(args.game, run_dir.clone(), req, device)?,
-        };
+
+    for case in cases {
+        let analysis = runner.analyze(&args, case.position.clone())?;
         let correct = analysis
             .best_move
             .as_ref()
             .is_some_and(|mv| case.expected.iter().any(|e| e == mv));
-        rows.push(BenchResult {
-            expected: case.expected.clone(),
-            best_move: analysis.best_move.clone(),
-            correct,
-            analysis: analysis.clone(),
-        });
+        let expected = case.expected.clone();
+        let best_move = analysis.best_move.clone();
+
         if args.html.is_some() {
-            let board = chess_board_for_position(&case.position)?;
-            report_rows.push(BenchReportRow {
-                name: case.name,
-                category: case.category,
-                position: case.position,
-                board,
-                expected: case.expected,
-                best_move: analysis.best_move.clone(),
-                correct,
-                analysis,
-            });
+            report_rows.push(report_row(case, analysis.clone(), correct)?);
         }
+
+        rows.push(BenchResult {
+            expected,
+            best_move,
+            correct,
+            analysis,
+        });
     }
 
-    let mut out: Box<dyn Write> = match args.output {
+    write_bench_results(args.output.as_ref(), &rows)?;
+    write_bench_html(args.html.as_ref(), &args, &report_rows)?;
+
+    Ok(())
+}
+
+fn read_bench_cases(suite: &PathBuf) -> Result<Vec<BenchCase>> {
+    fs::read_to_string(suite)?
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(line_no, line)| {
+            serde_json::from_str(line)
+                .with_context(|| format!("parsing {}:{}", suite.display(), line_no + 1))
+        })
+        .collect()
+}
+
+fn report_row(case: BenchCase, analysis: Analysis, correct: bool) -> Result<BenchReportRow> {
+    let board = chess_board_for_position(&case.position)?;
+
+    Ok(BenchReportRow {
+        name: case.name,
+        category: case.category,
+        position: case.position,
+        board,
+        expected: case.expected,
+        best_move: analysis.best_move.clone(),
+        correct,
+        analysis,
+    })
+}
+
+fn write_bench_results(output: Option<&PathBuf>, rows: &[BenchResult]) -> Result<()> {
+    let mut out: Box<dyn Write> = match output {
         Some(path) => Box::new(fs::File::create(path)?),
         None => Box::new(std::io::stdout()),
     };
-    let correct = rows.iter().filter(|r| r.correct).count();
-    writeln!(
-        out,
-        "{}",
-        serde_json::to_string(&json!({
-            "cases": rows.len(),
-            "correct": correct,
-            "accuracy": if rows.is_empty() { 0.0 } else { correct as f64 / rows.len() as f64 },
-        }))?
-    )?;
+
+    writeln!(out, "{}", serde_json::to_string(&bench_summary(rows))?)?;
     for row in rows {
         writeln!(out, "{}", serde_json::to_string(&row)?)?;
     }
-    if let Some(path) = args.html {
-        let report = BenchReport {
-            title: "engine-zoo Puzzle Evaluation",
-            game: args.game,
-            model: &args.model,
-            mode: match args.mode {
-                CliAnalyzeMode::Net => "network",
-                CliAnalyzeMode::Mcts => "mcts",
-            },
-            rows: &report_rows,
-        };
-        fs::write(path, render_bench_report(&report))?;
+
+    Ok(())
+}
+
+fn bench_summary(rows: &[BenchResult]) -> BenchSummary {
+    let correct = rows.iter().filter(|row| row.correct).count();
+    let accuracy = if rows.is_empty() {
+        0.0
     }
+    else {
+        correct as f64 / rows.len() as f64
+    };
+
+    BenchSummary {
+        cases: rows.len(),
+        correct,
+        accuracy,
+    }
+}
+
+fn write_bench_html(
+    html: Option<&PathBuf>,
+    args: &BenchArgs,
+    report_rows: &[BenchReportRow],
+) -> Result<()> {
+    let Some(path) = html
+    else {
+        return Ok(());
+    };
+    let report = BenchReport {
+        title: "engine-zoo Puzzle Evaluation",
+        game: args.game,
+        model: &args.model,
+        mode: match args.mode {
+            CliAnalyzeMode::Net => "network",
+            CliAnalyzeMode::Mcts => "mcts",
+        },
+        rows: report_rows,
+    };
+
+    fs::write(path, render_bench_report(&report))?;
+
     Ok(())
 }
 
