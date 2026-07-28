@@ -1,6 +1,6 @@
 use crate::{
-    batcher, device, environment, harness, inference, replay, representation, search, self_play,
-    training,
+    batcher, device, environment, harness, inference, iteration, replay, representation, search,
+    self_play, training,
 };
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -27,9 +27,69 @@ enum BenchmarkCommand {
     #[command(name = "self-play")]
     SelfPlay(OutputArgs),
     Training(OutputArgs),
+    /// Run a complete self-play, training, checkpoint, and inference-reload iteration.
+    Iteration(IterationArgs),
     #[command(name = "end-to-end")]
     EndToEnd(OutputArgs),
     Suite(OutputArgs),
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct IterationArgs {
+    /// Immutable experiment TOML used to construct each measured training run.
+    #[arg(
+        long,
+        default_value = "benchmarks/configs/full-iteration-cuda-200.toml"
+    )]
+    pub(crate) experiment: PathBuf,
+
+    /// Override the configured number of self-play games.
+    #[arg(long)]
+    pub(crate) games: Option<usize>,
+
+    /// Override the configured training steps per iteration.
+    #[arg(long)]
+    pub(crate) train_steps: Option<usize>,
+
+    /// Override the configured training batch size.
+    #[arg(long)]
+    pub(crate) batch_size: Option<usize>,
+
+    /// Override the configured training micro-batch size.
+    #[arg(long)]
+    pub(crate) micro_batch_size: Option<usize>,
+
+    /// Override the deterministic experiment seed.
+    #[arg(long)]
+    pub(crate) seed: Option<u64>,
+
+    /// Execution device. CUDA is the default; use `auto` to permit CPU fallback.
+    #[arg(long, value_enum, default_value_t = device::DeviceKind::Cuda)]
+    pub(crate) device: device::DeviceKind,
+
+    /// Override the inference precision stored in the experiment.
+    #[arg(long, value_enum)]
+    pub(crate) precision: Option<device::Precision>,
+
+    /// Full iterations to run before recording samples. Defaults to zero because a warmup changes replay contents.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) warmup_iterations: usize,
+
+    /// Number of independent, fresh full iterations to record.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) samples: usize,
+
+    /// A stable name recorded in the JSON artifact, such as `before-policy-cache`.
+    #[arg(long)]
+    pub(crate) name: Option<String>,
+
+    /// Write the complete machine-readable JSON report to this path.
+    #[arg(long)]
+    pub(crate) output: Option<PathBuf>,
+
+    /// Also print a concise human-readable summary.
+    #[arg(long)]
+    pub(crate) human: bool,
 }
 
 #[derive(Args, Clone)]
@@ -153,6 +213,10 @@ pub fn run(command: Command) -> Result<()> {
             )?,
             &args,
         ),
+        BenchmarkCommand::Iteration(args) => {
+            let report = iteration::full_training_iteration(&args)?;
+            write_iteration(report, &args)
+        }
         BenchmarkCommand::EndToEnd(args) => write(end_to_end(&args)?, &args),
     }
 }
@@ -237,14 +301,37 @@ fn config_value(args: &OutputArgs) -> Result<Value> {
 }
 
 fn write(report: crate::report::BenchmarkReport, args: &OutputArgs) -> Result<()> {
+    write_report(report, args.output.as_deref(), args.human)
+}
+
+fn write_iteration(report: crate::report::BenchmarkReport, args: &IterationArgs) -> Result<()> {
+    write_report(report, args.output.as_deref(), args.human)
+}
+
+fn write_report(
+    report: crate::report::BenchmarkReport,
+    output: Option<&std::path::Path>,
+    human: bool,
+) -> Result<()> {
     let json = serde_json::to_string_pretty(&report)?;
     println!("{json}");
 
-    if args.human {
+    if human {
         print_human(&report);
     }
 
-    if let Some(path) = &args.output {
+    if let Some(path) = output {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create benchmark output directory {}",
+                    parent.display()
+                )
+            })?;
+        }
         std::fs::write(path, format!("{json}\n"))
             .with_context(|| format!("failed to write benchmark report {}", path.display()))?;
     }

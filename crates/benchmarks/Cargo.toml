@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Reproducible benchmarks for engine-zoo"
+build = "build.rs"
 
 [dependencies]
 anyhow.workspace = true

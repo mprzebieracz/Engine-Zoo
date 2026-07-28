@@ -4,6 +4,7 @@ mod device;
 mod environment;
 mod harness;
 mod inference;
+mod iteration;
 mod replay;
 mod report;
 mod representation;

@@ -82,4 +82,18 @@ mod tests {
             Device::Cpu | Device::Cuda(_)
         ));
     }
+
+    #[test]
+    fn explicit_cuda_never_falls_back_to_cpu() {
+        let selected = select(DeviceKind::Cuda);
+        if Cuda::is_available() {
+            assert_eq!(selected.unwrap(), Device::Cuda(0));
+        }
+        else {
+            assert!(selected
+                .unwrap_err()
+                .to_string()
+                .contains("does not fall back"));
+        }
+    }
 }

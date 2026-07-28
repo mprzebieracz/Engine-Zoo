@@ -2,6 +2,7 @@
 /data/runs
 /benchmark
 /benchmark-results
+/artifacts/profiles/
 /scratch
 *.safetensors
 .vscode

@@ -4,6 +4,7 @@ use crate::report::{
 use anyhow::Result;
 use serde_json::json;
 use std::process::Command;
+use tch::Cuda;
 
 pub fn report() -> Result<BenchmarkReport> {
     Ok(BenchmarkReport {
@@ -71,6 +72,12 @@ pub fn host() -> HostMetadata {
         cpu_model: cpu_model(),
         cpu_count: std::thread::available_parallelism().map_or(1, usize::from),
         gpu: command("nvidia-smi", &["--query-gpu=name", "--format=csv,noheader"]),
+        gpu_driver: command(
+            "nvidia-smi",
+            &["--query-gpu=driver_version", "--format=csv,noheader"],
+        ),
+        cuda_available: Cuda::is_available(),
+        cuda_device_count: Cuda::device_count(),
     }
 }
 
