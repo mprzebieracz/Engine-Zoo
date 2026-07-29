@@ -34,12 +34,13 @@ impl Batcher {
     ) -> Result<Self> {
         match (config.engine, source) {
             (InferenceEngine::Native, InferenceSource::Checkpoint(checkpoint)) => {
-                Self::new_with_model_precision(
+                Self::new_with_model_precision_and_fp16_host_staging(
                     model.clone(),
                     checkpoint,
                     device,
                     config.batcher_config(),
                     config.precision,
+                    config.fp16_host_staging,
                 )
             }
             (InferenceEngine::TensorRtTorchScript, InferenceSource::TensorRtModule(module)) => {

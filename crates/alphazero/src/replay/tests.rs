@@ -39,6 +39,28 @@ fn sampled_states_are_encoded_only_at_load_time() {
         .unwrap();
     assert_eq!(batch.states.size(), [1, 42]);
     assert_eq!(batch.outcomes.int64_value(&[0]), Outcome::Draw.wdl_index());
+    assert_eq!(batch.policy_weight_sum, 1.0);
+    assert_eq!(batch.value_weight_sum, 1.0);
+}
+
+#[test]
+fn sampled_batch_keeps_cpu_weight_sums_for_loss_activation() {
+    let replay = ReplayBuffer::new(2, 7);
+    let mut policy_only = sample(1);
+    policy_only.weights.value = 0.0;
+
+    let mut value_only = sample(2);
+    value_only.weights.policy = 0.0;
+    value_only.policy = SparsePolicy::new([]).unwrap();
+
+    replay.add([policy_only, value_only]);
+    let mut rng = SmallRng::seed_from_u64(1);
+    let batch = replay
+        .sample(2, &Connect4AzRepresentation, &mut rng)
+        .unwrap();
+
+    assert_eq!(batch.policy_weight_sum, 1.0);
+    assert_eq!(batch.value_weight_sum, 1.0);
 }
 
 #[test]

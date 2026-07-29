@@ -1,0 +1,48 @@
+# Training-oriented CUDA schedule: 25% full PUCT searches and 75% fast
+# value-only searches. Use this fixture to compare strength per GPU-hour.
+format_version = 3
+seed = 1
+
+[model]
+architecture = "chess-se"
+history = "one"
+blocks = 12
+channels = 128
+se_hidden = 16
+value_head = { wdl = { hidden = 128 } }
+
+[self_play]
+num_games = 500
+threads = 16
+max_moves = 512
+progress_every = 0
+evaluation_cache_entries = 1000000
+
+[self_play.search]
+algorithm = "puct"
+leaf_batch_size = 16
+
+[self_play.budget_schedule.playout-cap-randomization]
+full_probability = 0.25
+fast_policy_weight = 0.0
+
+[self_play.budget_schedule.playout-cap-randomization.full.puct]
+simulations = 256
+
+[self_play.budget_schedule.playout-cap-randomization.fast.puct]
+simulations = 64
+
+[training]
+micro_batch_size = 256
+batch_size = 2048
+train_steps = 80
+progress_every = 0
+
+[inference]
+precision = "fp16"
+preferred_batch_size = 16
+max_batch_size = 256
+max_queued_states = 4096
+
+[inference.max_wait]
+milliseconds = 16

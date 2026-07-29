@@ -2,6 +2,7 @@ use super::{CombinedEncodedBatch, InferenceBackend};
 use crate::evaluator::Evaluation;
 use crate::network::ModelSpec;
 use anyhow::{anyhow, Context, Result};
+use half::f16;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tch::{nn, CModule, Device, IValue, Kind, Tensor};
@@ -21,6 +22,7 @@ pub struct TchInferenceBackend {
     device: Device,
     input_kind: Kind,
     precision: InferencePrecision,
+    fp16_host_staging: bool,
     states_buf: Option<Tensor>,
     index_buf: Option<Tensor>,
     gathered_buf: Option<Tensor>,
@@ -44,6 +46,18 @@ impl TchInferenceBackend {
         device: Device,
         precision: InferencePrecision,
     ) -> Result<Self> {
+        Self::new_with_fp16_host_staging(spec, weights, device, precision, false)
+    }
+
+    /// Enables the optional A/B path that converts state planes to FP16 on the
+    /// CPU before copying the pinned buffer to CUDA.
+    pub fn new_with_fp16_host_staging(
+        spec: ModelSpec,
+        weights: &Path,
+        device: Device,
+        precision: InferencePrecision,
+        fp16_host_staging: bool,
+    ) -> Result<Self> {
         anyhow::ensure!(
             precision == InferencePrecision::Fp32 || device.is_cuda(),
             "FP16 inference is only supported on CUDA"
@@ -64,6 +78,7 @@ impl TchInferenceBackend {
                 InferencePrecision::Fp16 => Kind::Half,
             },
             precision,
+            fp16_host_staging,
             states_buf: None,
             index_buf: None,
             gathered_buf: None,
@@ -97,6 +112,7 @@ impl TchInferenceBackend {
             // contract uses FP32 inputs and outputs.
             input_kind: Kind::Float,
             precision: InferencePrecision::Fp32,
+            fp16_host_staging: false,
             states_buf: None,
             index_buf: None,
             gathered_buf: None,
@@ -149,6 +165,30 @@ impl TchInferenceBackend {
 
         values[row * row_stride..row * row_stride + legal_actions].to_vec()
     }
+
+    fn use_fp16_host_staging(&self) -> bool {
+        self.device.is_cuda()
+            && self.precision == InferencePrecision::Fp16
+            && self.fp16_host_staging
+    }
+
+    fn copy_states_as_fp16(states_host: &Tensor, states: &[f32]) {
+        let dst = unsafe {
+            std::slice::from_raw_parts_mut(states_host.data_ptr() as *mut f16, states.len())
+        };
+
+        for (dst, src) in dst.iter_mut().zip(states) {
+            *dst = f16::from_f32(*src);
+        }
+    }
+
+    fn copy_states_as_fp32(states_host: &Tensor, states: &[f32]) {
+        let dst = unsafe {
+            std::slice::from_raw_parts_mut(states_host.data_ptr() as *mut f32, states.len())
+        };
+
+        dst.copy_from_slice(states);
+    }
 }
 
 impl InferenceBackend for TchInferenceBackend {
@@ -189,27 +229,40 @@ impl TchInferenceBackend {
         let n = rows as i64;
         let [c, h, w] = self.spec.state_shape();
         let min_rows = rows as i64;
+        let state_kind = if self.use_fp16_host_staging() {
+            Kind::Half
+        }
+        else {
+            Kind::Float
+        };
         let states_host = Self::staging(
             &mut self.states_buf,
             min_rows,
             c * h * w,
-            Kind::Float,
+            state_kind,
             self.device,
         );
-        unsafe {
-            let dst = std::slice::from_raw_parts_mut(
-                states_host.data_ptr() as *mut f32,
-                (states_host.size()[0] * states_host.size()[1]) as usize,
-            );
-            dst[..batch.states.len()].copy_from_slice(&batch.states);
+        let inputs = if self.use_fp16_host_staging() {
+            Self::copy_states_as_fp16(&states_host, &batch.states);
+
+            states_host.narrow(0, 0, n).view([n, c, h, w]).to_device_(
+                self.device,
+                Kind::Half,
+                true,
+                false,
+            )
         }
-        // Host staging remains FP32. The device copy happens before the FP16
-        // cast, which preserves pinned-transfer performance and correct dtype.
-        let inputs = states_host
-            .narrow(0, 0, n)
-            .view([n, c, h, w])
-            .to_device_(self.device, Kind::Float, true, false)
-            .to_kind(self.input_kind);
+        else {
+            Self::copy_states_as_fp32(&states_host, &batch.states);
+
+            // The default path preserves the established FP32 host upload and
+            // GPU-side FP16 conversion for an apples-to-apples benchmark.
+            states_host
+                .narrow(0, 0, n)
+                .view([n, c, h, w])
+                .to_device_(self.device, Kind::Float, true, false)
+                .to_kind(self.input_kind)
+        };
         let (policy, value) = match &self.model {
             LoadedModel::Native(native) => {
                 let output = native.net.forward_t(&inputs, false);
@@ -382,5 +435,16 @@ mod tests {
             [20.0, 21.0]
         );
         assert_eq!(TchInferenceBackend::gathered_logits(&active, 1, 1), [20.0]);
+    }
+
+    #[test]
+    fn fp16_host_staging_converts_encoded_states_on_cpu() {
+        let staging = Tensor::zeros([1, 4], (Kind::Half, Device::Cpu));
+        let states = [0.0, 0.5, -1.0, 12.25];
+
+        TchInferenceBackend::copy_states_as_fp16(&staging, &states);
+
+        let actual: Vec<f32> = staging.to_kind(Kind::Float).view(-1).try_into().unwrap();
+        assert_eq!(actual, states);
     }
 }

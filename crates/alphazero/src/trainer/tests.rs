@@ -12,10 +12,6 @@ fn rejects_invalid_training_config() {
             ..TrainConfig::default()
         },
         TrainConfig {
-            train_steps: 0,
-            ..TrainConfig::default()
-        },
-        TrainConfig {
             prefetch_depth: 0,
             ..TrainConfig::default()
         },
@@ -26,6 +22,35 @@ fn rejects_invalid_training_config() {
     ] {
         assert!(cfg.validate().is_err());
     }
+}
+
+#[test]
+fn zero_train_steps_skips_training() {
+    use crate::representation::Connect4AzRepresentation;
+    use crate::{ModelSpec, Network, ReplayBuffer};
+    use games::Connect4;
+    use tch::{nn, Device};
+
+    let vs = nn::VarStore::new(Device::Cpu);
+    let network = Network::new(&vs.root(), &ModelSpec::connect4_basic(1, 4)).unwrap();
+    let mut optimizer = build_optimizer(&vs, &TrainConfig::default()).unwrap();
+    let replay = ReplayBuffer::<Connect4>::new(8, 7);
+    let config = TrainConfig {
+        train_steps: 0,
+        ..TrainConfig::default()
+    };
+
+    assert!(train(
+        &network,
+        &mut optimizer,
+        &replay,
+        &Connect4AzRepresentation,
+        Device::Cpu,
+        &config,
+        7,
+        0,
+    )
+    .is_none());
 }
 
 #[test]
@@ -135,7 +160,9 @@ fn device_batch_rebases_sparse_rows_for_a_microbatch() {
         },
         outcomes: Tensor::from_slice(&[1i64, 2]),
         policy_weights: Tensor::ones([2], (Kind::Float, Device::Cpu)),
+        policy_weight_sum: 2.0,
         value_weights: Tensor::ones([2], (Kind::Float, Device::Cpu)),
+        value_weight_sum: 2.0,
     };
     let device = DeviceReplayBatch::from_cpu(batch, Device::Cpu);
     let policies = device.policy_rows(1, 1);

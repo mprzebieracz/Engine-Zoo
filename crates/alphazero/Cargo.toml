@@ -14,6 +14,7 @@ anyhow.workspace = true
 chess.workspace = true
 engine_core = { path = "../core" }
 games = { path = "../games" }
+half.workspace = true
 rand.workspace = true
 search = { path = "../search" }
 serde.workspace = true

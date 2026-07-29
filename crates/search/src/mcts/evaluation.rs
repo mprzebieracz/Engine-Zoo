@@ -1,6 +1,6 @@
 use super::cache::CachedEvaluation;
 use super::core::MctsCore;
-use crate::{EvaluationError, EvaluationKey, PositionValue};
+use crate::{EvaluationError, PositionValue};
 use engine_core::GameState;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
@@ -114,54 +114,75 @@ where
             requested_states: states.len(),
             ..EvaluationBatchStats::default()
         };
-        let mut out: Vec<Option<CachedEvaluation<G::Move>>> = vec![None; states.len()];
-        let mut misses = Vec::new();
-        let mut keys: Vec<Option<EvaluationKey>> = Vec::new();
-        let mut destinations = Vec::new();
+
+        self.evaluation_workspace.outputs.clear();
+        self.evaluation_workspace.outputs.resize(states.len(), None);
+        self.evaluation_workspace.misses.clear();
+        self.evaluation_workspace.keys.clear();
+        self.evaluation_workspace.destinations.clear();
+        self.evaluation_workspace.unique.clear();
+
         for (i, state) in states.iter().enumerate() {
             let Some(key) = self.evaluator.evaluation_key(state)
             else {
-                let j = misses.len();
-                misses.push(state.clone());
-                keys.push(None);
-                destinations.push((i, Some(j)));
+                let destination = self.evaluation_workspace.misses.len();
+                self.evaluation_workspace.misses.push(state.clone());
+                self.evaluation_workspace.keys.push(None);
+                self.evaluation_workspace
+                    .destinations
+                    .push((i, destination));
                 continue;
             };
             if let Some(cache) = &self.eval_cache {
                 if let Some(value) = cache.get(key) {
-                    out[i] = Some(value);
+                    self.evaluation_workspace.outputs[i] = Some(value);
                     stats.cache_hits += 1;
                     continue;
                 }
             }
-            if let Some(j) = keys.iter().position(|&k| k == Some(key)) {
-                destinations.push((i, Some(j)));
+            if let Some(destination) = self
+                .evaluation_workspace
+                .keys
+                .iter()
+                .position(|&candidate| candidate == Some(key))
+            {
+                self.evaluation_workspace
+                    .destinations
+                    .push((i, destination));
                 stats.duplicate_requests += 1;
             }
             else {
-                keys.push(Some(key));
-                destinations.push((i, Some(misses.len())));
-                misses.push(state.clone());
+                let destination = self.evaluation_workspace.misses.len();
+                self.evaluation_workspace.keys.push(Some(key));
+                self.evaluation_workspace
+                    .destinations
+                    .push((i, destination));
+                self.evaluation_workspace.misses.push(state.clone());
             }
         }
+
         self.legal_moves.clear();
         self.offsets.clear();
         self.offsets.push(0);
-        for state in &misses {
+
+        for state in &self.evaluation_workspace.misses {
             self.legal_moves.extend(state.legal_moves());
             self.offsets.push(self.legal_moves.len() as u32);
         }
-        let evaluations = self
-            .evaluator
-            .evaluate(&misses, &self.legal_moves, &self.offsets)?;
-        if evaluations.len() != misses.len() {
+
+        let evaluations = self.evaluator.evaluate(
+            &self.evaluation_workspace.misses,
+            &self.legal_moves,
+            &self.offsets,
+        )?;
+        if evaluations.len() != self.evaluation_workspace.misses.len() {
             return Err(crate::EvaluationError::result_cardinality(
-                misses.len(),
+                self.evaluation_workspace.misses.len(),
                 evaluations.len(),
             ));
         }
-        stats.backend_evaluations = misses.len();
-        let mut unique = Vec::with_capacity(misses.len());
+
+        stats.backend_evaluations = self.evaluation_workspace.misses.len();
         for (i, eval) in evaluations.into_iter().enumerate() {
             let begin = self.offsets[i] as usize;
             let end = self.offsets[i + 1] as usize;
@@ -185,15 +206,24 @@ where
                 eval.logits,
                 eval.value,
             );
-            if let (Some(cache), Some(key)) = (&self.eval_cache, keys[i]) {
+            if let (Some(cache), Some(key)) = (&self.eval_cache, self.evaluation_workspace.keys[i])
+            {
                 cache.insert(key, value.clone());
             }
-            unique.push(value);
+            self.evaluation_workspace.unique.push(value);
         }
-        for (i, destination) in destinations {
-            out[i] = Some(unique[destination.unwrap()].clone());
+
+        for &(index, destination) in &self.evaluation_workspace.destinations {
+            self.evaluation_workspace.outputs[index] =
+                Some(self.evaluation_workspace.unique[destination].clone());
         }
-        let evaluations = out.into_iter().map(Option::unwrap).collect::<Vec<_>>();
+
+        let evaluations = self
+            .evaluation_workspace
+            .outputs
+            .drain(..)
+            .map(Option::unwrap)
+            .collect::<Vec<_>>();
         debug_assert_eq!(stats.requested_states, evaluations.len());
         Ok((evaluations, stats))
     }

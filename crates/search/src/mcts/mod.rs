@@ -78,6 +78,15 @@ impl SearchRequest {
     }
 }
 
+/// Limits parallel leaf selection so fast searches do not spend most of their
+/// budget on one stale selection round.
+///
+/// Search budgets are validated before this is called, but the final `max`
+/// keeps the helper safe for direct callers and documents its non-zero result.
+pub(super) fn effective_leaf_batch_size(configured_leaf_batch: usize, simulations: usize) -> usize {
+    configured_leaf_batch.min(simulations.div_ceil(4)).max(1)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchConfigError(&'static str);
 
@@ -507,6 +516,9 @@ pub(super) struct Node<M, Meta = ()> {
     completed_visits: u32,
     in_flight_visits: u32,
     value_sum_from_node_pov: f32,
+    /// Sum of priors for direct children that have completed at least one visit.
+    /// This lets reduction FPU avoid scanning every child during selection.
+    visited_child_prior_mass: f32,
     prior: f32,
     logit: f32,
     reward: PositionValue,
@@ -533,6 +545,7 @@ impl<M, Meta: Default> Node<M, Meta> {
             completed_visits: 0,
             in_flight_visits: 0,
             value_sum_from_node_pov: 0.0,
+            visited_child_prior_mass: 0.0,
             prior,
             logit,
             reward,

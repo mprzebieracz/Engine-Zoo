@@ -1,7 +1,7 @@
 use super::core::{LeafBatch, MctsCore};
 use super::{
-    FpuConfig, InFlightConfig, Node, PuctConfig, PuctSelectionConfig, PuctTreeConfig,
-    SearchDiagnostics, SearchResult,
+    effective_leaf_batch_size, FpuConfig, InFlightConfig, Node, PuctConfig, PuctSelectionConfig,
+    PuctTreeConfig, SearchDiagnostics, SearchResult,
 };
 use crate::PositionValue;
 use engine_core::agent::PolicyMode;
@@ -92,7 +92,8 @@ where
         );
         self.expand(0);
 
-        let mut batch = LeafBatch::with_capacity(self.variant.leaf_batch_size);
+        let leaf_batch_size = effective_leaf_batch_size(self.variant.leaf_batch_size, simulations);
+        let mut batch = LeafBatch::with_capacity(leaf_batch_size);
         let mut diagnostics = SearchDiagnostics {
             backend_evaluations: root_stats.backend_evaluations,
             evaluation_cache_hits: root_stats.cache_hits,
@@ -104,6 +105,7 @@ where
             self.collect_puct_leaves(
                 game,
                 remaining,
+                leaf_batch_size,
                 context,
                 &mut batch.leaves,
                 &mut diagnostics,
@@ -132,12 +134,13 @@ where
         &mut self,
         game: &G,
         budget: usize,
+        leaf_batch_size: usize,
         context: R::Context<'_>,
         leaves: &mut Vec<super::core::PendingLeaf<G>>,
         diagnostics: &mut SearchDiagnostics,
     ) {
         leaves.clear();
-        for _ in 0..budget.min(self.variant.leaf_batch_size) {
+        for _ in 0..budget.min(leaf_batch_size) {
             let (node, state, depth) = self.descend(game, 0, context, |core, node| {
                 puct_child(core, node, core.tree_config())
             });
@@ -171,11 +174,6 @@ where
     let parent_visits = parent.selection_visits();
     let c = dynamic_c(config.selection, parent_visits);
     let sqrt_parent = (parent_visits as f32 + 1.0).sqrt();
-    let visited_prior_mass: f32 = child_indices(core, node)
-        .map(|child| &core.nodes[child as usize])
-        .filter(|child| child.completed_visits > 0)
-        .map(|child| child.prior)
-        .sum();
     let parent_q = parent.completed_q().unwrap_or(parent.raw_value).as_f32();
     let fpu = match config.fpu {
         FpuConfig::Absolute { value, root_value } => {
@@ -196,20 +194,27 @@ where
             else {
                 reduction
             };
-            parent_q - reduction * visited_prior_mass.sqrt()
+            parent_q - reduction * parent.visited_child_prior_mass.sqrt()
         }
     };
 
-    child_indices(core, node).max_by(|&left, &right| {
-        puct_score(core, left, c, sqrt_parent, fpu, config.in_flight).total_cmp(&puct_score(
-            core,
-            right,
-            c,
-            sqrt_parent,
-            fpu,
-            config.in_flight,
-        ))
-    })
+    let mut children = child_indices(core, node);
+    let mut best_child = children.next()?;
+    let mut best_score = puct_score(core, best_child, c, sqrt_parent, fpu, config.in_flight);
+
+    for child in children {
+        let score = puct_score(core, child, c, sqrt_parent, fpu, config.in_flight);
+
+        // `Iterator::max_by` selects the last item on an equal score. Keep
+        // that deterministic tie-breaking behavior while evaluating each
+        // candidate score exactly once.
+        if score.total_cmp(&best_score).is_ge() {
+            best_child = child;
+            best_score = score;
+        }
+    }
+
+    Some(best_child)
 }
 
 fn puct_score<G, E, R, V>(
@@ -226,7 +231,16 @@ where
     R: crate::SearchRules<G>,
     V: 'static,
 {
-    let child = &core.nodes[child as usize];
+    puct_node_score(&core.nodes[child as usize], c, sqrt_parent, fpu, in_flight)
+}
+
+fn puct_node_score<M, Meta: Default>(
+    child: &Node<M, Meta>,
+    c: f32,
+    sqrt_parent: f32,
+    fpu: f32,
+    in_flight: InFlightConfig,
+) -> f32 {
     let mut q = child
         .completed_q()
         .map_or(fpu, |value| value.flipped().as_f32());
@@ -238,6 +252,51 @@ where
         }
     }
     q + c * child.prior * sqrt_parent / (1 + child.selection_visits()) as f32
+}
+
+#[cfg(test)]
+mod score_tests {
+    use super::*;
+
+    fn child(completed_visits: u32, in_flight_visits: u32) -> Node<u8> {
+        let mut child = Node::new(None, None, 0.5, 0.0, false, PositionValue::DRAW);
+        child.completed_visits = completed_visits;
+        child.in_flight_visits = in_flight_visits;
+        child.value_sum_from_node_pov = completed_visits as f32 * 0.6;
+        child
+    }
+
+    #[test]
+    fn unvisited_child_uses_fpu_value() {
+        let child = child(0, 0);
+        let score = puct_node_score(
+            &child,
+            0.0,
+            1.0,
+            -0.25,
+            InFlightConfig::UnscoredVirtualVisits,
+        );
+
+        assert_eq!(score, -0.25);
+    }
+
+    #[test]
+    fn virtual_loss_adjusts_completed_q_before_exploration() {
+        let child = child(2, 3);
+        let score = puct_node_score(
+            &child,
+            0.0,
+            1.0,
+            0.0,
+            InFlightConfig::VirtualLoss {
+                value: PositionValue::from_finite_clamped(0.4).unwrap(),
+            },
+        );
+
+        // The child Q is flipped from the child's perspective, then virtual
+        // losses are included in the same selection-visit denominator.
+        assert!((score - -0.48).abs() < f32::EPSILON);
+    }
 }
 
 fn child_indices<G, E, R, V>(core: &MctsCore<G, E, R, V>, node: u32) -> std::ops::Range<u32>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Initialize, then continuously run the checked-in chess PUCT experiment."""
+"""Initialize, then continuously run the checked-in chess Root-Gumbel PUCT experiment."""
 
 from __future__ import annotations
 

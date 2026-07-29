@@ -1,21 +1,22 @@
+# Leaf-batch tuning screen. Keep every setting fixed except leaf_batch_size.
+# The Root-Gumbel 256/64 mixed schedule uses the fastest observed batcher setup.
 format_version = 3
 seed = 1
 
-# Default chess training recipe. Root Gumbel exploration is used at the root,
-# with PUCT below it. One quarter of positions receive the full 256-playout
-# policy target; the fast 64-playout positions still train the value head.
-
 [model]
 architecture = "chess-se"
-history = "four"
+history = "one"
 blocks = 12
 channels = 128
 se_hidden = 16
 value_head = { wdl = { hidden = 128 } }
 
 [self_play]
-num_games = 128
+num_games = 50
 threads = 24
+max_moves = 512
+progress_every = 0
+evaluation_cache_entries = 1000000
 
 [self_play.search]
 algorithm = "root-gumbel-puct"
@@ -34,13 +35,14 @@ simulations = 64
 max_considered_actions = 8
 
 [training]
+micro_batch_size = 256
 batch_size = 2048
 train_steps = 80
+progress_every = 0
 
 [inference]
-engine = "native"
 precision = "fp16"
-preferred_batch_size = 32
+preferred_batch_size = 128
 max_batch_size = 256
 max_queued_states = 4096
 

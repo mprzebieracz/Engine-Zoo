@@ -62,6 +62,32 @@ truthfully labelled as the combined self-play/checkpoint/reload/persistence
 time; do not treat it as an isolated checkpoint or reload measurement. Use
 `engine-profile` with Nsight Systems to inspect that timeline.
 
+### Root-Gumbel CUDA parameter sweep
+
+Use the benchmark-only sweep runner to screen the global-batcher and MCTS
+parameters for the Root-Gumbel 256/64 schedule. It evaluates the 81-case
+factorial matrix of worker threads (16/24/32), leaf batch (4/8/16), preferred
+global batch (32/64/128), and maximum wait (1/2/4 ms). Every case uses 10
+self-play games, **zero training steps**, FP16 CUDA, max global batch 256, and
+queue capacity 4096. This isolates the self-play/inference pipeline; training
+has its own benchmark. Results use
+`benchmark-results/root-gumbel-256-64-self-play-sweep/`, deliberately separate
+from the old 80-step sweep artifacts. Generated configs and result artifacts
+remain under the chosen output directory, so no production recipe is changed.
+
+```bash
+cargo build --release -p engine-bench
+python3 scripts/sweep_cuda_root_gumbel.py --dry-run
+python3 scripts/sweep_cuda_root_gumbel.py
+
+# Resume safely after interruption; completed valid JSON case results are skipped.
+python3 scripts/sweep_cuda_root_gumbel.py
+```
+
+The runner writes one JSON report per case plus `aggregate.csv` and
+`aggregate.json`, sorted by inference states/s. Use `--limit 1` for a smoke
+run or `--engine-bench path/to/engine-bench` to select a non-default binary.
+
 Representation/replay measurements should cover H1/H4/H8 construction/encoding/action round trips and replay batch sizes 256/1024/4096. GPU measurements should separately report forward-only, legal-logit gather, end-to-end inference, transfer, backward, optimizer, latency percentiles, and samples/s.
 
 ## Profiling prerequisites

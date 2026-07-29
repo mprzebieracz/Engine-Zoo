@@ -67,6 +67,20 @@ fn tensor_rt_inference_requires_a_module_path() {
 }
 
 #[test]
+fn fp16_host_staging_requires_native_fp16_inference() {
+    let mut config = config();
+    config.inference.fp16_host_staging = true;
+    assert!(config.validate().is_err());
+
+    config.inference.precision = crate::InferencePrecision::Fp16;
+    assert!(config.validate().is_ok());
+
+    config.inference.engine = InferenceEngine::TensorRtTorchScript;
+    config.inference.tensor_rt_module = Some("model.ts".into());
+    assert!(config.validate().is_err());
+}
+
+#[test]
 fn initialize_refuses_a_nonempty_directory() {
     let root = std::env::temp_dir().join(format!("engine-zoo-init-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
