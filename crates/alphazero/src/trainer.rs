@@ -51,9 +51,17 @@ pub struct TrainConfig {
     pub micro_batch_size: usize,
     pub batch_size: usize,
     pub train_steps: usize,
+    /// Upper bound on sampled replay positions per newly generated position.
+    ///
+    /// This paces optimizer work to self-play so a small generation cannot be
+    /// repeatedly fitted before the next network produces fresh data.
+    #[serde(default)]
+    pub max_replay_reuse_per_iteration: Option<f64>,
     pub progress_every: usize,
     pub lr: f64,
     pub weight_decay: f64,
+    /// Relative contribution of the value objective to the combined training loss.
+    pub value_loss_weight: f64,
     #[serde(default)]
     pub optimizer: OptimizerSpec,
     #[serde(default)]
@@ -69,9 +77,11 @@ impl Default for TrainConfig {
             micro_batch_size: 256,
             batch_size: 4096,
             train_steps: 80,
+            max_replay_reuse_per_iteration: None,
             progress_every: 10,
             lr: 1e-3,
             weight_decay: 1e-4,
+            value_loss_weight: 1.0,
             optimizer: OptimizerSpec::default(),
             learning_rate_schedule: LearningRateSchedule::default(),
             prefetch_depth: 1,
@@ -91,6 +101,12 @@ impl TrainConfig {
             "prefetch depth must be at most two"
         );
         anyhow::ensure!(self.batch_size > 0, "batch_size must be positive");
+        if let Some(max_replay_reuse) = self.max_replay_reuse_per_iteration {
+            anyhow::ensure!(
+                max_replay_reuse.is_finite() && max_replay_reuse > 0.0,
+                "max replay reuse per iteration must be finite and positive"
+            );
+        }
         anyhow::ensure!(
             self.lr.is_finite() && self.lr > 0.0,
             "lr must be finite and positive"
@@ -99,9 +115,36 @@ impl TrainConfig {
             self.weight_decay.is_finite() && self.weight_decay >= 0.0,
             "weight_decay must be finite and non-negative"
         );
+        anyhow::ensure!(
+            self.value_loss_weight.is_finite() && self.value_loss_weight >= 0.0,
+            "value_loss_weight must be finite and non-negative"
+        );
         validate_optimizer(&self.optimizer)?;
         validate_learning_rate_schedule(&self.learning_rate_schedule)?;
         Ok(())
+    }
+
+    /// Returns the number of optimizer steps permitted after one self-play
+    /// generation. A non-empty generation always receives one step so small
+    /// games do not starve training.
+    pub fn train_steps_for_fresh_replay_samples(&self, fresh_replay_samples: usize) -> usize {
+        if self.train_steps == 0 {
+            return 0;
+        }
+
+        let Some(max_replay_reuse) = self.max_replay_reuse_per_iteration
+        else {
+            return self.train_steps;
+        };
+
+        if fresh_replay_samples == 0 {
+            return 0;
+        }
+
+        let permitted_samples = fresh_replay_samples as f64 * max_replay_reuse;
+        let permitted_steps = (permitted_samples / self.batch_size as f64).floor() as usize;
+
+        self.train_steps.min(permitted_steps.max(1))
     }
 
     pub fn learning_rate_at(&self, step: u64) -> f64 {
@@ -136,6 +179,9 @@ pub struct TrainMetrics {
     pub policy_loss: f64,
     pub value_loss: f64,
     pub train_steps: usize,
+    pub configured_train_steps: usize,
+    pub fresh_replay_samples: usize,
+    pub replay_reuse: f64,
     pub replay_sampling_seconds: f64,
     pub host_to_device_seconds: f64,
     pub forward_backward_seconds: f64,
@@ -171,20 +217,33 @@ impl Trainer {
         representation: &R,
         device: Device,
         seed: TrainingSeed,
+        fresh_replay_samples: usize,
     ) -> Option<TrainMetrics>
     where
         S: GameState + Clone + Send + Sync,
         R: AlphaZeroRepresentation<S>,
     {
-        train_with_optimizer(
+        let effective_train_steps = self
+            .config
+            .train_steps_for_fresh_replay_samples(fresh_replay_samples);
+        let mut effective_config = self.config.clone();
+        effective_config.train_steps = effective_train_steps;
+
+        let mut metrics = train_with_optimizer(
             network,
             &mut self.optimizer,
             replay,
             representation,
             device,
-            &self.config,
+            &effective_config,
             seed,
-        )
+        )?;
+        metrics.configured_train_steps = self.config.train_steps;
+        metrics.fresh_replay_samples = fresh_replay_samples;
+        metrics.replay_reuse = metrics.train_steps as f64 * self.config.batch_size as f64
+            / fresh_replay_samples.max(1) as f64;
+
+        Some(metrics)
     }
 }
 
@@ -303,6 +362,7 @@ where
                 optimizer,
                 &batch,
                 cfg.micro_batch_size,
+                cfg.value_loss_weight,
                 representation_shape::<S, R>(),
             );
             forward_backward_time += metrics.forward_backward;
@@ -316,6 +376,9 @@ where
         policy_loss: policy_total / completed as f64,
         value_loss: value_total / completed as f64,
         train_steps: completed,
+        configured_train_steps: cfg.train_steps,
+        fresh_replay_samples: 0,
+        replay_reuse: 0.0,
         replay_sampling_seconds: sampling_time.as_secs_f64(),
         host_to_device_seconds: transfer_time.as_secs_f64(),
         forward_backward_seconds: forward_backward_time.as_secs_f64(),
@@ -449,6 +512,7 @@ fn train_device_batch(
     optimizer: &mut Optimizer,
     batch: &DeviceReplayBatch,
     micro_batch_size: usize,
+    value_loss_weight: f64,
     shape: [i64; 4],
 ) -> StepMetrics {
     let rows = batch.outcomes.size()[0] as usize;
@@ -494,7 +558,7 @@ fn train_device_batch(
                 }
             };
             value_metric += numerator.detach();
-            let scaled = numerator / value_denominator.as_ref().unwrap();
+            let scaled = numerator / value_denominator.as_ref().unwrap() * value_loss_weight;
             loss = Some(loss.map_or(scaled.shallow_clone(), |policy| policy + scaled));
         }
         if let Some(loss) = loss {

@@ -223,7 +223,7 @@ where
         self.ensure_inference_is_current()?;
 
         let self_play = self.generate_self_play()?;
-        let training = self.train_network();
+        let training = self.train_network(&self_play);
 
         let next_state = self.advance_state(&self_play, training.as_ref());
         let next_state = self.save_checkpoint(next_state)?;
@@ -245,7 +245,7 @@ where
         self.self_play.run(&self.workers, &self.replay, epoch)
     }
 
-    fn train_network(&mut self) -> Option<TrainMetrics> {
+    fn train_network(&mut self, self_play: &SelfPlayStats) -> Option<TrainMetrics> {
         self.trainer.train(
             &self.network,
             &self.replay,
@@ -255,6 +255,7 @@ where
                 experiment_seed: self.experiment.seed,
                 global_step: self.state.global_step,
             },
+            self_play.moves,
         )
     }
 

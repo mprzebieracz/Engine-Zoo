@@ -19,9 +19,60 @@ fn rejects_invalid_training_config() {
             prefetch_depth: 3,
             ..TrainConfig::default()
         },
+        TrainConfig {
+            max_replay_reuse_per_iteration: Some(0.0),
+            ..TrainConfig::default()
+        },
+        TrainConfig {
+            value_loss_weight: -0.1,
+            ..TrainConfig::default()
+        },
+        TrainConfig {
+            value_loss_weight: f64::NAN,
+            ..TrainConfig::default()
+        },
     ] {
         assert!(cfg.validate().is_err());
     }
+}
+
+#[test]
+fn caps_training_to_fresh_self_play_data() {
+    let config = TrainConfig {
+        batch_size: 2_048,
+        train_steps: 80,
+        max_replay_reuse_per_iteration: Some(1.0),
+        ..TrainConfig::default()
+    };
+
+    assert_eq!(config.train_steps_for_fresh_replay_samples(0), 0);
+    assert_eq!(config.train_steps_for_fresh_replay_samples(1), 1);
+    assert_eq!(config.train_steps_for_fresh_replay_samples(75_000), 36);
+
+    let zero_steps = TrainConfig {
+        train_steps: 0,
+        ..config
+    };
+    assert_eq!(zero_steps.train_steps_for_fresh_replay_samples(75_000), 0);
+}
+
+#[test]
+fn absent_replay_reuse_cap_preserves_existing_training_steps() {
+    let config = TrainConfig {
+        train_steps: 80,
+        max_replay_reuse_per_iteration: None,
+        ..TrainConfig::default()
+    };
+
+    assert_eq!(config.train_steps_for_fresh_replay_samples(0), 80);
+    assert_eq!(config.train_steps_for_fresh_replay_samples(1), 80);
+}
+
+#[test]
+fn value_loss_weight_defaults_to_one_for_existing_experiments() {
+    let config: TrainConfig = toml::from_str("batch_size = 1").unwrap();
+
+    assert_eq!(config.value_loss_weight, 1.0);
 }
 
 #[test]

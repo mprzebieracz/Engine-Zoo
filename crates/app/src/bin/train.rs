@@ -118,27 +118,71 @@ fn run_tensor_rt(
     let (run, _, mut state) = RunDir::open(&run_dir)?;
 
     ensure_latest_checkpoint(&run, experiment, &mut state, device)?;
+    println!("COMPILATION");
     compile_tensor_rt_generation(&run, experiment, device, &compiler)?;
     let mut training_run = TrainingRun::open(&run_dir, device)?;
 
     match limit {
         RunLimit::Iterations(iterations) => {
-            for _ in 0..iterations {
+            for iteration in 1..=iterations {
+                print_iteration_header(iteration);
                 let report = training_run.step()?;
+                print_iteration_report(&report);
                 ensure_tensor_rt_recompile_required(&report.next_inference)?;
+                println!("COMPILATION");
                 compile_tensor_rt_generation(&run, experiment, device, &compiler)?;
                 training_run.reload_tensor_rt_inference()?;
             }
         }
-        RunLimit::Forever => loop {
-            let report = training_run.step()?;
-            ensure_tensor_rt_recompile_required(&report.next_inference)?;
-            compile_tensor_rt_generation(&run, experiment, device, &compiler)?;
-            training_run.reload_tensor_rt_inference()?;
-        },
+        RunLimit::Forever => {
+            let mut iteration = 1;
+
+            loop {
+                print_iteration_header(iteration);
+                let report = training_run.step()?;
+                print_iteration_report(&report);
+                ensure_tensor_rt_recompile_required(&report.next_inference)?;
+                println!("COMPILATION");
+                compile_tensor_rt_generation(&run, experiment, device, &compiler)?;
+                training_run.reload_tensor_rt_inference()?;
+                iteration += 1;
+            }
+        }
     }
 
     Ok(())
+}
+
+fn print_iteration_header(iteration: usize) {
+    println!("\n===== ITERATION {iteration} =====");
+    println!("SELFPLAY");
+}
+
+fn print_iteration_report(report: &alphazero::IterationReport) {
+    println!("TRAINING");
+
+    if let Some(training) = &report.training {
+        println!(
+            "steps: {}/{} | policy loss: {:.5} | value loss: {:.5} | samples/s: {:.1}",
+            training.train_steps,
+            training.configured_train_steps,
+            training.policy_loss,
+            training.value_loss,
+            training.samples_per_second,
+        );
+        println!(
+            "replay: {} fresh samples | reuse: {:.2}x | learning rate: {:.6}",
+            training.fresh_replay_samples, training.replay_reuse, training.learning_rate,
+        );
+    }
+    else {
+        println!("no training steps configured");
+    }
+
+    println!(
+        "iteration total: {} games | {} positions | {} replay samples",
+        report.games, report.moves, report.replay_samples,
+    );
 }
 
 fn tensor_rt_compiler(
@@ -178,10 +222,9 @@ fn compile_tensor_rt_generation(
     compiler: &TensorRtCompiler,
 ) -> Result<()> {
     let started = Instant::now();
-    let module = compile_latest_tensor_rt(run_dir, experiment, device, compiler)?;
+    compile_latest_tensor_rt(run_dir, experiment, device, compiler)?;
     println!(
-        "compiled TensorRT module {} in {:.3}s",
-        module.display(),
+        "compiled TensorRT module in {:.3}s",
         started.elapsed().as_secs_f64()
     );
 
