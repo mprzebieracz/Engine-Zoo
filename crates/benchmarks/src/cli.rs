@@ -45,7 +45,7 @@ pub(crate) struct IterationArgs {
     /// Immutable experiment TOML used to construct each measured training run.
     #[arg(
         long,
-        default_value = "benchmarks/configs/full-iteration-cuda-200.toml"
+        default_value = "benchmarks/configs/default-chess-h4-cuda-500.toml"
     )]
     pub(crate) experiment: PathBuf,
 

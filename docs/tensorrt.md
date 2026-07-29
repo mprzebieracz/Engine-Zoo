@@ -1,10 +1,10 @@
 # TensorRT inference
 
-TensorRT is an opt-in CUDA self-play backend. Training, checkpoints, and the
-default `native` backend remain normal `tch`/LibTorch code. A compiled module
-contains fixed weights, so the supported workflow is TensorRT self-play followed
-by native training; export and compile the new checkpoint before the next
-TensorRT self-play generation.
+TensorRT is the default CUDA self-play backend for chess. Training and
+checkpoints remain normal `tch`/LibTorch code. A compiled module contains fixed
+weights, so the supported workflow is TensorRT self-play followed by native
+training; export and compile the new checkpoint before the next TensorRT
+self-play generation. The native experiment remains an explicit fallback.
 
 The module's `forward` returns a packed tensor: policy logits followed by one
 scalar-value column.
@@ -16,12 +16,11 @@ The working stack on this host is:
 - LibTorch/PyTorch `2.11.0`, CUDA `13.0`
 - Torch-TensorRT `2.11.0+cu130`
 - TensorRT `10.15.1.29`
-- Python `3.13` virtual environment at
-  `/home/mati/venvs/engine-zoo-trt-py313`
+- Python `3.13` compiler environment
 
-The Rust process uses
-`/home/mati/libs/libtorch-2.11.0-cu130/libtorch`. The Python compiler and C++
-runtime integration must match that LibTorch release and CUDA build *exactly*.
+Set `LIBTORCH` to the root of your matching LibTorch installation. The Python
+compiler and C++ runtime integration must match that LibTorch release and CUDA
+build *exactly*.
 In particular, do not mix a system TensorRT, an older Python environment, or a
 `libtorchtrt.so` built for another PyTorch release with this runtime.
 
@@ -29,11 +28,13 @@ Create the compiler environment with PyPI as the primary index, plus the CUDA
 wheel and NVIDIA package indexes:
 
 ```bash
-python3.13 -m venv /home/mati/venvs/engine-zoo-trt-py313
+TRT_VENV=.venv/engine-zoo-trt
+python3.13 -m venv "$TRT_VENV"
 
-/home/mati/venvs/engine-zoo-trt-py313/bin/python -m pip install --upgrade pip
+TRT_PYTHON="$TRT_VENV/bin/python"
+"$TRT_PYTHON" -m pip install --upgrade pip
 
-/home/mati/venvs/engine-zoo-trt-py313/bin/python -m pip install \
+"$TRT_PYTHON" -m pip install \
   'torch==2.11.0+cu130' \
   'torch-tensorrt==2.11.0+cu130' \
   'tensorrt-cu13==10.15.1.29' \
@@ -46,7 +47,9 @@ python3.13 -m venv /home/mati/venvs/engine-zoo-trt-py313
 Verify the actual installation before compiling:
 
 ```bash
-/home/mati/venvs/engine-zoo-trt-py313/bin/python - <<'PY'
+TRT_PYTHON=.venv/engine-zoo-trt/bin/python
+
+"$TRT_PYTHON" - <<'PY'
 import torch
 import torch_tensorrt  # Required: registers Torch-TensorRT's Python classes.
 
@@ -65,14 +68,16 @@ TorchScript classes needed to create the compiled module.
 Initialize a normal run and obtain `latest.safetensors`, then export it on CUDA:
 
 ```bash
-LIBTORCH=/home/mati/libs/libtorch-2.11.0-cu130/libtorch \
+LIBTORCH=/path/to/libtorch \
 cargo run -p engine_app --bin engine-zoo-model -- export-torch-script \
   --experiment experiments/chess-puct-wdl.toml \
   --checkpoint runs/chess-puct-wdl/checkpoints/latest.safetensors \
   --output runs/chess-puct-wdl/model.ts \
   --device cuda
 
-/home/mati/venvs/engine-zoo-trt-py313/bin/python scripts/compile_tensorrt.py \
+TRT_PYTHON=.venv/engine-zoo-trt/bin/python
+
+"$TRT_PYTHON" scripts/compile_tensorrt.py \
   --input runs/chess-puct-wdl/model.ts \
   --output runs/chess-puct-wdl/model.trt.ts \
   --channels 63 \
@@ -98,16 +103,16 @@ checkpoint that native training would create. For each iteration, it:
 The experiment remains immutable. `tensor_rt_module` is a generated artifact
 under the run directory, and is only replaced after compilation succeeds.
 
-For H4 TensorRT self-play, use `experiments/chess-puct-wdl-tensorrt.toml`.
-The 64-game batching screen selected preferred batch 128 with a 1 ms wait
-(maximum batch 256 and queue 4096). This is separate from the native recipe,
-whose tuned settings remain preferred batch 32 and a 2 ms wait. Initialize the
-run with that immutable TensorRT recipe; `train run` then automatically exports,
-compiles, and reloads `model.trt.ts` before and between generations:
+The default H4 TensorRT recipe is
+`experiments/chess-puct-wdl-tensorrt.toml`. The 64-game batching screen selected
+preferred batch 128 with a 1 ms wait (maximum batch 256 and queued states 4096).
+Initialize the run with that immutable recipe; `train run` then automatically
+exports, compiles, and reloads `model.trt.ts` before and between generations:
 
 ```bash
-LIBTORCH=/home/mati/libs/libtorch-2.11.0-cu130/libtorch
-TRT_SITE=/home/mati/venvs/engine-zoo-trt-py313/lib/python3.13/site-packages
+LIBTORCH=/path/to/libtorch
+TRT_PYTHON=.venv/engine-zoo-trt/bin/python
+TRT_SITE="$("$TRT_PYTHON" -c 'import site; print(site.getsitepackages()[0])')"
 
 LD_LIBRARY_PATH="$LIBTORCH/lib:$TRT_SITE/torch_tensorrt/lib:$TRT_SITE/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 LD_PRELOAD="$LIBTORCH/lib/libtorch.so:$TRT_SITE/torch_tensorrt/lib/libtorchtrt.so" \
@@ -119,7 +124,7 @@ LD_LIBRARY_PATH="$LIBTORCH/lib:$TRT_SITE/torch_tensorrt/lib:$TRT_SITE/tensorrt_l
 LD_PRELOAD="$LIBTORCH/lib/libtorch.so:$TRT_SITE/torch_tensorrt/lib/libtorchtrt.so" \
   cargo run -p engine_app --bin train -- run \
   --run-dir runs/chess-puct-wdl-tensorrt --device cuda --iterations 2 \
-  --tensor-rt-python /home/mati/venvs/engine-zoo-trt-py313/bin/python \
+  --tensor-rt-python "$TRT_PYTHON" \
   --tensor-rt-min-batch-size 1 \
   --tensor-rt-opt-batch-size 128 \
   --tensor-rt-max-batch-size 256
@@ -138,11 +143,14 @@ Copy the experiment TOML used by the run and set:
 [inference]
 engine = "tensor-rt-torch-script"
 tensor_rt_module = "model.trt.ts" # relative to the run directory
-preferred_batch_size = 1024
-max_batch_size = 4096
-max_queue = 16384
-max_wait = { milliseconds = 2 }
+preferred_batch_size = 128
+max_batch_size = 256
+max_queued_states = 4096
+max_wait = { milliseconds = 1 }
 ```
+
+These are the tuned default TensorRT batching settings. The compiler's dynamic
+batch shapes should cover the same range: minimum 1, optimal 128, maximum 256.
 
 The C++ custom-class archive in `libtorchtrt.so` must match LibTorch exactly.
 Before Rust loads the compiled TorchScript module, preload LibTorch first and
@@ -150,8 +158,9 @@ then that matching archive. The pip layout above has these three runtime
 directories:
 
 ```bash
-LIBTORCH=/home/mati/libs/libtorch-2.11.0-cu130/libtorch
-TRT_SITE=/home/mati/venvs/engine-zoo-trt-py313/lib/python3.13/site-packages
+LIBTORCH=/path/to/libtorch
+TRT_PYTHON=.venv/engine-zoo-trt/bin/python
+TRT_SITE="$("$TRT_PYTHON" -c 'import site; print(site.getsitepackages()[0])')"
 
 LD_LIBRARY_PATH="$LIBTORCH/lib:$TRT_SITE/torch_tensorrt/lib:$TRT_SITE/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 LD_PRELOAD="$LIBTORCH/lib/libtorch.so:$TRT_SITE/torch_tensorrt/lib/libtorchtrt.so" \

@@ -48,11 +48,35 @@ CUDA configuration in this repository is CUDA 13.0. Set `LIBTORCH` explicitly,
 or use a matching Python PyTorch installation with `LIBTORCH_USE_PYTORCH=1`.
 The build scripts deliberately do not guess a machine-local path.
 
+The default chess path uses TensorRT for fixed-weight self-play and native
+LibTorch for training. It requires the matching TensorRT runtime libraries and
+compiler environment described in [TensorRT inference](docs/tensorrt.md).
+
 ```bash
-python3 scripts/train_chess.py --device cuda
+LIBTORCH=/path/to/libtorch
+TRT_PYTHON=.venv/engine-zoo-trt/bin/python
+TRT_SITE="$("$TRT_PYTHON" -c 'import site; print(site.getsitepackages()[0])')"
+
+LD_LIBRARY_PATH="$LIBTORCH/lib:$TRT_SITE/torch_tensorrt/lib:$TRT_SITE/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+LD_PRELOAD="$LIBTORCH/lib/libtorch.so:$TRT_SITE/torch_tensorrt/lib/libtorchtrt.so" \
+  python3 scripts/train_chess.py --device cuda \
+  --tensor-rt-python "$TRT_PYTHON"
 ```
 
-The script initializes `runs/chess-puct-wdl` from the checked-in experiment if needed, then invokes `train run --forever`. It does not embed a second set of training flags.
+The script initializes `runs/chess-puct-wdl-tensorrt` from
+`experiments/chess-puct-wdl-tensorrt.toml` if needed, then invokes `train run
+--forever`. TensorRT modules contain fixed weights, so each iteration performs
+TensorRT self-play, native training, then export and compilation for the next
+generation.
+
+For a system without the matching TensorRT stack, retain the same H4
+Root-Gumbel model and use the native fallback explicitly:
+
+```bash
+python3 scripts/train_chess.py --device cuda \
+  --experiment experiments/chess-puct-wdl.toml \
+  --run-dir runs/chess-puct-wdl
+```
 
 ## Experiment files
 
@@ -86,7 +110,7 @@ The repository has a reproducible `engine-bench` CLI covering search, representa
 - [Repository guide](REPOSITORY_GUIDE.md): linear, file-level architecture tour.
 - [Architecture](docs/architecture.md), [PUCT](docs/search/puct.md), and [Full Gumbel](docs/search/full-gumbel.md).
 - [Training](docs/training.md), [Chess representation](docs/chess-representation.md), and [reproducibility](docs/reproducibility.md).
-- [Opt-in TensorRT inference](docs/tensorrt.md).
+- [TensorRT inference](docs/tensorrt.md).
 - [Testing](docs/testing.md) and [archived refactor plan](docs/archive/architecture-refactor-plan-2026-07.md).
 
 ## License
