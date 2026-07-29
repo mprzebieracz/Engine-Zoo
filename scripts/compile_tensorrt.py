@@ -2,6 +2,12 @@
 """Compile an Engine-zoo TorchScript export into an opt-in TensorRT module."""
 
 from argparse import ArgumentParser
+import warnings
+
+# Torch-TensorRT currently emits deprecation warnings from optional plugin
+# integrations during import. They are harmless for this compiler; genuine
+# exceptions and compiler diagnostics remain visible on stderr.
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import torch
 import torch_tensorrt

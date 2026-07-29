@@ -2,6 +2,17 @@
 
 Self-play produces compact replay samples: native state, sparse policy target, outcome, weights, and deterministic metadata. The representation encodes states only when the trainer samples them, avoiding permanent dense tensor storage.
 
+Set `training.max_replay_reuse_per_iteration` to pace training against fresh
+self-play: an enabled cap samples no more than that many training positions per
+newly generated position, subject to `train_steps` as an upper bound. It keeps
+the value head from repeatedly fitting a small, stale generation while the
+replay buffer retains older positions for diversity. Existing experiments leave
+this unset and preserve their configured training-step count.
+
+`training.value_loss_weight` defaults to `1.0` and scales only the value term
+in the combined objective. The H4 TensorRT chess recipe uses `0.25` to reduce
+value-head pressure on the shared trunk while preserving policy training.
+
 The trainer seeds each replay batch from the experiment seed and global step. A bounded scoped prefetch thread overlaps CPU sampling/encoding with device work without detached threads or unbounded memory. Each sampled batch transfers to the device once; microbatches are device views rather than repeated host-to-device copies.
 
 `TrainConfig` makes Adam parameters and learning-rate schedules explicit. Supported schedules are constant, linear warmup plus cosine decay, and piecewise values. The effective learning rate and timing breakdown are written to `metrics.jsonl` with batcher statistics.

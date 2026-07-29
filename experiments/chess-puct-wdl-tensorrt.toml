@@ -36,6 +36,10 @@ max_considered_actions = 8
 [training]
 batch_size = 2048
 train_steps = 80
+# Limit optimizer samples to the fresh self-play positions from this iteration.
+# The configured 80 steps remain an upper bound.
+max_replay_reuse_per_iteration = 1.0
+value_loss_weight = 0.25
 
 [inference]
 engine = "tensor-rt-torch-script"

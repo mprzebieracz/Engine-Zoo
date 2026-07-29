@@ -37,6 +37,8 @@ max_considered_actions = 8
 batch_size = 2048
 train_steps = 80
 progress_every = 0
+max_replay_reuse_per_iteration = 1.0
+value_loss_weight = 0.25
 
 [inference]
 engine = "native"
