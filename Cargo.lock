@@ -36,6 +36,7 @@ dependencies = [
  "chess",
  "engine_core",
  "games",
+ "half",
  "rand 0.9.4",
  "search",
  "serde",

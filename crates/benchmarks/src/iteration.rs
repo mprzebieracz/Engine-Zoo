@@ -33,7 +33,7 @@ pub fn full_training_iteration(args: &IterationArgs) -> Result<BenchmarkReport> 
 
     Ok(BenchmarkReport {
         schema_version: 1,
-        benchmark: "iteration.full-training".into(),
+        benchmark: benchmark_name(&experiment).into(),
         started_at: environment::timestamp(),
         git: environment::git(),
         build: environment::build(),
@@ -43,6 +43,15 @@ pub fn full_training_iteration(args: &IterationArgs) -> Result<BenchmarkReport> 
         samples,
         reports: Vec::new(),
     })
+}
+
+fn benchmark_name(experiment: &ExperimentConfig) -> &'static str {
+    if experiment.training.train_steps == 0 {
+        "iteration.self-play"
+    }
+    else {
+        "iteration.full-training"
+    }
 }
 
 fn effective_experiment(
@@ -100,9 +109,18 @@ fn workload(args: &IterationArgs, experiment: &ExperimentConfig, device: tch::De
             "samples": args.samples,
             "warmup_iterations": args.warmup_iterations,
             "cuda_synchronized_at_iteration_boundary": device.is_cuda(),
-            "phase_note": "The full iteration is measured around TrainingRun::step. Training subphases come from TrainMetrics. The remaining time combines self-play, checkpoint persistence, inference reload, and metrics persistence because production code intentionally has no benchmark timers."
+            "phase_note": phase_note(experiment)
         }
     })
+}
+
+fn phase_note(experiment: &ExperimentConfig) -> &'static str {
+    if experiment.training.train_steps == 0 {
+        "This self-play-only iteration is measured around TrainingRun::step. It excludes optimizer work while retaining checkpoint persistence, inference reload, and metrics persistence."
+    }
+    else {
+        "The full iteration is measured around TrainingRun::step. Training subphases come from TrainMetrics. The remaining time combines self-play, checkpoint persistence, inference reload, and metrics persistence because production code intentionally has no benchmark timers."
+    }
 }
 
 fn run_once(experiment: &ExperimentConfig, device: tch::Device) -> Result<BenchmarkSample> {

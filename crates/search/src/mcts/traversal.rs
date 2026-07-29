@@ -18,9 +18,20 @@ fn complete_path<M, Meta: Default>(
 ) {
     loop {
         let current = &mut nodes[node as usize];
+        let first_completed_visit = current.completed_visits == 0;
+        let prior = current.prior;
+        let parent = current.parent;
+
         current.complete_reserved_visit(value);
+
+        if first_completed_visit {
+            if let Some(parent) = parent {
+                nodes[parent as usize].visited_child_prior_mass += prior;
+            }
+        }
+
         value = value.flipped();
-        let Some(parent) = current.parent
+        let Some(parent) = parent
         else {
             break;
         };
@@ -261,5 +272,25 @@ mod tests {
         assert!(nodes
             .iter()
             .all(|node| node.in_flight_visits == 0 && node.completed_visits == 0));
+    }
+
+    #[test]
+    fn backup_tracks_each_visited_child_prior_once() {
+        let mut nodes: Vec<Node<u8>> = vec![
+            Node::new(None, None, 0.0, 0.0, false, PositionValue::DRAW),
+            Node::new(Some(0), None, 0.25, 0.0, false, PositionValue::DRAW),
+            Node::new(Some(0), None, 0.75, 0.0, false, PositionValue::DRAW),
+        ];
+
+        for child in [1_u32, 1, 2] {
+            nodes[0].reserve_visit();
+            nodes[child as usize].reserve_visit();
+
+            complete_path(&mut nodes, child, PositionValue::DRAW);
+        }
+
+        assert_eq!(nodes[0].visited_child_prior_mass, 1.0);
+        assert_eq!(nodes[1].completed_visits, 2);
+        assert_eq!(nodes[2].completed_visits, 1);
     }
 }

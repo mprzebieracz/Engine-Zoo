@@ -284,7 +284,11 @@ pub struct ReplayBatch {
     pub policies: SparsePolicyBatch,
     pub outcomes: Tensor,
     pub policy_weights: Tensor,
+    /// CPU-side total used to decide whether the policy loss is active.
+    pub policy_weight_sum: f32,
     pub value_weights: Tensor,
+    /// CPU-side total used to decide whether the value loss is active.
+    pub value_weight_sum: f32,
 }
 
 /// A fixed-capacity, compact ring buffer. It deliberately does not know how a
@@ -396,6 +400,9 @@ impl<S: GameState + Clone> ReplayBuffer<S> {
 
         drop(inner);
 
+        let policy_weight_sum = scratch.policy_weights.iter().sum();
+        let value_weight_sum = scratch.value_weights.iter().sum();
+
         Some(ReplayBatch {
             states: Tensor::from_slice(&scratch.states)
                 .view([batch_size as i64, state_size as i64]),
@@ -407,7 +414,9 @@ impl<S: GameState + Clone> ReplayBuffer<S> {
             },
             outcomes: Tensor::from_slice(&scratch.outcomes),
             policy_weights: Tensor::from_slice(&scratch.policy_weights),
+            policy_weight_sum,
             value_weights: Tensor::from_slice(&scratch.value_weights),
+            value_weight_sum,
         })
     }
 }

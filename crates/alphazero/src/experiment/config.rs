@@ -40,6 +40,10 @@ pub struct InferenceConfig {
     /// returns the policy logits and scalar value packed along dimension one.
     pub tensor_rt_module: Option<PathBuf>,
     pub precision: InferencePrecision,
+    /// For native CUDA FP16 inference, convert encoded states to FP16 in the
+    /// pinned host buffer before the asynchronous upload. This is an opt-in
+    /// benchmark variant; the default keeps the established FP32 upload path.
+    pub fp16_host_staging: bool,
     pub preferred_batch_size: usize,
     pub max_batch_size: usize,
     pub max_wait: DurationConfig,
@@ -52,6 +56,7 @@ impl Default for InferenceConfig {
             engine: InferenceEngine::Native,
             tensor_rt_module: None,
             precision: InferencePrecision::Fp32,
+            fp16_host_staging: false,
             preferred_batch_size: 32,
             max_batch_size: 256,
             max_wait: DurationConfig { milliseconds: 2 },
@@ -66,6 +71,16 @@ impl InferenceConfig {
             ensure!(
                 self.tensor_rt_module.is_some(),
                 "tensor-rt-torch-script inference requires tensor_rt_module"
+            );
+        }
+        if self.fp16_host_staging {
+            ensure!(
+                self.engine == InferenceEngine::Native,
+                "fp16_host_staging only applies to native inference"
+            );
+            ensure!(
+                self.precision == InferencePrecision::Fp16,
+                "fp16_host_staging requires fp16 inference precision"
             );
         }
         BatcherConfig {

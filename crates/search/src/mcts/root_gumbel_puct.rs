@@ -1,7 +1,10 @@
 use super::core::{LeafBatch, MctsCore, PendingLeaf};
 use super::gumbel::{sample_gumbel, softmax, transform_completed_q};
 use super::puct::puct_child;
-use super::{Node, RootAction, RootGumbelPuctConfig, SearchDiagnostics, SearchResult};
+use super::{
+    effective_leaf_batch_size, Node, RootAction, RootGumbelPuctConfig, SearchDiagnostics,
+    SearchResult,
+};
 use crate::PositionValue;
 use engine_core::agent::PolicyMode;
 use engine_core::game::GameState;
@@ -109,7 +112,9 @@ where
         };
         let mut active = self.variant.root_actions.clone();
         let mut allocated = 0usize;
-        let mut batch = LeafBatch::with_capacity(self.variant.config.leaf_batch_size);
+        let leaf_batch_size =
+            effective_leaf_batch_size(self.variant.config.leaf_batch_size, simulations);
+        let mut batch = LeafBatch::with_capacity(leaf_batch_size);
 
         while allocated < simulations {
             let round_visits =
@@ -121,7 +126,7 @@ where
                 .any(|&(node, target)| self.nodes[node as usize].completed_visits < target)
             {
                 batch.leaves.clear();
-                while batch.leaves.len() < self.variant.config.leaf_batch_size {
+                while batch.leaves.len() < leaf_batch_size {
                     let Some(root_child) = self.best_round_action(&active, &targets)
                     else {
                         break;

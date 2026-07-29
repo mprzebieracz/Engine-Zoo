@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -140,7 +140,8 @@ type BatcherResult<T> = std::result::Result<T, BatcherError>;
 /// Cross-thread dynamic batching for one shared inference backend.
 pub struct Batcher {
     shared: Arc<Shared>,
-    worker: Option<JoinHandle<()>>,
+    assembler: Option<JoinHandle<()>>,
+    executor: Option<JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -266,6 +267,21 @@ struct WorkItem {
     rows: std::ops::Range<usize>,
 }
 
+/// Host-side work assembled ahead of backend execution.
+///
+/// The executor exclusively owns the inference backend (and therefore all CUDA
+/// state).  This value contains only ordinary Rust vectors and request state.
+struct PreparedEvaluation {
+    items: Vec<WorkItem>,
+    combined: CombinedEncodedBatch,
+    completion: Option<SyncSender<()>>,
+}
+
+enum PreparedWork {
+    Evaluate(PreparedEvaluation),
+    Reload(Reload),
+}
+
 impl Batcher {
     pub fn with_backend<B: InferenceBackend>(backend: B, config: BatcherConfig) -> Result<Self> {
         let config = config.validate()?;
@@ -275,14 +291,42 @@ impl Batcher {
             config,
             evaluation_generation: AtomicU64::new(0),
         });
-        let worker_shared = Arc::clone(&shared);
-        let worker = std::thread::Builder::new()
-            .name("inference-batcher".into())
-            .spawn(move || run_worker(Box::new(backend), worker_shared))
-            .context("spawning batcher worker")?;
+        // One prepared pass may wait while the executor owns the backend.  A
+        // second reusable host buffer lets the assembler prepare that pass
+        // without sharing CUDA tensors or backend state across threads.
+        let (prepared_tx, prepared_rx) = sync_channel(1);
+        let (recycled_tx, recycled_rx) = sync_channel(2);
+        for _ in 0..2 {
+            recycled_tx
+                .send(CombinedEncodedBatch::new())
+                .expect("newly created recycle channel is open");
+        }
+
+        let assembler_shared = Arc::clone(&shared);
+        let assembler_recycled_tx = recycled_tx.clone();
+        let assembler = std::thread::Builder::new()
+            .name("inference-batch-assembler".into())
+            .spawn(move || {
+                run_assembler(
+                    assembler_shared,
+                    prepared_tx,
+                    recycled_rx,
+                    assembler_recycled_tx,
+                )
+            })
+            .context("spawning batch assembler")?;
+
+        let executor_shared = Arc::clone(&shared);
+        let executor = std::thread::Builder::new()
+            .name("inference-batch-executor".into())
+            .spawn(move || {
+                run_executor(Box::new(backend), executor_shared, prepared_rx, recycled_tx)
+            })
+            .context("spawning batch executor")?;
         Ok(Self {
             shared,
-            worker: Some(worker),
+            assembler: Some(assembler),
+            executor: Some(executor),
         })
     }
 
@@ -302,8 +346,32 @@ impl Batcher {
         config: BatcherConfig,
         precision: InferencePrecision,
     ) -> Result<Self> {
+        Self::new_with_model_precision_and_fp16_host_staging(
+            spec, weights, device, config, precision, false,
+        )
+    }
+
+    /// Creates native inference with an optional FP16 pinned-host input path.
+    ///
+    /// This remains separate from `new_with_model_precision` so callers can
+    /// benchmark the established FP32-upload path against the FP16-upload
+    /// variant without changing its default behavior.
+    pub fn new_with_model_precision_and_fp16_host_staging(
+        spec: ModelSpec,
+        weights: &Path,
+        device: Device,
+        config: BatcherConfig,
+        precision: InferencePrecision,
+        fp16_host_staging: bool,
+    ) -> Result<Self> {
         Self::with_backend(
-            TchInferenceBackend::new(spec, weights, device, precision)?,
+            TchInferenceBackend::new_with_fp16_host_staging(
+                spec,
+                weights,
+                device,
+                precision,
+                fp16_host_staging,
+            )?,
             config,
         )
     }
@@ -359,8 +427,11 @@ impl Drop for Batcher {
         fail_pending(&mut pending, BatcherError::Shutdown);
         drop(pending);
         self.shared.cv.notify_all();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        if let Some(assembler) = self.assembler.take() {
+            let _ = assembler.join();
+        }
+        if let Some(executor) = self.executor.take() {
+            let _ = executor.join();
         }
     }
 }
@@ -430,48 +501,122 @@ impl EncodedEvaluator for BatcherClient {
     }
 }
 
-fn run_worker(mut backend: Box<dyn InferenceBackend>, shared: Arc<Shared>) {
-    let mut work_items = Vec::new();
-    let mut combined = CombinedEncodedBatch::new();
+fn run_assembler(
+    shared: Arc<Shared>,
+    prepared_tx: SyncSender<PreparedWork>,
+    recycled_rx: Receiver<CombinedEncodedBatch>,
+    recycled_tx: SyncSender<CombinedEncodedBatch>,
+) {
     loop {
-        match next_work(&shared, &mut work_items, &mut combined) {
+        let combined = match recycled_rx.recv() {
+            Ok(combined) => combined,
+            Err(_) => return,
+        };
+        let mut items = Vec::new();
+        let mut combined = combined;
+        match next_work(&shared, &mut items, &mut combined) {
             Work::Stop => return,
             Work::Reload(reload) => {
-                let result = backend
-                    .reload_weights(&reload.weights)
-                    .map_err(backend_error);
-                match &result {
-                    Ok(()) => {
-                        shared.evaluation_generation.fetch_add(1, Ordering::Release);
-                        let mut pending = shared.pending.lock().unwrap();
-                        pending.stats.reload_count += 1;
-                        pending.stats.current_cache_namespace =
-                            shared.evaluation_generation.load(Ordering::Acquire);
-                    }
-                    Err(error) => terminal_failure(&shared, error.clone()),
+                if prepared_tx.send(PreparedWork::Reload(reload)).is_err() {
+                    return;
                 }
-                let _ = reload.tx.send(result);
+                if recycled_tx.send(combined).is_err() {
+                    return;
+                }
             }
             Work::Evaluate => {
-                let started = Instant::now();
-                let result = backend.evaluate(&combined).map_err(backend_error);
-                record_backend_time(&shared, started.elapsed());
-                match result {
-                    Ok(evaluations) if evaluations.len() == combined.len() => {
-                        finish_pass(&shared, &mut work_items, evaluations)
+                let needs_completion = items
+                    .iter()
+                    .any(|item| item.rows.end < item.task.batch.len());
+                let (completion, done_rx) = needs_completion.then(|| sync_channel(1)).unzip();
+                let prepared = PreparedEvaluation {
+                    items,
+                    combined,
+                    completion,
+                };
+                if prepared_tx.send(PreparedWork::Evaluate(prepared)).is_err() {
+                    return;
+                }
+                if let Some(done_rx) = done_rx {
+                    if done_rx.recv().is_err() {
+                        return;
                     }
-                    Ok(_) => fail_work(
-                        &shared,
-                        &mut work_items,
-                        BatcherError::Backend(
-                            "backend returned the wrong number of evaluations".into(),
-                        ),
-                    ),
-                    Err(error) => fail_work(&shared, &mut work_items, error),
                 }
             }
         }
     }
+}
+
+fn run_executor(
+    mut backend: Box<dyn InferenceBackend>,
+    shared: Arc<Shared>,
+    prepared_rx: Receiver<PreparedWork>,
+    recycled_tx: SyncSender<CombinedEncodedBatch>,
+) {
+    while let Ok(work) = prepared_rx.recv() {
+        match work {
+            PreparedWork::Reload(reload) => run_reload(&mut *backend, &shared, reload),
+            PreparedWork::Evaluate(prepared) => {
+                run_prepared_evaluation(&mut *backend, &shared, prepared, &recycled_tx)
+            }
+        }
+    }
+}
+
+fn run_reload(backend: &mut dyn InferenceBackend, shared: &Shared, reload: Reload) {
+    let result = backend
+        .reload_weights(&reload.weights)
+        .map_err(backend_error);
+    match &result {
+        Ok(()) => {
+            shared.evaluation_generation.fetch_add(1, Ordering::Release);
+            let mut pending = shared.pending.lock().unwrap();
+            pending.stats.reload_count += 1;
+            pending.stats.current_cache_namespace =
+                shared.evaluation_generation.load(Ordering::Acquire);
+        }
+        Err(error) => terminal_failure(shared, error.clone()),
+    }
+    let _ = reload.tx.send(result);
+}
+
+fn run_prepared_evaluation(
+    backend: &mut dyn InferenceBackend,
+    shared: &Shared,
+    mut prepared: PreparedEvaluation,
+    recycled_tx: &SyncSender<CombinedEncodedBatch>,
+) {
+    if let Some(error) = terminal_error(shared) {
+        fail_work(shared, &mut prepared.items, error);
+    }
+    else {
+        let started = Instant::now();
+        let result = backend.evaluate(&prepared.combined).map_err(backend_error);
+        record_backend_time(shared, started.elapsed());
+        match result {
+            Ok(evaluations) if evaluations.len() == prepared.combined.len() => {
+                finish_pass(shared, &mut prepared.items, evaluations)
+            }
+            Ok(_) => fail_work(
+                shared,
+                &mut prepared.items,
+                BatcherError::Backend("backend returned the wrong number of evaluations".into()),
+            ),
+            Err(error) => fail_work(shared, &mut prepared.items, error),
+        }
+    }
+    if let Some(completion) = prepared.completion.take() {
+        let _ = completion.send(());
+    }
+    let _ = recycled_tx.send(prepared.combined);
+}
+
+fn terminal_error(shared: &Shared) -> Option<BatcherError> {
+    let pending = shared.pending.lock().unwrap();
+    pending
+        .terminal_error
+        .clone()
+        .or_else(|| pending.stop.then_some(BatcherError::Shutdown))
 }
 
 fn backend_error(error: anyhow::Error) -> BatcherError {
@@ -489,7 +634,7 @@ fn next_work(
             .cv
             .wait_while(pending, |p| !p.stop && p.commands.is_empty())
             .unwrap();
-        if pending.stop {
+        if pending.stop || pending.terminal_error.is_some() {
             return Work::Stop;
         }
         if matches!(pending.commands.front(), Some(Command::Reload(_))) {

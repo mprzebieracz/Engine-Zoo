@@ -386,6 +386,19 @@ fn invalid_algorithm_configs_are_rejected() {
 }
 
 #[test]
+fn effective_leaf_batch_cap_respects_the_current_search_budget() {
+    assert_eq!(effective_leaf_batch_size(16, 800), 16);
+    assert_eq!(effective_leaf_batch_size(16, 64), 16);
+    assert_eq!(effective_leaf_batch_size(16, 32), 8);
+    assert_eq!(effective_leaf_batch_size(16, 1), 1);
+}
+
+#[test]
+fn effective_leaf_batch_cap_is_nonzero_for_invalid_direct_inputs() {
+    assert_eq!(effective_leaf_batch_size(0, 0), 1);
+}
+
+#[test]
 fn native_terminal_roots_skip_evaluation_for_both_searches() {
     for config in [puct(), full_gumbel(), root_gumbel_puct()] {
         let calls = Arc::new(AtomicUsize::new(0));

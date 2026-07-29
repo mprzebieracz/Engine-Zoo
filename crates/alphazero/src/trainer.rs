@@ -91,7 +91,6 @@ impl TrainConfig {
             "prefetch depth must be at most two"
         );
         anyhow::ensure!(self.batch_size > 0, "batch_size must be positive");
-        anyhow::ensure!(self.train_steps > 0, "train_steps must be positive");
         anyhow::ensure!(
             self.lr.is_finite() && self.lr > 0.0,
             "lr must be finite and positive"
@@ -257,6 +256,11 @@ where
 {
     cfg.validate()
         .expect("Trainer only accepts validated training configuration");
+
+    if cfg.train_steps == 0 {
+        return None;
+    }
+
     let started = Instant::now();
     let (sender, receiver) = sync_channel(cfg.prefetch_depth.max(1));
     let mut sampling_time = Duration::ZERO;
@@ -393,7 +397,9 @@ struct DeviceReplayBatch {
     rows: Tensor,
     outcomes: Tensor,
     policy_weights: Tensor,
+    policy_weight_sum: f32,
     value_weights: Tensor,
+    value_weight_sum: f32,
     offsets: Vec<i64>,
 }
 
@@ -406,7 +412,9 @@ impl DeviceReplayBatch {
             rows: batch.policies.rows.to_device(device),
             outcomes: batch.outcomes.to_device(device),
             policy_weights: batch.policy_weights.to_device(device),
+            policy_weight_sum: batch.policy_weight_sum,
             value_weights: batch.value_weights.to_device(device),
+            value_weight_sum: batch.value_weight_sum,
             offsets: batch.policies.offsets,
         }
     }
@@ -444,10 +452,10 @@ fn train_device_batch(
     shape: [i64; 4],
 ) -> StepMetrics {
     let rows = batch.outcomes.size()[0] as usize;
-    let policy_denominator = batch.policy_weights.sum(Kind::Float);
-    let value_denominator = batch.value_weights.sum(Kind::Float);
-    let has_policy = policy_denominator.double_value(&[]) > 0.0;
-    let has_value = value_denominator.double_value(&[]) > 0.0;
+    let has_policy = batch.policy_weight_sum > 0.0;
+    let has_value = batch.value_weight_sum > 0.0;
+    let policy_denominator = has_policy.then(|| batch.policy_weights.sum(Kind::Float));
+    let value_denominator = has_value.then(|| batch.value_weights.sum(Kind::Float));
     let device = batch.states.device();
     let mut policy_metric = Tensor::zeros([], (Kind::Float, device));
     let mut value_metric = Tensor::zeros([], (Kind::Float, device));
@@ -474,7 +482,7 @@ fn train_device_batch(
                 &policy_weights,
             );
             policy_metric += numerator.detach();
-            loss = Some(numerator / &policy_denominator);
+            loss = Some(numerator / policy_denominator.as_ref().unwrap());
         }
         if has_value {
             let numerator = match output.value {
@@ -486,7 +494,7 @@ fn train_device_batch(
                 }
             };
             value_metric += numerator.detach();
-            let scaled = numerator / &value_denominator;
+            let scaled = numerator / value_denominator.as_ref().unwrap();
             loss = Some(loss.map_or(scaled.shallow_clone(), |policy| policy + scaled));
         }
         if let Some(loss) = loss {
@@ -499,13 +507,13 @@ fn train_device_batch(
     let optimizer_elapsed = optimizer_started.elapsed();
     StepMetrics {
         policy_loss: if has_policy {
-            policy_metric.double_value(&[]) / policy_denominator.double_value(&[])
+            policy_metric.double_value(&[]) / f64::from(batch.policy_weight_sum)
         }
         else {
             0.0
         },
         value_loss: if has_value {
-            value_metric.double_value(&[]) / value_denominator.double_value(&[])
+            value_metric.double_value(&[]) / f64::from(batch.value_weight_sum)
         }
         else {
             0.0

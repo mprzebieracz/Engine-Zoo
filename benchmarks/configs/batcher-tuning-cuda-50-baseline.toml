@@ -1,0 +1,44 @@
+# Batcher-tuning screen: baseline. Keep this workload fixed across the matrix:
+# canonical chess H1, native CUDA FP16, Root-Gumbel PUCT (128 simulations,
+# 16 considered actions), 16-leaf search batches, and 50 self-play games.
+# Only the self-play producer count and inference batching parameters vary.
+format_version = 3
+seed = 1
+
+[model]
+architecture = "chess-se"
+history = "one"
+blocks = 12
+channels = 128
+se_hidden = 16
+value_head = { wdl = { hidden = 128 } }
+
+[self_play]
+num_games = 50
+threads = 16
+max_moves = 512
+progress_every = 0
+evaluation_cache_entries = 1000000
+
+[self_play.search]
+algorithm = "root-gumbel-puct"
+leaf_batch_size = 16
+
+[self_play.budget_schedule.fixed.gumbel]
+simulations = 128
+max_considered_actions = 16
+
+[training]
+micro_batch_size = 256
+batch_size = 2048
+train_steps = 80
+progress_every = 0
+
+[inference]
+precision = "fp16"
+preferred_batch_size = 16
+max_batch_size = 256
+max_queued_states = 4096
+
+[inference.max_wait]
+milliseconds = 16

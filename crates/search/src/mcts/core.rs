@@ -1,6 +1,6 @@
-use super::cache::EvalTable;
+use super::cache::{CachedEvaluation, EvalTable};
 use super::{Node, SearchAlgorithm, SearchBudget, SearchConfig, SearchRequest};
-use crate::{PolicyValueEvaluator, SearchRules};
+use crate::{EvaluationKey, PolicyValueEvaluator, SearchRules};
 use engine_core::game::GameState;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -39,12 +39,38 @@ where
     pub(super) nodes: Vec<Node<G::Move, R::NodeMeta>>,
     pub(super) legal_moves: Vec<G::Move>,
     pub(super) offsets: Vec<u32>,
+    pub(super) evaluation_workspace: EvaluationWorkspace<G>,
     pub(super) policy_buf: Vec<(G::Move, f32, f32)>,
     pub(super) path_state: R::PathState,
     pub(super) eval_cache: Option<Arc<EvalTable<G::Move>>>,
     pub(super) rng: SmallRng,
     pub(super) variant: V,
     pub(super) marker: PhantomData<fn() -> G>,
+}
+
+/// Reused scratch space for one batched evaluator call.
+///
+/// The returned flat evaluation vector remains owned by the caller. Everything
+/// used only to route cache hits and backend results stays here so successive
+/// leaf batches retain their allocations.
+pub(super) struct EvaluationWorkspace<G: GameState> {
+    pub(super) outputs: Vec<Option<CachedEvaluation<G::Move>>>,
+    pub(super) misses: Vec<G>,
+    pub(super) keys: Vec<Option<EvaluationKey>>,
+    pub(super) destinations: Vec<(usize, usize)>,
+    pub(super) unique: Vec<CachedEvaluation<G::Move>>,
+}
+
+impl<G: GameState> Default for EvaluationWorkspace<G> {
+    fn default() -> Self {
+        Self {
+            outputs: Vec::new(),
+            misses: Vec::new(),
+            keys: Vec::new(),
+            destinations: Vec::new(),
+            unique: Vec::new(),
+        }
+    }
 }
 
 pub(super) struct PendingLeaf<G> {
@@ -123,6 +149,7 @@ where
                 nodes: Vec::new(),
                 legal_moves: Vec::new(),
                 offsets: Vec::new(),
+                evaluation_workspace: EvaluationWorkspace::default(),
                 policy_buf: Vec::new(),
                 path_state: R::PathState::default(),
                 eval_cache: None,
