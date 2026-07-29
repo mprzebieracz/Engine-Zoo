@@ -91,7 +91,7 @@ fn initialize(experiment_path: PathBuf, run_dir: PathBuf) -> Result<()> {
 
 fn run(args: RunArgs) -> Result<()> {
     let device = select_device(args.device)?;
-    let (_, experiment, _) = RunDir::open(&args.run_dir)?;
+    let (_, experiment, state) = RunDir::open(&args.run_dir)?;
     let limit = if args.forever {
         RunLimit::Forever
     }
@@ -103,8 +103,63 @@ fn run(args: RunArgs) -> Result<()> {
         return run_tensor_rt(args.run_dir, device, limit, &experiment, args.tensor_rt);
     }
 
+    print_startup_summary(&args.run_dir, device, &experiment, &state);
     let mut run = TrainingRun::open(&args.run_dir, device)?;
     run.run(limit)
+}
+
+fn print_startup_summary(
+    run_dir: &PathBuf,
+    device: Device,
+    experiment: &ExperimentConfig,
+    state: &alphazero::RunState,
+) {
+    println!("\n===== TRAINING CONFIGURATION =====");
+    println!("run directory: {}", run_dir.display());
+    println!("device: {device:?}");
+    println!(
+        "starting model: generation {} | iteration {} | checkpoint {} | resume {:?}",
+        state.model_generation,
+        state.iteration,
+        state.latest_checkpoint.as_deref().unwrap_or("new model"),
+        state.resume_kind,
+    );
+    println!("model: {:?}", experiment.model);
+    println!("seed: {}", experiment.seed);
+
+    let self_play = &experiment.self_play;
+    println!(
+        "self-play: {} games | {} threads | max {} moves",
+        self_play.num_games, self_play.threads, self_play.max_moves,
+    );
+    println!("search: {:?}", self_play.search);
+    println!("budget schedule: {:?}", self_play.budget_schedule);
+
+    let training = &experiment.training;
+    println!(
+        "training: {} steps | batch {} (micro {}) | lr {:.6} | weight decay {:.6}",
+        training.train_steps,
+        training.batch_size,
+        training.micro_batch_size,
+        training.lr,
+        training.weight_decay,
+    );
+    println!(
+        "loss: value weight {:.3} | replay reuse cap {:?}",
+        training.value_loss_weight, training.max_replay_reuse_per_iteration,
+    );
+
+    let inference = &experiment.inference;
+    println!(
+        "inference: {:?} {:?} | batch {}-{} | wait {} ms | queue {}",
+        inference.engine,
+        inference.precision,
+        inference.preferred_batch_size,
+        inference.max_batch_size,
+        inference.max_wait.milliseconds,
+        inference.max_queued_states,
+    );
+    println!("==================================\n");
 }
 
 fn run_tensor_rt(
@@ -118,29 +173,37 @@ fn run_tensor_rt(
     let (run, _, mut state) = RunDir::open(&run_dir)?;
 
     ensure_latest_checkpoint(&run, experiment, &mut state, device)?;
+    print_startup_summary(&run_dir, device, experiment, &state);
     println!("COMPILATION");
     compile_tensor_rt_generation(&run, experiment, device, &compiler)?;
     let mut training_run = TrainingRun::open(&run_dir, device)?;
+    let total_started = Instant::now();
 
     match limit {
         RunLimit::Iterations(iterations) => {
             for iteration in 1..=iterations {
                 print_iteration_header(iteration);
+                let iteration_started = Instant::now();
                 let report = training_run.step()?;
-                print_iteration_report(&report);
+                print_iteration_report(&report, iteration_started.elapsed());
                 ensure_tensor_rt_recompile_required(&report.next_inference)?;
                 println!("COMPILATION");
                 compile_tensor_rt_generation(&run, experiment, device, &compiler)?;
                 training_run.reload_tensor_rt_inference()?;
             }
+            println!(
+                "TOTAL TRAINING TIME: {:.2}s",
+                total_started.elapsed().as_secs_f64()
+            );
         }
         RunLimit::Forever => {
             let mut iteration = 1;
 
             loop {
                 print_iteration_header(iteration);
+                let iteration_started = Instant::now();
                 let report = training_run.step()?;
-                print_iteration_report(&report);
+                print_iteration_report(&report, iteration_started.elapsed());
                 ensure_tensor_rt_recompile_required(&report.next_inference)?;
                 println!("COMPILATION");
                 compile_tensor_rt_generation(&run, experiment, device, &compiler)?;
@@ -158,7 +221,7 @@ fn print_iteration_header(iteration: usize) {
     println!("SELFPLAY");
 }
 
-fn print_iteration_report(report: &alphazero::IterationReport) {
+fn print_iteration_report(report: &alphazero::IterationReport, elapsed: std::time::Duration) {
     println!("TRAINING");
 
     if let Some(training) = &report.training {
@@ -174,6 +237,13 @@ fn print_iteration_report(report: &alphazero::IterationReport) {
             "replay: {} fresh samples | reuse: {:.2}x | learning rate: {:.6}",
             training.fresh_replay_samples, training.replay_reuse, training.learning_rate,
         );
+        println!(
+            "timing: replay {:.2}s | H2D {:.2}s | forward/backward {:.2}s | optimizer {:.2}s",
+            training.replay_sampling_seconds,
+            training.host_to_device_seconds,
+            training.forward_backward_seconds,
+            training.optimizer_seconds,
+        );
     }
     else {
         println!("no training steps configured");
@@ -183,6 +253,7 @@ fn print_iteration_report(report: &alphazero::IterationReport) {
         "iteration total: {} games | {} positions | {} replay samples",
         report.games, report.moves, report.replay_samples,
     );
+    println!("iteration elapsed: {:.2}s", elapsed.as_secs_f64());
 }
 
 fn tensor_rt_compiler(
