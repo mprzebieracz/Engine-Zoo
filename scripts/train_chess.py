@@ -143,7 +143,7 @@ def _is_nonfatal_runtime_noise(line: str) -> bool:
         marker in line
         for marker in (
             "CUDA 13 is not currently supported for TRT-LLM plugins",
-            "[TRT] [W] Functionality provided through tensorrt.plugin module is experimental",
+            "Functionality provided through tensorrt.plugin module is experimental",
             "Unable to import quantization op.",
             "Unable to import quantize op.",
             "quantized models",

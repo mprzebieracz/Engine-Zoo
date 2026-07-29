@@ -175,6 +175,16 @@ impl TrainConfig {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct TrainProgress {
+    pub step: usize,
+    pub total_steps: usize,
+    pub policy_loss: f64,
+    pub value_loss: f64,
+    pub samples_per_second: f64,
+    pub learning_rate: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct TrainMetrics {
     pub policy_loss: f64,
     pub value_loss: f64,
@@ -188,6 +198,7 @@ pub struct TrainMetrics {
     pub optimizer_seconds: f64,
     pub samples_per_second: f64,
     pub learning_rate: f64,
+    pub progress: Vec<TrainProgress>,
 }
 
 /// Reproducibility inputs for one training invocation.
@@ -329,6 +340,7 @@ where
     let mut policy_total = 0.0;
     let mut value_total = 0.0;
     let mut completed = 0;
+    let mut progress = Vec::new();
 
     std::thread::scope(|scope| {
         scope.spawn(move || {
@@ -370,6 +382,29 @@ where
             policy_total += metrics.policy_loss;
             value_total += metrics.value_loss;
             completed += 1;
+
+            if cfg.progress_every > 0
+                && (completed % cfg.progress_every == 0 || completed == cfg.train_steps)
+            {
+                let elapsed = started.elapsed().as_secs_f64().max(f64::EPSILON);
+                let snapshot = TrainProgress {
+                    step: completed,
+                    total_steps: cfg.train_steps,
+                    policy_loss: policy_total / completed as f64,
+                    value_loss: value_total / completed as f64,
+                    samples_per_second: completed as f64 * cfg.batch_size as f64 / elapsed,
+                    learning_rate,
+                };
+                eprintln!(
+                    "training progress: step {}/{} | policy {:.5} | value {:.5} | {:.1} samples/s",
+                    snapshot.step,
+                    snapshot.total_steps,
+                    snapshot.policy_loss,
+                    snapshot.value_loss,
+                    snapshot.samples_per_second,
+                );
+                progress.push(snapshot);
+            }
         }
     });
     (completed > 0).then_some(TrainMetrics {
@@ -386,6 +421,7 @@ where
         samples_per_second: completed as f64 * cfg.batch_size as f64
             / started.elapsed().as_secs_f64().max(f64::EPSILON),
         learning_rate: cfg.learning_rate_at(seed.global_step + completed.saturating_sub(1) as u64),
+        progress,
     })
 }
 
