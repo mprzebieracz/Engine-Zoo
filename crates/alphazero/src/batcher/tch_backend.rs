@@ -128,6 +128,27 @@ impl TchInferenceBackend {
         }
         slot.as_ref().unwrap().shallow_clone()
     }
+
+    /// Narrows a grow-only staging allocation to the shape used by this batch.
+    ///
+    /// The view can retain a wider row stride than its visible width. Callers
+    /// that access host memory directly must therefore use `stride()[0]` when
+    /// moving between rows.
+    fn active_staging(buffer: &Tensor, rows: i64, columns: i64) -> Tensor {
+        buffer.narrow(0, 0, rows).narrow(1, 0, columns)
+    }
+
+    fn gathered_logits(gathered: &Tensor, row: usize, legal_actions: usize) -> Vec<f32> {
+        debug_assert!(legal_actions <= gathered.size()[1] as usize);
+
+        let row_stride = gathered.stride()[0] as usize;
+        let rows = gathered.size()[0] as usize;
+        let active_columns = gathered.size()[1] as usize;
+        let len = (rows - 1) * row_stride + active_columns;
+        let values = unsafe { std::slice::from_raw_parts(gathered.data_ptr() as *const f32, len) };
+
+        values[row * row_stride..row * row_stride + legal_actions].to_vec()
+    }
 }
 
 impl InferenceBackend for TchInferenceBackend {
@@ -259,14 +280,16 @@ impl TchInferenceBackend {
                 Kind::Float,
                 self.device,
             );
-            let width = gathered_host.size()[1] as usize;
+            let index_active = Self::active_staging(&index_host, n, max_actions);
+            let row_stride = index_active.stride()[0] as usize;
+            let active_width = max_actions as usize;
             unsafe {
                 let indexes = std::slice::from_raw_parts_mut(
                     index_host.data_ptr() as *mut i64,
                     (index_host.size()[0] * index_host.size()[1]) as usize,
                 );
                 for row in 0..batch.len() {
-                    let dst = &mut indexes[row * width..(row + 1) * width];
+                    let dst = &mut indexes[row * row_stride..row * row_stride + active_width];
                     dst.fill(0);
                     let begin = batch.offsets[row] as usize;
                     let end = batch.offsets[row + 1] as usize;
@@ -275,13 +298,11 @@ impl TchInferenceBackend {
                     }
                 }
             }
-            let index_gpu =
-                index_host
-                    .narrow(0, 0, n)
-                    .to_device_(self.device, Kind::Int64, true, false);
+            let index_gpu = index_active.to_device_(self.device, Kind::Int64, true, false);
             let gathered_gpu = policy.gather(1, &index_gpu, false).to_kind(Kind::Float);
-            gathered_host.narrow(0, 0, n).copy_(&gathered_gpu);
-            Some((gathered_host, width))
+            let mut gathered_active = Self::active_staging(&gathered_host, n, max_actions);
+            gathered_active.copy_(&gathered_gpu);
+            Some(gathered_active)
         };
         let value_host = Self::staging(&mut self.value_buf, min_rows, 1, Kind::Float, self.device);
         value_host.narrow(0, 0, n).copy_(&value.view([n, 1]));
@@ -291,15 +312,9 @@ impl TchInferenceBackend {
             .map(|row| -> Result<Evaluation> {
                 let begin = batch.offsets[row] as usize;
                 let end = batch.offsets[row + 1] as usize;
-                let logits = gathered
-                    .as_ref()
-                    .map_or_else(Vec::new, |(host, width)| unsafe {
-                        std::slice::from_raw_parts(
-                            host.data_ptr() as *const f32,
-                            host.size()[0] as usize * *width,
-                        )[row * *width..row * *width + end - begin]
-                            .to_vec()
-                    });
+                let logits = gathered.as_ref().map_or_else(Vec::new, |host| {
+                    Self::gathered_logits(host, row, end - begin)
+                });
                 Ok(Evaluation {
                     logits,
                     value: search::PositionValue::new(values[row])
@@ -337,5 +352,35 @@ impl TchInferenceBackend {
                 })
             })
             .collect::<Result<Vec<_>>>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_gathered_view_ignores_retained_staging_columns() {
+        let mut staging = None;
+        let mut wide = TchInferenceBackend::staging(&mut staging, 2, 4, Kind::Float, Device::Cpu);
+        wide.copy_(
+            &Tensor::from_slice(&[1.0f32, 2.0, 100.0, 101.0, 3.0, 4.0, 200.0, 201.0]).view([2, 4]),
+        );
+
+        let narrow = TchInferenceBackend::staging(&mut staging, 2, 2, Kind::Float, Device::Cpu);
+        let mut active = TchInferenceBackend::active_staging(&narrow, 2, 2);
+        active.copy_(&Tensor::from_slice(&[10.0f32, 11.0, 20.0, 21.0]).view([2, 2]));
+
+        assert_eq!(narrow.size(), vec![2, 4]);
+        assert_eq!(active.size(), vec![2, 2]);
+        assert_eq!(
+            TchInferenceBackend::gathered_logits(&active, 0, 2),
+            [10.0, 11.0]
+        );
+        assert_eq!(
+            TchInferenceBackend::gathered_logits(&active, 1, 2),
+            [20.0, 21.0]
+        );
+        assert_eq!(TchInferenceBackend::gathered_logits(&active, 1, 1), [20.0]);
     }
 }
