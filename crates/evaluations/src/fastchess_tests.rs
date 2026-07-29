@@ -124,7 +124,7 @@ fn runs_fake_binary_and_captures_pgn() {
     fs::create_dir_all(&dir).unwrap();
     let script = dir.join("fake-fastchess.sh");
     let pgn = dir.join("games.pgn");
-    fs::write(&script, format!("#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'Fastchess 1.2.3'; exit 0; fi\necho 'Score of candidate vs reference: 1 - 0 - 1 [0.750] 2'\necho warning >&2\nprintf '[Result \\\"1/2-1/2\\\"]\\n' > '{}'\n", pgn.display())).unwrap();
+    fs::write(&script, format!("#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'Fastchess 1.2.3'; exit 0; fi\necho 'Score of candidate vs reference: 1 - 0 - 1 [0.750] 2'\necho warning >&2\nprintf '[Result \"1/2-1/2\"]\\n' > '{}'\n", pgn.display())).unwrap();
     std::process::Command::new("chmod")
         .args(["+x", script.to_str().unwrap()])
         .status()
