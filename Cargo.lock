@@ -316,6 +316,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tch",
+ "toml",
 ]
 
 [[package]]

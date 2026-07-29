@@ -13,7 +13,7 @@
     },
     {
       "id": "chess-best-safetensors",
-      "name": "AlphaZero · best.safetensors",
+      "name": "AlphaZero \u00b7 best.safetensors",
       "kind": "alphazero",
       "games": [
         "chess"
@@ -29,7 +29,7 @@
     },
     {
       "id": "chess-best",
-      "name": "AlphaZero · best",
+      "name": "AlphaZero \u00b7 best",
       "kind": "alphazero",
       "games": [
         "chess"
@@ -37,6 +37,22 @@
       "model": "best",
       "server": "http://127.0.0.1:8080",
       "description": "chess model best (architecture=chess-az-v2, history=4)",
+      "badge": "Local",
+      "defaults": {
+        "simulations": 128,
+        "waitForCount": 16
+      }
+    },
+    {
+      "id": "chess-latest",
+      "name": "AlphaZero \u00b7 latest",
+      "kind": "alphazero",
+      "games": [
+        "chess"
+      ],
+      "model": "latest",
+      "server": "http://127.0.0.1:8080",
+      "description": "chess model latest (architecture=chess-se, history=four)",
       "badge": "Local",
       "defaults": {
         "simulations": 128,

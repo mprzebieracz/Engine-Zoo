@@ -1,0 +1,28 @@
+# Candidate-versus-roster arena. Keep checkpoint files under data/models/alphazero.
+# All paths are relative to this file.
+
+[candidate]
+name = "candidate"
+path = "../data/models/alphazero/candidate.safetensors"
+architecture = "chess-se"
+simulations = 256
+device = "cuda"
+
+[[opponents]]
+name = "baseline"
+path = "../data/models/alphazero/baseline.safetensors"
+architecture = "chess-se"
+simulations = 256
+device = "cuda"
+
+[settings]
+games = 40
+simulations = 256
+device = "cuda"
+concurrency = 1
+time_control = "1000000+0"
+max_moves = 512
+opening_plies = 8
+output_dir = "../data/evaluations/arena"
+fastchess = "fastchess"
+uci = "../target/release/engine-zoo-uci"

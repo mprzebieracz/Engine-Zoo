@@ -279,6 +279,13 @@ where
         self.run_dir
             .write_latest(&mut state, |path| Ok(self.var_store.save(path)?))?;
 
+        if state.iteration % 25 == 0 {
+            self.run_dir
+                .write_archived(state.model_generation, |path| {
+                    Ok(self.var_store.save(path)?)
+                })?;
+        }
+
         Ok(state)
     }
 

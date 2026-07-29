@@ -40,6 +40,36 @@ fn run_writes_immutable_experiment_and_atomic_latest_state() {
 }
 
 #[test]
+fn run_writes_periodic_archive_atomically_without_changing_latest_state() {
+    let root = std::env::temp_dir().join(format!("engine-zoo-archive-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let (run, _, mut state) = RunDir::open_or_create(&root, config).unwrap();
+    run.write_latest(&mut state, |path| {
+        fs::write(path, b"latest")?;
+        Ok(())
+    })
+    .unwrap();
+    let latest_state = state.latest_checkpoint.clone();
+
+    run.write_archived(25, |path| {
+        fs::write(path, b"archive")?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(
+        fs::read(run.archived_checkpoint_path(25)).unwrap(),
+        b"archive"
+    );
+    assert_eq!(state.latest_checkpoint, latest_state);
+    assert!(!run
+        .archived_checkpoint_path(25)
+        .with_file_name("generation-000025.tmp.safetensors")
+        .exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn experiment_toml_round_trips_and_carries_inference_settings() {
     let expected = config();
     let parsed: ExperimentConfig = toml::from_str(&expected.to_toml().unwrap()).unwrap();

@@ -116,7 +116,9 @@ fn named_model_path(run_dir: &Path, name: &str, fallback: Option<&str>) -> PathB
 
 pub fn open_existing_run(root: &Path, expected_game: &str) -> Result<(RunDir, ExperimentConfig)> {
     anyhow::ensure!(
-        root.join("experiment.json").is_file() || root.join("config.json").is_file(),
+        root.join("experiment.toml").is_file()
+            || root.join("experiment.json").is_file()
+            || root.join("config.json").is_file(),
         "no run found at {}; train first or pass --run-dir",
         root.display()
     );

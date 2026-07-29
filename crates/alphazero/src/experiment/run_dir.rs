@@ -148,12 +148,18 @@ impl RunDir {
         write_model: impl FnOnce(&Path) -> Result<()>,
     ) -> Result<()> {
         let latest = self.latest_path();
-        let temporary = temporary_model_path(&latest)?;
-        let _ = fs::remove_file(&temporary);
-        write_model(&temporary).with_context(|| format!("writing {}", temporary.display()))?;
-        fs::rename(&temporary, &latest)?;
+        write_model_atomically(&latest, write_model)?;
         state.latest_checkpoint = Some(relative_to_root(&self.root, &latest)?);
         self.write_state(state)
+    }
+
+    /// Writes an immutable periodic snapshot without changing run state.
+    pub fn write_archived(
+        &self,
+        generation: u64,
+        write_model: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<()> {
+        write_model_atomically(&self.archived_checkpoint_path(generation), write_model)
     }
 
     pub fn write_state(&self, state: &RunState) -> Result<()> {
@@ -251,6 +257,17 @@ fn temporary_model_path(final_path: &Path) -> Result<PathBuf> {
     name.push(".tmp.");
     name.push(extension);
     Ok(final_path.with_file_name(name))
+}
+
+fn write_model_atomically(
+    final_path: &Path,
+    write_model: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    let temporary = temporary_model_path(final_path)?;
+    let _ = fs::remove_file(&temporary);
+    write_model(&temporary).with_context(|| format!("writing {}", temporary.display()))?;
+    fs::rename(&temporary, final_path)?;
+    Ok(())
 }
 
 fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
