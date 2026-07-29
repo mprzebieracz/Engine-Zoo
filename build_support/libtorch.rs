@@ -15,7 +15,8 @@ pub fn configure(keep_libtorch_linked: bool) {
     println!("cargo:rustc-link-search=native={}", library_dir.display());
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", library_dir.display());
 
-    if keep_libtorch_linked && env::consts::OS == "linux" {
+    let cuda_library = library_dir.join("libtorch_cuda.so");
+    if keep_libtorch_linked && env::consts::OS == "linux" && cuda_library.is_file() {
         println!("cargo:rustc-link-arg-bins=-Wl,--no-as-needed");
         // `libtorch.so` depends on this library, but Linux's default
         // `--as-needed` link behaviour otherwise omits it from the final

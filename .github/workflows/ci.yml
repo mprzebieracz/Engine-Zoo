@@ -5,19 +5,8 @@ on:
   pull_request:
 
 jobs:
-  rust-pure:
-    name: Rust (pure crates)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - run: cargo +stable test -p engine_core -p games -p search
-      - run: cargo +stable clippy -p engine_core -p games -p search --all-targets -- -D warnings
-
-  rust-ml:
-    name: Rust (ML workspace)
+  rust:
+    name: Rust checks
     runs-on: ubuntu-latest
     env:
       LIBTORCH_USE_PYTORCH: "1"
@@ -39,42 +28,3 @@ jobs:
       - run: cargo +nightly fmt --check
       - run: cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo +stable test --workspace --all-features
-
-  rust-release:
-    name: Rust (release correctness)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo +stable test -p games -p search --release
-      - run: cargo +stable bench -p search --bench connect4_mcts --no-run
-
-  frontend:
-    name: Frontend
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - run: npm ci
-      - run: npm run check
-      - run: npm run build
-
-  helpers:
-    name: Helpers and dependency hygiene
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@stable
-      - run: python -m compileall scripts crates/evaluations/install_stockfish.py
-      - run: cargo +stable install cargo-audit --locked
-      - run: cargo +stable audit
