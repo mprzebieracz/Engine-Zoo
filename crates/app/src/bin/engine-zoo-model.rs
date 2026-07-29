@@ -1,8 +1,9 @@
-use alphazero::{ExperimentConfig, Network, RunDir};
+use alphazero::{ExperimentConfig, RunDir};
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
+use engine_app::tensor_rt;
 use std::path::PathBuf;
-use tch::{nn, CModule, Device, Kind, Tensor};
+use tch::Device;
 
 #[derive(Clone, Copy, ValueEnum)]
 enum DeviceKind {
@@ -55,20 +56,7 @@ fn export_torchscript(
     device: Device,
 ) -> Result<()> {
     let experiment = ExperimentConfig::read_toml(&experiment_path)?;
-    let mut var_store = nn::VarStore::new(device);
-    let network = Network::new(&var_store.root(), &experiment.model)?;
-    var_store.load(&checkpoint)?;
-    var_store.freeze();
-
-    let [channels, height, width] = experiment.model.state_shape();
-    let input = Tensor::zeros([1, channels, height, width], (Kind::Float, device));
-    let mut forward = |inputs: &[Tensor]| {
-        let output = network.forward_t(&inputs[0], false);
-        let scalar = output.value.expected_value();
-        vec![Tensor::cat(&[output.policy_logits, scalar], 1)]
-    };
-    let module = CModule::create_by_tracing("engine_zoo", "forward", &[input], &mut forward)?;
-    module.save(&output)?;
+    tensor_rt::export_torchscript(&experiment, &checkpoint, &output, device)?;
 
     println!("exported {}", output.display());
     Ok(())

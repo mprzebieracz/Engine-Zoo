@@ -82,7 +82,7 @@ mod tests {
                 cargo_profile: "release".into(),
                 rust_version: Some("rustc".into()),
                 target: "target".into(),
-                tch_version: "0.20".into(),
+                tch_version: env!("ENGINE_BENCH_TCH_VERSION").into(),
             },
             host: HostMetadata {
                 os: "linux".into(),

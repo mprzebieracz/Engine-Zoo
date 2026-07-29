@@ -1,6 +1,6 @@
 use crate::{
-    batcher, device, environment, harness, inference, iteration, replay, representation, search,
-    self_play, training,
+    batcher, device, environment, harness, inference, iteration, raw_inference, replay,
+    representation, search, self_play, training, trt_selfplay,
 };
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -23,12 +23,18 @@ enum BenchmarkCommand {
     Search(SearchArgs),
     Representation(OutputArgs),
     Inference(OutputArgs),
+    /// Compare a checkpoint's native CUDA FP16 and TensorRT inference paths.
+    #[command(name = "raw-inference")]
+    RawInference(RawInferenceArgs),
     Batcher(OutputArgs),
     #[command(name = "self-play")]
     SelfPlay(OutputArgs),
     Training(OutputArgs),
     /// Run a complete self-play, training, checkpoint, and inference-reload iteration.
     Iteration(IterationArgs),
+    /// Benchmark fixed-checkpoint chess self-play with native or TensorRT inference.
+    #[command(name = "chess-self-play")]
+    ChessSelfPlay(ChessSelfPlayArgs),
     #[command(name = "end-to-end")]
     EndToEnd(OutputArgs),
     Suite(OutputArgs),
@@ -90,6 +96,90 @@ pub(crate) struct IterationArgs {
     /// Also print a concise human-readable summary.
     #[arg(long)]
     pub(crate) human: bool,
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct RawInferenceArgs {
+    /// Experiment TOML that describes the checkpoint's architecture.
+    #[arg(long)]
+    pub(crate) experiment: PathBuf,
+
+    /// Native safetensors checkpoint to use as the numerical reference.
+    #[arg(long)]
+    pub(crate) checkpoint: PathBuf,
+
+    /// TensorRT-compiled TorchScript module produced from this checkpoint.
+    #[arg(long)]
+    pub(crate) tensor_rt_module: PathBuf,
+
+    /// Warmup forwards per backend and batch size.
+    #[arg(long, default_value_t = 10)]
+    pub(crate) warmup: usize,
+
+    /// Timed, CUDA-synchronized forwards per backend and batch size.
+    #[arg(long, default_value_t = 50)]
+    pub(crate) samples: usize,
+
+    /// Comma-separated batch sizes. The default covers the self-play range and larger throughput cases.
+    #[arg(long, value_delimiter = ',', default_values_t = [8_usize, 16, 32, 64, 128, 256])]
+    pub(crate) batch_sizes: Vec<usize>,
+
+    /// Write the complete machine-readable JSON report to this path.
+    #[arg(long)]
+    output: Option<PathBuf>,
+
+    /// Also print a concise human-readable summary.
+    #[arg(long)]
+    human: bool,
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct ChessSelfPlayArgs {
+    /// Experiment TOML. Its self-play and inference batching settings are used unchanged.
+    #[arg(long, default_value = "experiments/chess-puct-wdl.toml")]
+    pub(crate) experiment: PathBuf,
+
+    /// Reloadable safetensors checkpoint used by the native backend.
+    #[arg(long)]
+    pub(crate) checkpoint: Option<PathBuf>,
+
+    /// Fixed Torch-TensorRT TorchScript module used by the TensorRT backend.
+    #[arg(long)]
+    pub(crate) tensor_rt_module: Option<PathBuf>,
+
+    /// Inference backend to benchmark.
+    #[arg(long, value_enum, default_value_t = ChessInferenceBackend::Native)]
+    pub(crate) backend: ChessInferenceBackend,
+
+    /// Override the configured number of self-play games.
+    #[arg(long)]
+    pub(crate) games: Option<usize>,
+
+    /// Override the deterministic experiment seed.
+    #[arg(long)]
+    pub(crate) seed: Option<u64>,
+
+    /// Run the workload this many times. Each sample has a fresh service and replay buffer.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) samples: usize,
+
+    /// Execution device. CUDA is required because TensorRT is CUDA-only.
+    #[arg(long, value_enum, default_value_t = device::DeviceKind::Cuda)]
+    pub(crate) device: device::DeviceKind,
+
+    /// Write the complete machine-readable JSON report to this path.
+    #[arg(long)]
+    pub(crate) output: Option<PathBuf>,
+
+    /// Also print a concise human-readable summary.
+    #[arg(long)]
+    pub(crate) human: bool,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub(crate) enum ChessInferenceBackend {
+    Native,
+    TensorRt,
 }
 
 #[derive(Args, Clone)]
@@ -183,6 +273,10 @@ pub fn run(command: Command) -> Result<()> {
             ),
             &args,
         ),
+        BenchmarkCommand::RawInference(args) => {
+            let report = raw_inference::chess_h4(&args)?;
+            write_report(report, args.output.as_deref(), args.human)
+        }
         BenchmarkCommand::Batcher(args) => write(
             batcher::connect4(
                 &args.warmup,
@@ -216,6 +310,10 @@ pub fn run(command: Command) -> Result<()> {
         BenchmarkCommand::Iteration(args) => {
             let report = iteration::full_training_iteration(&args)?;
             write_iteration(report, &args)
+        }
+        BenchmarkCommand::ChessSelfPlay(args) => {
+            let report = trt_selfplay::chess_fixed_checkpoint(&args)?;
+            write_chess_self_play(report, &args)
         }
         BenchmarkCommand::EndToEnd(args) => write(end_to_end(&args)?, &args),
     }
@@ -305,6 +403,13 @@ fn write(report: crate::report::BenchmarkReport, args: &OutputArgs) -> Result<()
 }
 
 fn write_iteration(report: crate::report::BenchmarkReport, args: &IterationArgs) -> Result<()> {
+    write_report(report, args.output.as_deref(), args.human)
+}
+
+fn write_chess_self_play(
+    report: crate::report::BenchmarkReport,
+    args: &ChessSelfPlayArgs,
+) -> Result<()> {
     write_report(report, args.output.as_deref(), args.human)
 }
 

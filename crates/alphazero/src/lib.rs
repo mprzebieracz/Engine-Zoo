@@ -51,4 +51,4 @@ pub use trainer::{
     build_optimizer, train, wdl_cross_entropy, LearningRateSchedule, OptimizerSpec, TrainConfig,
     TrainMetrics, Trainer, TrainingSeed,
 };
-pub use training_run::{IterationReport, RunLimit, TrainingRun};
+pub use training_run::{IterationReport, NextInference, RunLimit, TrainingRun};

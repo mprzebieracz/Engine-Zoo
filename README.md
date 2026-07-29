@@ -43,7 +43,10 @@ Chess configurations are in `experiments/`: PUCT/WDL, Full Gumbel/WDL, canonical
 
 ## Chess training and LibTorch
 
-Training/inference use `tch` and require a compatible LibTorch installation. Set `LIBTORCH` explicitly, or use a Python PyTorch installation with `LIBTORCH_USE_PYTORCH=1`. The build scripts deliberately do not guess a machine-local path.
+Training/inference use `tch` 0.24 and require LibTorch/PyTorch 2.11.0. The
+CUDA configuration in this repository is CUDA 13.0. Set `LIBTORCH` explicitly,
+or use a matching Python PyTorch installation with `LIBTORCH_USE_PYTORCH=1`.
+The build scripts deliberately do not guess a machine-local path.
 
 ```bash
 python3 scripts/train_chess.py --device cuda

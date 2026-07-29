@@ -1,4 +1,4 @@
-//! The owned, reloadable AlphaZero training lifecycle.
+//! The owned AlphaZero training lifecycle.
 
 use crate::experiment::{ExperimentConfig, InferenceEngine, RunDir, RunState};
 use crate::inference::{InferenceService, InferenceSource};
@@ -18,7 +18,7 @@ use anyhow::Result;
 use engine_core::GameState;
 use games::{ChessPosition, Connect4};
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tch::{nn, Device};
 
 /// The amount of training work requested by [`TrainingRun::run`].
@@ -39,6 +39,24 @@ pub struct IterationReport {
     pub replay_samples: usize,
     pub training: Option<TrainMetrics>,
     pub inference: BatcherStats,
+    /// What the caller must do before self-play can use the next checkpoint.
+    pub next_inference: NextInference,
+}
+
+/// The inference-model action required after an iteration.
+///
+/// Native inference reloads the checkpoint in-place. A TensorRT TorchScript
+/// module has fixed weights, so the application must compile the checkpoint
+/// named here, replace the configured module, and reload TensorRT before the
+/// following self-play generation.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum NextInference {
+    NativeReloaded,
+    TensorRtRecompileRequired {
+        checkpoint: PathBuf,
+        tensor_rt_module: PathBuf,
+    },
 }
 
 /// Runtime-dispatched training run. Its inner variants keep search and replay
@@ -88,8 +106,10 @@ where
     replay: ReplayBuffer<S>,
     self_play: SelfPlayCoordinator,
     workers: F,
+    make_workers: fn(&InferenceService, crate::SelfPlayConfig) -> Result<F>,
     trainer: Trainer,
     representation: R,
+    pending_tensor_rt_recompile: Option<NextInference>,
 }
 
 struct TypedRunComponents<S, F> {
@@ -102,24 +122,20 @@ struct TypedRunComponents<S, F> {
     inference: InferenceService,
     replay: ReplayBuffer<S>,
     workers: F,
+    make_workers: fn(&InferenceService, crate::SelfPlayConfig) -> Result<F>,
 }
 
 impl TrainingRun {
-    /// Opens an initialized run with reloadable native inference.
+    /// Opens an initialized run.
+    ///
+    /// TensorRT uses a fixed module. After each checkpoint, call
+    /// [`Self::reload_tensor_rt_inference`] once the configured module has
+    /// been rebuilt, before requesting another generation.
     pub fn open(path: &Path, device: Device) -> Result<Self> {
         let (run_dir, experiment, mut state) = RunDir::open(path)?;
-        anyhow::ensure!(
-            experiment.inference.engine == InferenceEngine::Native,
-            "TrainingRun requires reloadable native inference; TensorRT TorchScript supports one-generation self-play only"
-        );
 
         let (var_store, network) = load_training_model(&run_dir, &experiment, &mut state, device)?;
-        let inference = InferenceService::load(
-            &experiment.model,
-            InferenceSource::Checkpoint(&run_dir.latest_path()),
-            device,
-            &experiment.inference,
-        )?;
+        let inference = load_inference_service(&run_dir, &experiment, device)?;
 
         let inner = match experiment.model.game() {
             GameKind::Connect4 => TrainingRunKind::Connect4(open_connect4(
@@ -166,6 +182,34 @@ impl TrainingRun {
             TrainingRunKind::ChessH8(run) => &run.state,
         }
     }
+
+    /// Returns the outstanding TensorRT compilation requirement, if this
+    /// process has trained a newer checkpoint than its fixed inference module.
+    pub fn pending_tensor_rt_recompile(&self) -> Option<&NextInference> {
+        match &self.inner {
+            TrainingRunKind::Connect4(run) => run.pending_tensor_rt_recompile.as_ref(),
+            TrainingRunKind::ChessClassic(run) => run.pending_tensor_rt_recompile.as_ref(),
+            TrainingRunKind::ChessH1(run) => run.pending_tensor_rt_recompile.as_ref(),
+            TrainingRunKind::ChessH4(run) => run.pending_tensor_rt_recompile.as_ref(),
+            TrainingRunKind::ChessH8(run) => run.pending_tensor_rt_recompile.as_ref(),
+        }
+    }
+
+    /// Loads a newly compiled TensorRT module and reconnects self-play to it.
+    ///
+    /// The configured module path must already contain the TensorRT export of
+    /// the checkpoint reported by [`Self::pending_tensor_rt_recompile`]. This
+    /// preserves replay and trainer state while replacing the fixed inference
+    /// service and its evaluation cache.
+    pub fn reload_tensor_rt_inference(&mut self) -> Result<()> {
+        match &mut self.inner {
+            TrainingRunKind::Connect4(run) => run.reload_tensor_rt_inference(),
+            TrainingRunKind::ChessClassic(run) => run.reload_tensor_rt_inference(),
+            TrainingRunKind::ChessH1(run) => run.reload_tensor_rt_inference(),
+            TrainingRunKind::ChessH4(run) => run.reload_tensor_rt_inference(),
+            TrainingRunKind::ChessH8(run) => run.reload_tensor_rt_inference(),
+        }
+    }
 }
 
 impl<S, R, F> TypedTrainingRun<S, R, F>
@@ -176,15 +220,17 @@ where
     F: SelfPlayWorkerFactory<S>,
 {
     fn step(&mut self) -> Result<IterationReport> {
+        self.ensure_inference_is_current()?;
+
         let self_play = self.generate_self_play()?;
         let training = self.train_network();
 
         let next_state = self.advance_state(&self_play, training.as_ref());
         let next_state = self.save_checkpoint(next_state)?;
-        self.reload_inference()?;
+        let next_inference = self.update_inference_after_checkpoint()?;
 
         self.state = next_state;
-        let report = self.build_report(self_play, training);
+        let report = self.build_report(self_play, training, next_inference);
         self.persist_report(&report)?;
 
         Ok(report)
@@ -235,16 +281,69 @@ where
         Ok(state)
     }
 
-    fn reload_inference(&self) -> Result<()> {
-        self.inference
-            .reload_weights(&self.run_dir.latest_path())
-            .map_err(anyhow::Error::msg)
+    fn ensure_inference_is_current(&self) -> Result<()> {
+        if let Some(requirement) = &self.pending_tensor_rt_recompile {
+            let NextInference::TensorRtRecompileRequired {
+                checkpoint,
+                tensor_rt_module,
+            } = requirement
+            else {
+                unreachable!("only TensorRT requirements are stored as pending")
+            };
+
+            anyhow::bail!(
+                "TensorRT inference is stale after checkpoint {}; compile it into {} and call reload_tensor_rt_inference before another self-play generation",
+                checkpoint.display(),
+                tensor_rt_module.display(),
+            );
+        }
+
+        Ok(())
+    }
+
+    fn update_inference_after_checkpoint(&mut self) -> Result<NextInference> {
+        if self.experiment.inference.engine == InferenceEngine::Native {
+            self.inference
+                .reload_weights(&self.run_dir.latest_path())
+                .map_err(anyhow::Error::msg)?;
+
+            return Ok(NextInference::NativeReloaded);
+        }
+
+        let requirement = NextInference::TensorRtRecompileRequired {
+            checkpoint: self.run_dir.latest_path(),
+            tensor_rt_module: tensor_rt_module_path(&self.run_dir, &self.experiment)?,
+        };
+        self.pending_tensor_rt_recompile = Some(requirement.clone());
+
+        Ok(requirement)
+    }
+
+    fn reload_tensor_rt_inference(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.experiment.inference.engine == InferenceEngine::TensorRtTorchScript,
+            "reload_tensor_rt_inference is only valid for tensor-rt-torch-script inference"
+        );
+        anyhow::ensure!(
+            self.pending_tensor_rt_recompile.is_some(),
+            "TensorRT inference is already current; run an iteration before reloading it"
+        );
+
+        let inference = load_inference_service(&self.run_dir, &self.experiment, self.device)?;
+        let workers = (self.make_workers)(&inference, self.experiment.self_play.clone())?;
+
+        self.workers = workers;
+        self.inference = inference;
+        self.pending_tensor_rt_recompile = None;
+
+        Ok(())
     }
 
     fn build_report(
         &self,
         self_play: SelfPlayStats,
         training: Option<TrainMetrics>,
+        next_inference: NextInference,
     ) -> IterationReport {
         IterationReport {
             iteration: self.state.iteration,
@@ -255,6 +354,7 @@ where
             replay_samples: self.replay.len(),
             training,
             inference: self.inference.stats(),
+            next_inference,
         }
     }
 
@@ -271,6 +371,7 @@ where
             "learning_rate": report.training.as_ref().map(|metrics| metrics.learning_rate),
             "training": &report.training,
             "inference": report.inference,
+            "next_inference": &report.next_inference,
         }))
     }
 }
@@ -295,6 +396,55 @@ fn load_training_model(
     }
 
     Ok((var_store, network))
+}
+
+fn load_inference_service(
+    run_dir: &RunDir,
+    experiment: &ExperimentConfig,
+    device: Device,
+) -> Result<InferenceService> {
+    match experiment.inference.engine {
+        InferenceEngine::Native => {
+            let checkpoint = run_dir.latest_path();
+            InferenceService::load(
+                &experiment.model,
+                InferenceSource::Checkpoint(&checkpoint),
+                device,
+                &experiment.inference,
+            )
+        }
+        InferenceEngine::TensorRtTorchScript => {
+            let module = tensor_rt_module_path(run_dir, experiment)?;
+            InferenceService::load(
+                &experiment.model,
+                InferenceSource::TensorRtModule(&module),
+                device,
+                &experiment.inference,
+            )
+        }
+    }
+}
+
+fn tensor_rt_module_path(run_dir: &RunDir, experiment: &ExperimentConfig) -> Result<PathBuf> {
+    let module = experiment
+        .inference
+        .tensor_rt_module
+        .as_ref()
+        .expect("validated TensorRT inference configuration");
+    let module = if module.is_absolute() {
+        module.clone()
+    }
+    else {
+        run_dir.root().join(module)
+    };
+
+    anyhow::ensure!(
+        module.is_file(),
+        "missing TensorRT TorchScript module: {}",
+        module.display()
+    );
+
+    Ok(module)
 }
 
 fn log_weights_only_resume(run_dir: &RunDir) -> Result<()> {
@@ -331,6 +481,7 @@ fn open_connect4(
             inference,
             replay,
             workers,
+            make_workers: DomainSelfPlayWorkerFactory::new,
         },
         Connect4AzRepresentation,
     )
@@ -391,6 +542,7 @@ fn open_chess_classic(
             inference,
             replay,
             workers,
+            make_workers: DomainSelfPlayWorkerFactory::new,
         },
         ChessClassicRepresentation,
     )
@@ -419,6 +571,7 @@ fn open_chess_history<const HISTORY: usize>(
             inference,
             replay,
             workers,
+            make_workers: DomainSelfPlayWorkerFactory::new,
         },
         ChessAzRepresentation,
     )
@@ -442,6 +595,7 @@ where
             inference,
             replay,
             workers,
+            make_workers,
         } = components;
         let self_play = SelfPlayCoordinator::new(experiment.self_play.clone(), experiment.seed)?;
         let trainer = Trainer::new(&var_store, experiment.training.clone())?;
@@ -457,8 +611,29 @@ where
             replay,
             self_play,
             workers,
+            make_workers,
             trainer,
             representation,
+            pending_tensor_rt_recompile: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tensor_rt_requirement_identifies_the_checkpoint_and_module() {
+        let requirement = NextInference::TensorRtRecompileRequired {
+            checkpoint: PathBuf::from("checkpoints/latest.safetensors"),
+            tensor_rt_module: PathBuf::from("model.trt.ts"),
+        };
+
+        let value = serde_json::to_value(&requirement).unwrap();
+
+        assert_eq!(value["kind"], "tensor-rt-recompile-required");
+        assert_eq!(value["checkpoint"], "checkpoints/latest.safetensors");
+        assert_eq!(value["tensor_rt_module"], "model.trt.ts");
     }
 }

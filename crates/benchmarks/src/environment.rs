@@ -52,7 +52,7 @@ pub fn build() -> BuildMetadata {
         cargo_profile: cargo_profile().into(),
         rust_version: command("rustc", &["--version"]),
         target: option_env!("TARGET").unwrap_or("unknown").into(),
-        tch_version: "0.20".into(),
+        tch_version: env!("ENGINE_BENCH_TCH_VERSION").into(),
     }
 }
 
