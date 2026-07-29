@@ -19,14 +19,23 @@ The trainer seeds each replay batch from the experiment seed and global step. A 
 
 Optimizer moments are not serializable through the pinned `tch` API. Until that changes, a resume is accurately marked weights-only even when replay persistence is introduced.
 
+## Checkpoint retention
+
+Every completed training iteration atomically updates
+`checkpoints/latest.safetensors`. Completed iterations whose number is a
+multiple of 25 are also retained as immutable archives under `checkpoints/`,
+for example `generation-000025.safetensors`. Resuming always uses the latest
+weights, while the periodic archives provide rollback and evaluation points.
+
 ## Default chess recipe
 
 `scripts/train_chess.py` launches
 `experiments/chess-puct-wdl-tensorrt.toml`. It uses TensorRT FP16 inference
 for fixed-weight self-play and native CUDA training, with 24 self-play workers,
 16-leaf local MCTS batches, and dynamic inference batches of 128–256 states
-with a 1 ms wait. The script requires `--tensor-rt-python` and the matching
-runtime environment; see [TensorRT inference](tensorrt.md) for the command.
+with a 1 ms wait. The script discovers a matching TensorRT Python runtime
+automatically; use `--tensor-rt-python` only when an explicit interpreter
+override is needed. See [TensorRT inference](tensorrt.md) for runtime details.
 
 It uses Root-Gumbel PUCT: 25% of positions use a 256-playout, 16-action budget;
 the remainder use 64 playouts and 8 considered root actions. Fast positions

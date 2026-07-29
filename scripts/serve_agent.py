@@ -17,17 +17,38 @@ def run_metadata(run_dir: Path, game: str) -> tuple[str, str | None]:
     config_path = run_dir / "experiment.toml"
     if not config_path.is_file():
         raise SystemExit(f"run experiment does not exist: {config_path}")
-    model = tomllib.loads(config_path.read_text()).get("model", {})
+    experiment = tomllib.loads(config_path.read_text())
+    model = experiment.get("model", {})
+
+    # Format-version 3 stores the game and history in the tagged model spec.
+    # The game is implicit in the architecture name (unlike the old
+    # ``representation`` field), so validate it before registering the agent.
+    architecture = model.get("architecture")
+    if architecture == "chess-se":
+        if game != "chess":
+            raise SystemExit(f"run model does not match --game {game}")
+        return architecture, model.get("history")
+    if architecture == "chess-classic":
+        if game != "chess":
+            raise SystemExit(f"run model does not match --game {game}")
+        return architecture, None
+    if architecture == "connect4-residual":
+        if game != "connect4":
+            raise SystemExit(f"run model does not match --game {game}")
+        return architecture, None
+
+    # Keep accepting pre-format-version-3 experiments while old runs are
+    # still around.
     if model.get("game") != game:
         raise SystemExit(f"run model does not match --game {game}")
     representation = model.get("representation")
     if representation == "chess-classic":
-        return "chess-classic", None
+        return representation, None
     if representation == "connect4-canonical":
-        return "connect4-canonical", None
+        return representation, None
     canonical = representation.get("chess-canonical") if isinstance(representation, dict) else None
     if canonical is None:
-        raise SystemExit(f"unsupported representation: {representation!r}")
+        raise SystemExit(f"unsupported model architecture: {architecture!r}")
     return "chess-canonical", canonical.get("history")
 
 
@@ -80,8 +101,8 @@ def register_agent(
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--game", choices=("chess", "connect4"), default="chess")
-    p.add_argument("--run-dir", default="data/runs/chess-az-v2-h4")
-    p.add_argument("--model", default="best")
+    p.add_argument("--run-dir", default="runs/chess-puct-wdl-tensorrt-v2")
+    p.add_argument("--model", default="latest")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--id")
