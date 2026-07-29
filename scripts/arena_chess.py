@@ -42,25 +42,22 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
-def main() -> int:
-    args = parser().parse_args()
-    fastchess = shutil.which(args.fastchess) or args.fastchess
+def fastchess_path(value: str) -> Path:
+    fastchess = shutil.which(value) or value
     fastchess_path = Path(fastchess)
     if not fastchess_path.is_absolute():
         fastchess_path = ROOT / fastchess_path
+
     if not fastchess_path.is_file() or not os.access(fastchess_path, os.X_OK):
         raise SystemExit(f"fastchess not found or not executable: {fastchess}")
-    subprocess.run(
-        [
-            "cargo", "build", "--release", "-p", "checkpoint-eval", "--bin", "eval-arena",
-            "-p", "engine_app", "--bin", "engine-zoo-uci",
-        ],
-        cwd=ROOT,
-        check=True,
-    )
+
+    return fastchess_path
+
+
+def build_command(args: argparse.Namespace, fastchess: Path) -> list[str]:
     command = [
         "target/release/eval-arena",
-        "--fastchess", str(fastchess_path), "--uci", args.uci,
+        "--fastchess", str(fastchess), "--uci", args.uci,
         "--candidate", args.candidate, "--baseline", args.baseline,
         "--candidate-architecture", args.candidate_architecture,
         "--baseline-architecture", args.baseline_architecture,
@@ -69,8 +66,31 @@ def main() -> int:
         "--device", args.device, "--concurrency", str(args.concurrency),
         "--max-moves", str(args.max_moves),
     ]
+
     if args.openings:
         command += ["--openings", args.openings]
+
+    return command
+
+
+def build_binaries() -> None:
+    subprocess.run(
+        [
+            "cargo", "build", "--release", "-p", "checkpoint-eval", "--bin", "eval-arena",
+            "-p", "engine_app", "--bin", "engine-zoo-uci",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+
+
+def main() -> int:
+    args = parser().parse_args()
+    fastchess = fastchess_path(args.fastchess)
+
+    build_binaries()
+
+    command = build_command(args, fastchess)
     return subprocess.run(command + args.extra, cwd=ROOT).returncode
 
 

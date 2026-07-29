@@ -3,7 +3,27 @@ import type { Analysis, SessionView } from '$lib/types';
 const ENV_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '';
 
 function base(server?: string) {
-  return (server?.replace(/\/$/, '') || ENV_BASE);
+  return server?.replace(/\/$/, '') || ENV_BASE;
+}
+
+async function responseBody(response: Response): Promise<unknown> {
+  const body = await response.text();
+
+  if (!body) return undefined;
+
+  try {
+    return JSON.parse(body);
+  } catch {
+    return body;
+  }
+}
+
+function responseError(response: Response, body: unknown): Error {
+  const message = typeof body === 'object' && body && 'error' in body
+    ? String((body as { error: unknown }).error)
+    : `${response.status} ${response.statusText}`;
+
+  return new Error(message);
 }
 
 export async function request<T>(path: string, init?: RequestInit, server?: string): Promise<T> {
@@ -11,15 +31,11 @@ export async function request<T>(path: string, init?: RequestInit, server?: stri
     ...init,
     headers: { 'content-type': 'application/json', ...init?.headers }
   });
-  const body = await response.text();
-  let parsed: unknown = undefined;
-  if (body) { try { parsed = JSON.parse(body); } catch { parsed = body; } }
-  if (!response.ok) {
-    const message = typeof parsed === 'object' && parsed && 'error' in parsed
-      ? String((parsed as { error: unknown }).error)
-      : `${response.status} ${response.statusText}`;
-    throw new Error(message);
-  }
+
+  const parsed = await responseBody(response);
+
+  if (!response.ok) throw responseError(response, parsed);
+
   return parsed as T;
 }
 

@@ -6,9 +6,27 @@
   import { onMount } from 'svelte';
   let selected = $state('chess');
   let index = $derived(Math.max(0, games.findIndex((game) => game.id === selected)));
-  onMount(() => { selected = restoreSelection().gameId; });
-  function cycle(delta:number){ let next=index; do{next=(next+delta+games.length)%games.length}while(!games[next].available);selected=games[next].id }
-  function next(){ const old=restoreSelection();persistSelection({...old,gameId:selected});goto(resolve('/setup')) }
+
+  onMount(() => {
+    selected = restoreSelection().gameId;
+  });
+
+  function cycle(delta: number) {
+    let next = index;
+
+    do {
+      next = (next + delta + games.length) % games.length;
+    } while (!games[next].available);
+
+    selected = games[next].id;
+  }
+
+  function next() {
+    const selection = restoreSelection();
+    persistSelection({ ...selection, gameId: selected });
+
+    goto(resolve('/setup'));
+  }
 </script>
 <svelte:head><title>Choose game · Engine Zoo</title></svelte:head>
 <main class="page screen-enter">

@@ -24,16 +24,79 @@
 
   onMount(() => {
     void load();
-    const timer = window.setInterval(() => { if (jobs.some((job) => job.status === 'queued' || job.status === 'running')) void refreshJobs(); }, 2000);
+
+    const timer = window.setInterval(refreshActiveJobs, 2000);
     return () => window.clearInterval(timer);
   });
 
   async function load() {
-    try { [catalog, jobs] = await Promise.all([evaluationsApi.catalog(), evaluationsApi.jobs()]); candidate = catalog.checkpoints[0] ?? ''; baseline = catalog.checkpoints[1] ?? catalog.checkpoints[0] ?? ''; if (jobs[0]) selectedId = jobs[0].id; } catch (err) { error = err instanceof Error ? err.message : 'Could not load evaluations'; }
+    try {
+      [catalog, jobs] = await Promise.all([evaluationsApi.catalog(), evaluationsApi.jobs()]);
+      setInitialSelection();
+    } catch (cause) {
+      error = messageFor(cause, 'Could not load evaluations');
+    }
   }
-  async function refreshJobs() { try { jobs = await evaluationsApi.jobs(); } catch { /* retain the last persisted view */ } }
-  function chooseSuite(next: Suite) { suite = next; const defaults = catalog?.suites.find((item) => item.id === next)?.defaults; if (defaults?.simulations) simulations = defaults.simulations; if (defaults?.rounds) rounds = defaults.rounds; if (defaults?.stockfish_nodes) stockfishNodes = defaults.stockfish_nodes; }
-  async function run() { error = ''; busy = true; try { const job = await evaluationsApi.create({ candidate, suite, baseline: suite === 'arena' ? baseline : undefined, simulations, rounds, stockfish_nodes: stockfishNodes }); jobs = [job, ...jobs]; selectedId = job.id; } catch (err) { error = err instanceof Error ? err.message : 'Could not create evaluation'; } finally { busy = false; } }
+
+  function setInitialSelection() {
+    if (!catalog) return;
+
+    candidate = catalog.checkpoints[0] ?? '';
+    baseline = catalog.checkpoints[1] ?? candidate;
+    selectedId = jobs[0]?.id ?? '';
+  }
+
+  function refreshActiveJobs() {
+    if (jobs.some((job) => job.status === 'queued' || job.status === 'running')) {
+      void refreshJobs();
+    }
+  }
+
+  async function refreshJobs() {
+    try {
+      jobs = await evaluationsApi.jobs();
+    } catch {
+      // Retain the last persisted view.
+    }
+  }
+
+  function chooseSuite(next: Suite) {
+    suite = next;
+
+    const defaults = catalog?.suites.find((item) => item.id === next)?.defaults;
+    if (!defaults) return;
+
+    if (defaults.simulations) simulations = defaults.simulations;
+    if (defaults.rounds) rounds = defaults.rounds;
+    if (defaults.stockfish_nodes) stockfishNodes = defaults.stockfish_nodes;
+  }
+
+  async function run() {
+    error = '';
+    busy = true;
+
+    try {
+      const job = await evaluationsApi.create({
+        candidate,
+        suite,
+        baseline: suite === 'arena' ? baseline : undefined,
+        simulations,
+        rounds,
+        stockfish_nodes: stockfishNodes
+      });
+
+      jobs = [job, ...jobs];
+      selectedId = job.id;
+    } catch (cause) {
+      error = messageFor(cause, 'Could not create evaluation');
+    } finally {
+      busy = false;
+    }
+  }
+
+  function messageFor(cause: unknown, fallback: string): string {
+    return cause instanceof Error ? cause.message : fallback;
+  }
 </script>
 
 <svelte:head><title>Evaluate · Engine Zoo</title></svelte:head>

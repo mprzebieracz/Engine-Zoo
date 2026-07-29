@@ -31,6 +31,52 @@ def run_metadata(run_dir: Path, game: str) -> tuple[str, str | None]:
     return "chess-canonical", canonical.get("history")
 
 
+def agent_record(
+    agent_id: str,
+    name: str,
+    args: argparse.Namespace,
+    architecture: str,
+    history: str | None,
+) -> dict[str, object]:
+    details = f"architecture={architecture}" + (f", history={history}" if history else "")
+    return {
+        "id": agent_id, "name": name, "kind": "alphazero",
+        "games": [args.game], "model": args.model,
+        "server": f"http://{args.host}:{args.port}",
+        "description": f"{args.game} model {args.model} ({details})",
+        "badge": "Local",
+        "defaults": {"simulations": 128, "waitForCount": 16},
+    }
+
+
+def register_agent(
+    config_path: Path,
+    agent_id: str,
+    name: str,
+    args: argparse.Namespace,
+    architecture: str,
+    history: str | None,
+) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config = json.loads(config_path.read_text()) if config_path.exists() else {"agents": []}
+    agents = [agent for agent in config.get("agents", []) if agent.get("id") != agent_id]
+
+    if not any(agent.get("id") == "human" for agent in agents):
+        agents.insert(
+            0,
+            {
+                "id": "human", "name": "Human", "kind": "human",
+                "games": ["chess", "connect4"],
+                "description": "Moves are entered through the board.",
+                "badge": "Local",
+            },
+        )
+
+    agents.append(agent_record(agent_id, name, args, architecture, history))
+    config["agents"] = agents
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--game", choices=("chess", "connect4"), default="chess")
@@ -49,35 +95,12 @@ def main() -> int:
     safe_model = re.sub(r"[^A-Za-z0-9_]+", "-", Path(args.model).name).strip("-")
     agent_id = args.id or f"{args.game}-{safe_model}"
     name = args.name or f"AlphaZero · {args.model}"
+
     if not args.no_config:
         config_path = Path(args.config)
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config = json.loads(config_path.read_text()) if config_path.exists() else {"agents": []}
-        agents = [agent for agent in config.get("agents", []) if agent.get("id") != agent_id]
-        if not any(agent.get("id") == "human" for agent in agents):
-            agents.insert(
-                0,
-                {
-                    "id": "human", "name": "Human", "kind": "human",
-                    "games": ["chess", "connect4"],
-                    "description": "Moves are entered through the board.",
-                    "badge": "Local",
-                },
-            )
-        details = f"architecture={architecture}" + (f", history={history}" if history else "")
-        agents.append(
-            {
-                "id": agent_id, "name": name, "kind": "alphazero",
-                "games": [args.game], "model": args.model,
-                "server": f"http://{args.host}:{args.port}",
-                "description": f"{args.game} model {args.model} ({details})",
-                "badge": "Local",
-                "defaults": {"simulations": 128, "waitForCount": 16},
-            }
-        )
-        config["agents"] = agents
-        config_path.write_text(json.dumps(config, indent=2) + "\n")
+        register_agent(config_path, agent_id, name, args, architecture, history)
         print(f"registered {agent_id} in {config_path}")
+
     subprocess.run(["cargo", "build", "--release", "--bin", "engine-zoo"], cwd=ROOT, check=True)
     print(f"serving {args.game} from {args.run_dir} on http://{args.host}:{args.port}/")
     return subprocess.run(

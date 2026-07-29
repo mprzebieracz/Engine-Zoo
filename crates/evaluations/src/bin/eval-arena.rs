@@ -69,8 +69,7 @@ fn validate_chess_run(run_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
+fn rounds(args: &Args) -> Result<u32> {
     let rounds = args
         .games
         .map(|games| {
@@ -82,10 +81,16 @@ fn main() -> Result<()> {
         })
         .transpose()?
         .unwrap_or(args.rounds);
+
     anyhow::ensure!(rounds > 0, "--rounds must be positive");
     anyhow::ensure!(args.simulations > 0, "--simulations must be positive");
     anyhow::ensure!(args.concurrency > 0, "--concurrency must be positive");
     anyhow::ensure!(args.max_moves > 0, "--max-moves must be positive");
+
+    Ok(rounds)
+}
+
+fn run_directories(args: &Args) -> Result<(PathBuf, PathBuf)> {
     let candidate_run_dir = args
         .run_dir
         .clone()
@@ -94,20 +99,33 @@ fn main() -> Result<()> {
         .run_dir
         .clone()
         .unwrap_or_else(|| infer_run_dir(&args.baseline));
+
     validate_chess_run(&candidate_run_dir)?;
     validate_chess_run(&baseline_run_dir)?;
+
+    Ok((candidate_run_dir, baseline_run_dir))
+}
+
+fn model_engines<'a>(
+    args: &'a Args,
+    candidate_run_dir: &'a Path,
+    baseline_run_dir: &'a Path,
+) -> Result<(ModelEngine<'a>, ModelEngine<'a>)> {
     let candidate_simulations = args.candidate_simulations.unwrap_or(args.simulations);
     let baseline_simulations = args.baseline_simulations.unwrap_or(args.simulations);
+
     anyhow::ensure!(
         candidate_simulations > 0 && baseline_simulations > 0,
         "simulations must be positive"
     );
+
     let candidate_device = args.candidate_device.as_deref().unwrap_or(&args.device);
     let baseline_device = args.baseline_device.as_deref().unwrap_or(&args.device);
+
     let candidate = ModelEngine {
         name: "candidate",
         uci: &args.uci,
-        run_dir: &candidate_run_dir,
+        run_dir: candidate_run_dir,
         checkpoint: &args.candidate,
         simulations: candidate_simulations,
         device: candidate_device,
@@ -116,12 +134,22 @@ fn main() -> Result<()> {
     let baseline = ModelEngine {
         name: "baseline",
         uci: &args.uci,
-        run_dir: &baseline_run_dir,
+        run_dir: baseline_run_dir,
         checkpoint: &args.baseline,
         simulations: baseline_simulations,
         device: baseline_device,
         opening_plies: Some(args.opening_plies),
     };
+
+    Ok((candidate, baseline))
+}
+
+fn fastchess_command(
+    args: &Args,
+    candidate: ModelEngine<'_>,
+    baseline: ModelEngine<'_>,
+    rounds: u32,
+) -> FastchessCommand {
     let mut command =
         FastchessCommand::new(&args.fastchess, candidate.fastchess(), baseline.fastchess())
             // Fastchess requires a clock field; the default is practically unlimited.
@@ -134,7 +162,20 @@ fn main() -> Result<()> {
     if let Some(openings) = &args.openings {
         command = command.openings(Openings::epd(openings));
     }
-    let spec = EvaluationSpec {
+
+    command
+}
+
+fn evaluation_spec(
+    args: &Args,
+    candidate: ModelEngine<'_>,
+    baseline: ModelEngine<'_>,
+) -> EvaluationSpec {
+    let candidate_simulations = candidate.simulations;
+    let candidate_device = candidate.device;
+    let baseline_device = baseline.device;
+
+    EvaluationSpec {
         schema_version: SCHEMA_VERSION,
         id: format!(
             "arena-{}-vs-{}",
@@ -156,11 +197,26 @@ fn main() -> Result<()> {
             dirichlet_noise: false,
             device: format!("candidate={candidate_device}, baseline={baseline_device}"),
         },
-        opening_set: args.openings.map(|path| path.display().to_string()),
+        opening_set: args
+            .openings
+            .as_ref()
+            .map(|path| path.display().to_string()),
         seed: None,
         concurrency: args.concurrency as usize,
         fastchess_version: None,
-    };
+    }
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let rounds = rounds(&args)?;
+
+    let (candidate_run_dir, baseline_run_dir) = run_directories(&args)?;
+    let (candidate, baseline) = model_engines(&args, &candidate_run_dir, &baseline_run_dir)?;
+
+    let command = fastchess_command(&args, candidate, baseline, rounds);
+    let spec = evaluation_spec(&args, candidate, baseline);
+
     let report = run_match(&args.output_dir, spec, command)?;
     println!(
         "arena: {}/{} ({:.1}%), {:+.1} local Elo",
