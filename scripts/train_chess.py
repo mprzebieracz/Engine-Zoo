@@ -160,14 +160,15 @@ def _run_training(command: list[Path | str], environment: dict[str, str] | None)
         [str(argument) for argument in command],
         cwd=ROOT,
         env=environment,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
     )
-    assert process.stderr is not None
-    for line in process.stderr:
+    assert process.stdout is not None
+    for line in process.stdout:
         if _is_nonfatal_runtime_noise(line):
             continue
-        print(line, end="", file=sys.stderr)
+        print(line, end="")
     return process.wait()
 
 
