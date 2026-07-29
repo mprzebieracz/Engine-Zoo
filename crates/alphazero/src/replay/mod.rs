@@ -231,6 +231,45 @@ struct SampleScratch {
     outcomes: Vec<i64>,
 }
 
+impl SampleScratch {
+    fn prepare(&mut self, batch_size: usize, state_size: usize) {
+        self.states.resize(batch_size * state_size, 0.0);
+
+        self.policy_actions.clear();
+        self.policy_probabilities.clear();
+        self.policy_rows.clear();
+        self.policy_weights.clear();
+        self.value_weights.clear();
+        self.outcomes.clear();
+    }
+
+    fn append_sample<S, Rep>(
+        &mut self,
+        sample: &ReplaySample<S>,
+        row: usize,
+        state_size: usize,
+        representation: &Rep,
+    ) where
+        S: GameState,
+        Rep: AlphaZeroRepresentation<S>,
+    {
+        representation.encode_state(
+            &sample.state,
+            &mut self.states[row * state_size..(row + 1) * state_size],
+        );
+
+        for &(action, probability) in &sample.policy {
+            self.policy_actions.push(action.as_u32() as i64);
+            self.policy_probabilities.push(probability);
+            self.policy_rows.push(row as i64);
+        }
+
+        self.policy_weights.push(sample.weights.policy);
+        self.value_weights.push(sample.weights.value);
+        self.outcomes.push(sample.outcome.wdl_index());
+    }
+}
+
 #[derive(Debug)]
 pub struct SparsePolicyBatch {
     pub actions: Tensor,
@@ -339,35 +378,24 @@ impl<S: GameState + Clone> ReplayBuffer<S> {
         }
         let mut scratch = self.sample_scratch.lock().unwrap();
         let state_size = Rep::state_size();
-        scratch.states.resize(batch_size * state_size, 0.0);
-        scratch.policy_actions.clear();
-        scratch.policy_probabilities.clear();
-        scratch.policy_rows.clear();
-        scratch.policy_weights.clear();
-        scratch.value_weights.clear();
-        scratch.outcomes.clear();
+
+        scratch.prepare(batch_size, state_size);
+
         let mut offsets = Vec::with_capacity(batch_size + 1);
         offsets.push(0);
+
         for (row, index) in index::sample(rng, inner.len, batch_size)
             .into_iter()
             .enumerate()
         {
             let sample = inner.entries[index].as_ref().expect("filled replay slot");
-            representation.encode_state(
-                &sample.state,
-                &mut scratch.states[row * state_size..(row + 1) * state_size],
-            );
-            for &(action, probability) in &sample.policy {
-                scratch.policy_actions.push(action.as_u32() as i64);
-                scratch.policy_probabilities.push(probability);
-                scratch.policy_rows.push(row as i64);
-            }
-            scratch.policy_weights.push(sample.weights.policy);
-            scratch.value_weights.push(sample.weights.value);
-            scratch.outcomes.push(sample.outcome.wdl_index());
+
+            scratch.append_sample(sample, row, state_size, representation);
             offsets.push(scratch.policy_actions.len() as i64);
         }
+
         drop(inner);
+
         Some(ReplayBatch {
             states: Tensor::from_slice(&scratch.states)
                 .view([batch_size as i64, state_size as i64]),

@@ -43,8 +43,7 @@ struct Args {
     max_moves: u32,
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
+fn validate(args: &Args) -> Result<()> {
     anyhow::ensure!(args.rounds > 0, "--rounds must be positive");
     anyhow::ensure!(args.simulations > 0, "--simulations must be positive");
     anyhow::ensure!(args.concurrency > 0, "--concurrency must be positive");
@@ -56,6 +55,48 @@ fn main() -> Result<()> {
     if let Some(nodes) = args.stockfish_nodes {
         anyhow::ensure!(nodes > 0, "--stockfish-nodes must be positive");
     }
+
+    Ok(())
+}
+
+fn stockfish_opponent(args: &Args) -> (Engine, EngineSpec) {
+    let mut engine = Engine::new(&args.stockfish, "stockfish")
+        .option("Threads", args.stockfish_threads.to_string());
+    let mut options = vec![("Threads".into(), args.stockfish_threads.to_string())];
+
+    let name = if let Some(elo) = args.stockfish_elo {
+        engine = engine
+            .option("UCI_LimitStrength", "true")
+            .option("UCI_Elo", elo.to_string());
+        options.extend([
+            ("UCI_LimitStrength".into(), "true".into()),
+            ("UCI_Elo".into(), elo.to_string()),
+        ]);
+
+        format!("stockfish-elo-{elo}")
+    }
+    else {
+        let nodes = args.stockfish_nodes.unwrap_or(3_000);
+        engine = engine.nodes(nodes);
+
+        format!("stockfish-nodes-{nodes}")
+    };
+
+    let spec = EngineSpec {
+        name,
+        command: args.stockfish.display().to_string(),
+        args: vec![],
+        checkpoint: None,
+        options,
+    };
+
+    (engine, spec)
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    validate(&args)?;
+
     let candidate = ModelEngine {
         name: "candidate",
         uci: &args.uci,
@@ -65,19 +106,9 @@ fn main() -> Result<()> {
         device: &args.device,
         opening_plies: None,
     };
-    let mut stockfish = Engine::new(&args.stockfish, "stockfish")
-        .option("Threads", args.stockfish_threads.to_string());
-    let opponent_name = if let Some(elo) = args.stockfish_elo {
-        stockfish = stockfish
-            .option("UCI_LimitStrength", "true")
-            .option("UCI_Elo", elo.to_string());
-        format!("stockfish-elo-{elo}")
-    }
-    else {
-        let nodes = args.stockfish_nodes.unwrap_or(3_000);
-        stockfish = stockfish.nodes(nodes);
-        format!("stockfish-nodes-{nodes}")
-    };
+
+    let (stockfish, opponent) = stockfish_opponent(&args);
+
     let command = FastchessCommand::new(&args.fastchess, candidate.fastchess(), stockfish)
         .time_control(&args.tc)
         .rounds(args.rounds)
@@ -89,28 +120,16 @@ fn main() -> Result<()> {
     let spec = EvaluationSpec {
         schema_version: SCHEMA_VERSION,
         id: format!(
-            "stockfish-{}-vs-{opponent_name}",
+            "stockfish-{}-vs-{}",
             args.candidate
                 .file_stem()
                 .unwrap_or_default()
-                .to_string_lossy()
+                .to_string_lossy(),
+            opponent.name
         ),
         suite: "stockfish".into(),
         candidate: candidate.spec(),
-        opponent: Some(EngineSpec {
-            name: opponent_name,
-            command: args.stockfish.display().to_string(),
-            args: vec![],
-            checkpoint: None,
-            options: {
-                let mut options = vec![("Threads".into(), args.stockfish_threads.to_string())];
-                if let Some(elo) = args.stockfish_elo {
-                    options.push(("UCI_LimitStrength".into(), "true".into()));
-                    options.push(("UCI_Elo".into(), elo.to_string()));
-                }
-                options
-            },
-        }),
+        opponent: Some(opponent),
         search: SearchSpec {
             simulations: args.simulations,
             temperature: 0.0,

@@ -50,12 +50,15 @@
 
   async function initialize() {
     loading = true;
+
     try {
       agents = await loadAgents();
+
       if (!agentAt(0) || !agentAt(1)) {
         await goto(resolve('/setup'));
         return;
       }
+
       boardOrientation = first?.kind === 'human' ? 'white' : second?.kind === 'human' ? 'black' : 'white';
       resetMatch();
     } catch (cause) {
@@ -66,8 +69,14 @@
     }
   }
 
-  function playerAt(side: 0 | 1) { return side === 0 ? config.first : config.second; }
-  function agentAt(side: 0 | 1) { return side === 0 ? first : second; }
+  function playerAt(side: 0 | 1) {
+    return side === 0 ? config.first : config.second;
+  }
+
+  function agentAt(side: 0 | 1) {
+    return side === 0 ? first : second;
+  }
+
   function sideLabel(side: 0 | 1) {
     return config.gameId === 'chess' ? (side === 0 ? 'White' : 'Black') : (side === 0 ? 'First' : 'Second');
   }
@@ -92,10 +101,14 @@
   async function analyzeAgent(side: 0 | 1, positionMoves: string[]): Promise<Analysis> {
     const player = playerAt(side);
     const agent = agentAt(side);
+
     if (!agent || agent.kind === 'human') throw new Error('A human agent cannot be analyzed.');
+
     const key = analysisKey(side, player, positionMoves);
     const existing = cache.get(key);
+
     if (existing) return existing;
+
     const result = await api.analyze({
       position: positionPayload(config.gameId, positionMoves),
       model: agent.model ?? 'best',
@@ -103,27 +116,41 @@
       simulations: player.behavior.simulations,
       wait_for_count: player.behavior.waitForCount
     }, agent.server);
+
     const decorated = decorateAnalysis(result, positionMoves, config.gameId === 'chess');
     cache.set(key, decorated);
+
     return decorated;
   }
 
   async function advanceIfNeeded() {
     clearTimeout(timer);
+
     if (thinkingSide !== null || livePosition.terminal) return;
+
     const side = livePosition.turn;
     const agent = agentAt(side);
+
     if (!agent || agent.kind === 'human' || (automated && !playing)) return;
+
     const positionMoves = [...moves];
     const followedLive = viewPly === moves.length;
+
     thinkingSide = side;
     error = '';
+
     try {
       const analysis = await analyzeAgent(side, positionMoves);
-      snapshots = [...snapshots.filter((snapshot) => !(snapshot.ply === positionMoves.length && snapshot.side === side)), { ply: positionMoves.length, side, agentId: agent.id, analysis }];
+
+      recordAnalysis(side, agent.id, positionMoves.length, analysis);
+
       const move = chooseMove(analysis, playerAt(side));
-      if (!move || !livePosition.legalMoves.some((entry) => entry.move === move)) throw new Error(`${agent.name} returned no legal move.`);
+      if (!move || !livePosition.legalMoves.some((entry) => entry.move === move)) {
+        throw new Error(`${agent.name} returned no legal move.`);
+      }
+
       moves = [...moves, move];
+
       if (followedLive) viewPly = moves.length;
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
@@ -131,10 +158,28 @@
     } finally {
       thinkingSide = null;
     }
-    if (!error && !inspectPosition(config.gameId, moves).terminal) {
-      if (automated && playing) timer = setTimeout(() => void advanceIfNeeded(), pace);
-      else if (agentAt(inspectPosition(config.gameId, moves).turn)?.kind !== 'human') void advanceIfNeeded();
+
+    scheduleNextMove();
+  }
+
+  function recordAnalysis(side: 0 | 1, agentId: string, ply: number, analysis: Analysis) {
+    const isCurrentSnapshot = (snapshot: MatchSnapshot) => snapshot.ply === ply && snapshot.side === side;
+    const snapshot = { ply, side, agentId, analysis };
+
+    snapshots = [...snapshots.filter((entry) => !isCurrentSnapshot(entry)), snapshot];
+  }
+
+  function scheduleNextMove() {
+    const position = inspectPosition(config.gameId, moves);
+
+    if (error || position.terminal) return;
+
+    if (automated && playing) {
+      timer = setTimeout(() => void advanceIfNeeded(), pace);
+      return;
     }
+
+    if (agentAt(position.turn)?.kind !== 'human') void advanceIfNeeded();
   }
 
   function makeMove(move: string) {

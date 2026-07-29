@@ -34,6 +34,81 @@ fn device(s: &str) -> anyhow::Result<Device> {
     }
 }
 
+fn write_uci_options(out: &mut impl Write, settings: &Settings) -> anyhow::Result<()> {
+    writeln!(out, "id name engine-zoo-uci")?;
+    writeln!(out, "id author engine-zoo")?;
+    writeln!(
+        out,
+        "option name Model type string default {}",
+        settings.model
+    )?;
+    writeln!(
+        out,
+        "option name RunDir type string default {}",
+        settings.run_dir.display()
+    )?;
+    writeln!(
+        out,
+        "option name Simulations type spin default {} min 1 max 1000000",
+        settings.simulations
+    )?;
+    writeln!(out, "option name Device type string default auto")?;
+    writeln!(
+        out,
+        "option name Temperature type spin default 0 min 0 max 100"
+    )?;
+    writeln!(
+        out,
+        "option name OpeningPlies type spin default {} min 0 max 100",
+        settings.opening_plies
+    )?;
+    writeln!(
+        out,
+        "option name Threads type spin default {} min 1 max 256",
+        settings.threads
+    )?;
+    writeln!(out, "uciok")?;
+    Ok(())
+}
+
+fn set_option(engine: &mut ChessUciEngine, name: &str, value: String) -> anyhow::Result<()> {
+    let name = name.to_ascii_lowercase();
+    let invalidates_model = matches!(name.as_str(), "model" | "rundir" | "device");
+
+    match name.as_str() {
+        "model" => engine.settings.model = value,
+        "rundir" => engine.settings.run_dir = PathBuf::from(value),
+        "simulations" => engine.settings.simulations = value.parse::<usize>()?.max(1),
+        "device" => engine.settings.device = device(&value)?,
+        "temperature" => engine.settings.temperature = value.parse::<f32>()?,
+        "openingplies" => engine.settings.opening_plies = value.parse::<usize>()?,
+        "threads" => engine.settings.threads = value.parse::<usize>()?.max(1),
+        _ => return Ok(()),
+    }
+
+    if invalidates_model {
+        engine.invalidate_model();
+    }
+
+    Ok(())
+}
+
+fn go_simulations(
+    engine: &ChessUciEngine,
+    movetime_ms: Option<u64>,
+    nodes: Option<usize>,
+) -> Option<usize> {
+    nodes.or_else(|| {
+        movetime_ms.map(|milliseconds| {
+            engine
+                .settings
+                .simulations
+                .max((milliseconds / 10) as usize)
+                .max(1)
+        })
+    })
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let mut settings = Settings::default();
@@ -52,41 +127,7 @@ fn main() -> anyhow::Result<()> {
     for line in stdin.lock().lines() {
         let command = parse_command(&line?);
         match command {
-            UciCommand::Uci => {
-                writeln!(out, "id name engine-zoo-uci")?;
-                writeln!(out, "id author engine-zoo")?;
-                writeln!(
-                    out,
-                    "option name Model type string default {}",
-                    engine.settings.model
-                )?;
-                writeln!(
-                    out,
-                    "option name RunDir type string default {}",
-                    engine.settings.run_dir.display()
-                )?;
-                writeln!(
-                    out,
-                    "option name Simulations type spin default {} min 1 max 1000000",
-                    engine.settings.simulations
-                )?;
-                writeln!(out, "option name Device type string default auto")?;
-                writeln!(
-                    out,
-                    "option name Temperature type spin default 0 min 0 max 100"
-                )?;
-                writeln!(
-                    out,
-                    "option name OpeningPlies type spin default {} min 0 max 100",
-                    engine.settings.opening_plies
-                )?;
-                writeln!(
-                    out,
-                    "option name Threads type spin default {} min 1 max 256",
-                    engine.settings.threads
-                )?;
-                writeln!(out, "uciok")?;
-            }
+            UciCommand::Uci => write_uci_options(&mut out, &engine.settings)?,
             UciCommand::IsReady => writeln!(out, "readyok")?,
             UciCommand::UciNewGame => {
                 engine.new_game();
@@ -97,47 +138,12 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             UciCommand::SetOption { name, value } => {
-                let n = name.to_ascii_lowercase();
-                let result = match n.as_str() {
-                    "model" => {
-                        engine.settings.model = value;
-                        Ok(())
-                    }
-                    "rundir" => {
-                        engine.settings.run_dir = PathBuf::from(value);
-                        Ok(())
-                    }
-                    "simulations" => value
-                        .parse::<usize>()
-                        .map(|v| engine.settings.simulations = v.max(1))
-                        .map_err(Into::into),
-                    "device" => device(&value).map(|d| engine.settings.device = d),
-                    "temperature" => value
-                        .parse::<f32>()
-                        .map(|v| engine.settings.temperature = v)
-                        .map_err(Into::into),
-                    "openingplies" => value
-                        .parse::<usize>()
-                        .map(|v| engine.settings.opening_plies = v)
-                        .map_err(Into::into),
-                    "threads" => value
-                        .parse::<usize>()
-                        .map(|v| engine.settings.threads = v.max(1))
-                        .map_err(Into::into),
-                    _ => Ok(()),
-                };
-                if result.is_ok() && matches!(n.as_str(), "model" | "rundir" | "device") {
-                    engine.invalidate_model();
-                }
-                if let Err(e) = result {
+                if let Err(e) = set_option(&mut engine, &name, value) {
                     writeln!(out, "info string invalid option {name}: {e}")?;
                 }
             }
             UciCommand::Go { movetime_ms, nodes } => {
-                let simulations = nodes.or_else(|| {
-                    movetime_ms.map(|ms| engine.settings.simulations.max((ms / 10) as usize).max(1))
-                });
-                match engine.bestmove(simulations) {
+                match engine.bestmove(go_simulations(&engine, movetime_ms, nodes)) {
                     Ok(mv) => writeln!(out, "bestmove {mv}")?,
                     Err(e) => writeln!(out, "info string {e}\nbestmove 0000")?,
                 }
