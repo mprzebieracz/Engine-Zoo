@@ -4,6 +4,7 @@
 /benchmark-results
 /artifacts/profiles/
 /scratch
+__pycache__/
 *.safetensors
 .vscode
 .cargo

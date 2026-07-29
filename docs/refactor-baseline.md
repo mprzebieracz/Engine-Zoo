@@ -12,21 +12,20 @@ point, not a performance claim or a portable benchmark result.
 | Stable Rust | `rustc 1.96.1 (31fca3adb 2026-06-26)` |
 | Nightly Rust | `rustc 1.99.0-nightly (d0babd8b6 2026-07-15)` |
 | `tch` / `torch-sys` | `0.20.0` (pinned in `Cargo.lock`) |
-| LibTorch | CPU `2.7.1`, `/Users/mateusz/libs/libtorch` |
+| LibTorch | CPU `2.7.1`, local installation (path omitted) |
 | Python PyTorch | Not installed (`import torch` failed) |
 | GPU baseline | Not available; no CUDA benchmark was run |
 
 Commands that exercise `tch` used:
 
 ```sh
-LIBTORCH=/Users/mateusz/libs/libtorch \
-DYLD_LIBRARY_PATH=/Users/mateusz/libs/libtorch/lib \
+LIBTORCH=/path/to/libtorch \
+DYLD_LIBRARY_PATH="$LIBTORCH/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
 cargo <command>
 ```
 
-The absolute LibTorch path is local-machine configuration, not a repository
-requirement. A developer with another installation must set the equivalent
-environment for `torch-sys`.
+The LibTorch path is local-machine configuration, not a repository
+requirement. Set the equivalent environment for `torch-sys`.
 
 ## Layout measurements
 

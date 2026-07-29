@@ -286,7 +286,7 @@ mod tests {
     fn checked_in_baseline_config_is_valid() {
         let args = IterationArgs {
             experiment: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../benchmarks/configs/full-iteration-cuda-200.toml"),
+                .join("../../benchmarks/configs/default-chess-h4-cuda-500.toml"),
             games: None,
             train_steps: None,
             batch_size: None,
@@ -301,7 +301,7 @@ mod tests {
             human: false,
         };
         let config = effective_experiment(&args, tch::Device::Cpu).unwrap();
-        assert_eq!(config.self_play.num_games, 200);
+        assert_eq!(config.self_play.num_games, 500);
         assert_eq!(config.training.train_steps, 80);
     }
 

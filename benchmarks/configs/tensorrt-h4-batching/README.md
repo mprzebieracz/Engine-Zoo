@@ -10,13 +10,19 @@ Build the benchmark binary, then run the complete resumable sweep with a
 TensorRT module that was compiled from the supplied checkpoint:
 
 ```bash
-LIBTORCH=/home/mati/libs/libtorch-2.11.0-cu130/libtorch \
+export LIBTORCH=/path/to/libtorch
+export TRT_SITE="$(python3 -c 'import site; print(site.getsitepackages()[0])')"
+
 cargo build --release -p engine-bench
 
 python3 scripts/sweep_tensorrt_h4_batching.py \
   --checkpoint runs/chess-puct-wdl/checkpoints/latest.safetensors \
   --tensor-rt-module runs/chess-puct-wdl/model.trt.ts
 ```
+
+Pass `--libtorch` and `--trt-site` instead if you do not want to set
+environment variables. `TRT_SITE` must be the site-packages directory of the
+Python environment that contains both `torch_tensorrt` and `tensorrt_libs`.
 
 Each case runs exactly 64 fixed-checkpoint games and writes one JSON report to
 `benchmark-results/tensorrt-h4-batching-sweep/results/`. The runner establishes

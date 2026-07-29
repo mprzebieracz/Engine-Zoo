@@ -24,10 +24,10 @@ iteration boundary. Every measured sample starts from a fresh temporary run,
 so its replay contents, optimizer state, model weights, and seed are
 reproducible.
 
-The checked-in 200-game baseline is the standard comparison point: canonical
-chess H1, 12x128 SE model, FP16 inference, 16 self-play workers, 800 PUCT
-simulations per move, 2,048 training batch, 256 micro-batch, and 80 training
-steps. The optional 500-game version changes only the game count.
+The checked-in H4 500-game baseline is the native reference comparison point.
+It is also the default for the `iteration` command. TensorRT end-to-end results
+must be captured with the dedicated TensorRT self-play benchmark and include
+per-generation compilation time.
 
 ```bash
 # Capture a named before/after artifact. The parent directory is created.
@@ -41,17 +41,16 @@ cargo run --release -p engine-bench -- iteration \
   --output benchmark-results/after-cache-change.json \
   --human
 
-# Use the longer workload or deliberately override a parameter.
+# Deliberately override a parameter for a smaller screen.
 cargo run --release -p engine-bench -- iteration \
-  --experiment benchmarks/configs/full-iteration-cuda-500.toml \
-  --name cuda-500-baseline \
-  --output benchmark-results/cuda-500-baseline.json
+  --games 64 --train-steps 0 \
+  --name self-play-screen \
+  --output benchmark-results/self-play-screen.json
 
 cargo run --release -p engine-bench -- iteration \
-  --games 200 --train-steps 80 --batch-size 2048 --micro-batch-size 256 \
-  --seed 1 --device cuda --precision fp16 \
-  --name explicit-cuda-200 \
-  --output benchmark-results/explicit-cuda-200.json
+  --device cuda --precision fp16 \
+  --name default-h4-baseline \
+  --output benchmark-results/default-h4-baseline.json
 ```
 
 The report records the effective experiment TOML, seed, machine/build metadata,
@@ -64,12 +63,12 @@ time; do not treat it as an isolated checkpoint or reload measurement. Use
 
 ### Default chess H4 baseline
 
-`benchmarks/configs/default-chess-h4-cuda-500.toml` is the immutable baseline
-for the current user-facing chess recipe: H4, 12x128 SE/WDL, Root-Gumbel PUCT
-with 256/64 playout-cap randomization, 24 workers, 16-leaf batches, native
-CUDA FP16, preferred batch 32, and a 2 ms batching wait. It runs 500 games and
-80 training steps with progress output disabled so reporting does not affect
-timing. It intentionally does not change `experiments/chess-puct-wdl.toml`.
+`benchmarks/configs/default-chess-h4-cuda-500.toml` is the immutable native
+reference baseline: H4, 12x128 SE/WDL, Root-Gumbel PUCT with 256/64
+playout-cap randomization, 24 workers, 16-leaf batches, native CUDA FP16,
+preferred batch 32, and a 2 ms batching wait. It runs 500 games and 80 training
+steps with progress output disabled so reporting does not affect timing. It
+intentionally does not change `experiments/chess-puct-wdl.toml`.
 
 Capture two independent iterations and retain their raw JSON reports before
 recording a baseline result here:
@@ -86,32 +85,6 @@ LibTorch build, commit, artifact path, per-sample wall time, positions/s,
 inference states/s, batcher statistics, and training subphase durations. Do
 not fill in measurements from a different history length, search schedule, or
 batcher configuration.
-
-### Root-Gumbel CUDA parameter sweep
-
-Use the benchmark-only sweep runner to screen the global-batcher and MCTS
-parameters for the Root-Gumbel 256/64 schedule. It evaluates the 81-case
-factorial matrix of worker threads (16/24/32), leaf batch (4/8/16), preferred
-global batch (32/64/128), and maximum wait (1/2/4 ms). Every case uses 10
-self-play games, **zero training steps**, FP16 CUDA, max global batch 256, and
-queue capacity 4096. This isolates the self-play/inference pipeline; training
-has its own benchmark. Results use
-`benchmark-results/root-gumbel-256-64-self-play-sweep/`, deliberately separate
-from the old 80-step sweep artifacts. Generated configs and result artifacts
-remain under the chosen output directory, so no production recipe is changed.
-
-```bash
-cargo build --release -p engine-bench
-python3 scripts/sweep_cuda_root_gumbel.py --dry-run
-python3 scripts/sweep_cuda_root_gumbel.py
-
-# Resume safely after interruption; completed valid JSON case results are skipped.
-python3 scripts/sweep_cuda_root_gumbel.py
-```
-
-The runner writes one JSON report per case plus `aggregate.csv` and
-`aggregate.json`, sorted by inference states/s. Use `--limit 1` for a smoke
-run or `--engine-bench path/to/engine-bench` to select a non-default binary.
 
 Representation/replay measurements should cover H1/H4/H8 construction/encoding/action round trips and replay batch sizes 256/1024/4096. GPU measurements should separately report forward-only, legal-logit gather, end-to-end inference, transfer, backward, optimizer, latency percentiles, and samples/s.
 

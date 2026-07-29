@@ -10,19 +10,21 @@ Optimizer moments are not serializable through the pinned `tch` API. Until that 
 
 ## Default chess recipe
 
-`scripts/train_chess.py` launches `experiments/chess-puct-wdl.toml`. The recipe
-uses native CUDA FP16 inference with 24 self-play workers, 16-leaf local MCTS
-batches, and dynamic inference batches of 32–256 states with a 2 ms wait.
+`scripts/train_chess.py` launches
+`experiments/chess-puct-wdl-tensorrt.toml`. It uses TensorRT FP16 inference
+for fixed-weight self-play and native CUDA training, with 24 self-play workers,
+16-leaf local MCTS batches, and dynamic inference batches of 128–256 states
+with a 1 ms wait. The script requires `--tensor-rt-python` and the matching
+runtime environment; see [TensorRT inference](tensorrt.md) for the command.
+
 It uses Root-Gumbel PUCT: 25% of positions use a 256-playout, 16-action budget;
 the remainder use 64 playouts and 8 considered root actions. Fast positions
 retain value targets but have zero policy-target weight.
 
-## TensorRT chess recipe
+## Native chess fallback
 
-`experiments/chess-puct-wdl-tensorrt.toml` preserves the H4 Root-Gumbel
-training recipe while using fixed-weight TensorRT inference for self-play. Its
-preferred batch size of 128 and 1 ms batching wait won the 64-game TensorRT H4
-batching screen; it retains the 500-game default workload. The native default
-remains at 32 and 2 ms. See [TensorRT
-inference](tensorrt.md) for runtime setup and the initialization command that
-compiles and reloads the module per generation.
+`experiments/chess-puct-wdl.toml` is the explicit native fallback. It preserves
+the same H4 Root-Gumbel schedule while using native CUDA FP16 inference with a
+preferred batch size of 32 and 2 ms wait. Use it when TensorRT is unavailable,
+or when testing native inference. The TensorRT recipe's preferred batch size of
+128 and 1 ms batching wait won the 64-game H4 batching screen.
