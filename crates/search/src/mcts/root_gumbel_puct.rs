@@ -43,6 +43,17 @@ pub(super) struct RootGumbelPuct {
     root_actions: Vec<RootAction>,
 }
 
+/// A root action and the completed-visit target assigned for the current
+/// sequential-halving round.
+///
+/// Keeping these together avoids repeatedly searching a separate target list
+/// while the local leaf batch is collected.
+#[derive(Clone, Copy, Debug)]
+struct RoundCandidate {
+    action: RootAction,
+    target_visits: u32,
+}
+
 impl From<RootGumbelPuctConfig> for RootGumbelPuct {
     fn from(config: RootGumbelPuctConfig) -> Self {
         Self {
@@ -119,15 +130,20 @@ where
         while allocated < simulations {
             let round_visits =
                 sequential_halving_round_visits(simulations - allocated, active.len());
-            let targets = self.round_targets(&active, round_visits);
+            let candidates = self.round_candidates(&active, round_visits);
 
-            while targets
-                .iter()
-                .any(|&(node, target)| self.nodes[node as usize].completed_visits < target)
-            {
+            while candidates.iter().any(|candidate| {
+                self.nodes[candidate.action.node as usize].completed_visits
+                    < candidate.target_visits
+            }) {
+                // Completed visits and Q values cannot change until this local batch
+                // is evaluated and backed up. Only selection visits change while
+                // leaves are collected, so reuse the transformed root Q values.
+                let transformed_q = self.child_transformed_q(0);
+
                 batch.leaves.clear();
                 while batch.leaves.len() < leaf_batch_size {
-                    let Some(root_child) = self.best_round_action(&active, &targets)
+                    let Some(root_child) = self.best_round_action(&candidates, &transformed_q)
                     else {
                         break;
                     };
@@ -187,23 +203,22 @@ where
         );
     }
 
-    fn best_round_action(&self, active: &[RootAction], targets: &[(u32, u32)]) -> Option<u32> {
-        let transformed_q = self.child_transformed_q(0);
-        active
+    fn best_round_action(
+        &self,
+        candidates: &[RoundCandidate],
+        transformed_q: &[f32],
+    ) -> Option<u32> {
+        candidates
             .iter()
-            .filter(|action| {
-                targets
-                    .iter()
-                    .find(|(node, _)| *node == action.node)
-                    .is_some_and(|(_, target)| {
-                        self.nodes[action.node as usize].selection_visits() < *target
-                    })
+            .filter(|candidate| {
+                self.nodes[candidate.action.node as usize].selection_visits()
+                    < candidate.target_visits
             })
             .max_by(|left, right| {
-                self.root_score(**left, &transformed_q)
-                    .total_cmp(&self.root_score(**right, &transformed_q))
+                self.root_score(left.action, transformed_q)
+                    .total_cmp(&self.root_score(right.action, transformed_q))
             })
-            .map(|action| action.node)
+            .map(|candidate| candidate.action.node)
     }
 
     fn round_survivors(&self, mut active: Vec<RootAction>) -> Vec<RootAction> {
@@ -216,7 +231,7 @@ where
         active
     }
 
-    fn round_targets(&self, active: &[RootAction], round_visits: usize) -> Vec<(u32, u32)> {
+    fn round_candidates(&self, active: &[RootAction], round_visits: usize) -> Vec<RoundCandidate> {
         let base = round_visits / active.len();
         let remainder = round_visits % active.len();
         active
@@ -225,7 +240,11 @@ where
             .map(|(index, action)| {
                 let target = self.nodes[action.node as usize].completed_visits
                     + (base + usize::from(index < remainder)) as u32;
-                (action.node, target)
+
+                RoundCandidate {
+                    action: *action,
+                    target_visits: target,
+                }
             })
             .collect()
     }
@@ -236,6 +255,7 @@ where
     }
 
     fn select_root_winner(&self) -> u32 {
+        let transformed_q = self.child_transformed_q(0);
         let visits = self
             .variant
             .root_actions
@@ -248,8 +268,8 @@ where
             .iter()
             .filter(|action| self.nodes[action.node as usize].completed_visits == visits)
             .max_by(|left, right| {
-                self.root_score(**left, &self.child_transformed_q(0))
-                    .total_cmp(&self.root_score(**right, &self.child_transformed_q(0)))
+                self.root_score(**left, &transformed_q)
+                    .total_cmp(&self.root_score(**right, &transformed_q))
             })
             .expect("root candidate at maximum visits")
             .node

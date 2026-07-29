@@ -1,0 +1,49 @@
+format_version = 3
+seed = 1
+
+# Fixed-weight TensorRT self-play paired with native training. The train command
+# exports and compiles model.trt.ts before the first iteration, then reloads it
+# after each native optimizer update. Keep the native default recipe unchanged.
+
+[model]
+architecture = "chess-se"
+history = "four"
+blocks = 12
+channels = 128
+se_hidden = 16
+value_head = { wdl = { hidden = 128 } }
+
+[self_play]
+num_games = 500
+threads = 24
+
+[self_play.search]
+algorithm = "root-gumbel-puct"
+leaf_batch_size = 16
+
+[self_play.budget_schedule.playout-cap-randomization]
+full_probability = 0.25
+fast_policy_weight = 0.0
+
+[self_play.budget_schedule.playout-cap-randomization.full.gumbel]
+simulations = 256
+max_considered_actions = 16
+
+[self_play.budget_schedule.playout-cap-randomization.fast.gumbel]
+simulations = 64
+max_considered_actions = 8
+
+[training]
+batch_size = 2048
+train_steps = 80
+
+[inference]
+engine = "tensor-rt-torch-script"
+tensor_rt_module = "model.trt.ts"
+precision = "fp16"
+preferred_batch_size = 128
+max_batch_size = 256
+max_queued_states = 4096
+
+[inference.max_wait]
+milliseconds = 1

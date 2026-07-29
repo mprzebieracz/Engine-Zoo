@@ -32,7 +32,8 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], def
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tch = "0.20"
+# Keep this in lockstep with the CUDA LibTorch selected in .cargo/config.toml.
+tch = "0.24"
 toml = "0.8"
 tokio = { version = "1.52.3", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors"] }

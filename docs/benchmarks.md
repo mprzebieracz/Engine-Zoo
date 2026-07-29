@@ -62,6 +62,31 @@ truthfully labelled as the combined self-play/checkpoint/reload/persistence
 time; do not treat it as an isolated checkpoint or reload measurement. Use
 `engine-profile` with Nsight Systems to inspect that timeline.
 
+### Default chess H4 baseline
+
+`benchmarks/configs/default-chess-h4-cuda-500.toml` is the immutable baseline
+for the current user-facing chess recipe: H4, 12x128 SE/WDL, Root-Gumbel PUCT
+with 256/64 playout-cap randomization, 24 workers, 16-leaf batches, native
+CUDA FP16, preferred batch 32, and a 2 ms batching wait. It runs 500 games and
+80 training steps with progress output disabled so reporting does not affect
+timing. It intentionally does not change `experiments/chess-puct-wdl.toml`.
+
+Capture two independent iterations and retain their raw JSON reports before
+recording a baseline result here:
+
+```bash
+cargo run --release -p engine-bench -- iteration \
+  --experiment benchmarks/configs/default-chess-h4-cuda-500.toml \
+  --samples 2 --name default-chess-h4-cuda-500 \
+  --output benchmark-results/default-chess-h4-cuda-500.json --human
+```
+
+Record completed captures in the results document with the machine, driver,
+LibTorch build, commit, artifact path, per-sample wall time, positions/s,
+inference states/s, batcher statistics, and training subphase durations. Do
+not fill in measurements from a different history length, search schedule, or
+batcher configuration.
+
 ### Root-Gumbel CUDA parameter sweep
 
 Use the benchmark-only sweep runner to screen the global-batcher and MCTS

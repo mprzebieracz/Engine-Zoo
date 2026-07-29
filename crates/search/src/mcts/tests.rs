@@ -337,6 +337,30 @@ fn root_gumbel_puct_uses_the_gumbel_budget_and_keeps_the_forced_win() {
 }
 
 #[test]
+fn root_gumbel_puct_batched_rounds_keep_the_forced_win() {
+    let config = SearchConfig::RootGumbelPuct(RootGumbelPuctConfig {
+        leaf_batch_size: 16,
+        root: GumbelRootConfig {
+            gumbel_scale: 0.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let mut search = Mcts::new(Uniform, config, NoExtraRules).with_seed(7);
+    let result = search
+        .search(
+            &OnePly::default(),
+            (),
+            gumbel_request(16, PolicyMode::Deterministic),
+        )
+        .unwrap();
+
+    assert_eq!(result.best_move(), Move::Win);
+    assert_eq!(result.diagnostics.completed_simulations, 16);
+    assert_eq!(result.policy.len(), 3);
+}
+
+#[test]
 fn evaluation_failure_is_reported_without_fabricating_a_value() {
     let mut search = Mcts::new(Failing, puct(), NoExtraRules);
     let error = search
