@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Run the fixed-checkpoint H4 TensorRT self-play batching screen.
+"""Run a fixed-checkpoint H4 TensorRT self-play throughput screen.
 
-This is benchmark-only tooling. It generates the nine H4 Root-Gumbel configs,
-leaves production recipes untouched, and resumes from valid JSON
-reports already present in its output directory.
+This is benchmark-only tooling. It generates configs for search concurrency
+and inference batching, leaves production recipes untouched, and resumes from
+valid JSON reports already present in its output directory.
 """
 
 from __future__ import annotations
@@ -23,12 +23,17 @@ BASE_EXPERIMENT = Path("benchmarks/configs/default-chess-h4-cuda-500.toml")
 
 @dataclass(frozen=True)
 class Case:
+    threads: int
+    leaf_batch_size: int
     preferred_batch_size: int
     wait_milliseconds: int
 
     @property
     def name(self) -> str:
-        return f"preferred{self.preferred_batch_size}-wait{self.wait_milliseconds}ms"
+        return (
+            f"threads{self.threads}-leaf{self.leaf_batch_size}-"
+            f"preferred{self.preferred_batch_size}-wait{self.wait_milliseconds}ms"
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,11 +43,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tensor-rt-module", type=Path, required=True,
                         help="TensorRT TorchScript module compiled from --checkpoint.")
     parser.add_argument("--output-dir", type=Path,
-                        default=Path("benchmark-results/tensorrt-h4-batching-sweep"))
+                        default=Path("benchmark-results/tensorrt-h4-comparison/batching-sweep"))
     parser.add_argument("--engine-bench", type=Path,
                         default=Path("target/release/engine-bench"))
     parser.add_argument("--samples", type=int, default=1,
                         help="Fresh 64-game samples per case.")
+    parser.add_argument("--games", type=int, default=64,
+                        help="Games per sample (default: 64).")
+    parser.add_argument("--threads", type=parse_int_list, default=[16, 24, 32],
+                        help="Comma-separated self-play thread counts.")
+    parser.add_argument("--leaf-batches", type=parse_int_list, default=[16, 32],
+                        help="Comma-separated MCTS leaf batch sizes.")
+    parser.add_argument("--preferred-batches", type=parse_int_list, default=[128, 256],
+                        help="Comma-separated preferred inference batch sizes.")
+    parser.add_argument("--wait-ms", type=parse_nonnegative_int_list, default=[1, 2],
+                        help="Comma-separated inference wait times in milliseconds.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int, help="Run at most this many incomplete cases.")
     parser.add_argument(
@@ -66,8 +81,36 @@ def environment_path(name: str) -> Path | None:
     return Path(value) if value else None
 
 
-def cases() -> list[Case]:
-    return [Case(batch, wait) for batch in (32, 64, 128) for wait in (1, 2, 4)]
+def parse_int_list(value: str) -> list[int]:
+    """Parse a positive comma-separated integer list for sweep dimensions."""
+    try:
+        values = [int(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected comma-separated integers") from error
+    if not values or any(item <= 0 for item in values):
+        raise argparse.ArgumentTypeError("all sweep values must be positive")
+    return values
+
+
+def parse_nonnegative_int_list(value: str) -> list[int]:
+    """Parse comma-separated integers, allowing a zero-millisecond wait."""
+    try:
+        values = [int(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected comma-separated integers") from error
+    if not values or any(item < 0 for item in values):
+        raise argparse.ArgumentTypeError("sweep values must be non-negative")
+    return values
+
+
+def cases(args: argparse.Namespace) -> list[Case]:
+    return [
+        Case(threads, leaf, preferred, wait)
+        for threads in args.threads
+        for leaf in args.leaf_batches
+        for preferred in args.preferred_batches
+        for wait in args.wait_ms
+    ]
 
 
 def experiment_toml(case: Case) -> str:
@@ -76,6 +119,16 @@ def experiment_toml(case: Case) -> str:
         raise SystemExit(f"missing H4 baseline experiment: {BASE_EXPERIMENT}")
 
     source = BASE_EXPERIMENT.read_text()
+    source = re.sub(
+        r"(?m)^threads = \d+$",
+        f"threads = {case.threads}",
+        source,
+    )
+    source = re.sub(
+        r"(?m)^leaf_batch_size = \d+$",
+        f"leaf_batch_size = {case.leaf_batch_size}",
+        source,
+    )
     source = re.sub(
         r"(?m)^preferred_batch_size = \d+$",
         f"preferred_batch_size = {case.preferred_batch_size}",
@@ -129,6 +182,8 @@ def report_row(result_path: Path, case: Case) -> dict[str, object]:
     batcher = metrics["batcher"]
     return {
         "name": case.name,
+        "threads": case.threads,
+        "leaf_batch_size": case.leaf_batch_size,
         "preferred_batch_size": case.preferred_batch_size,
         "wait_milliseconds": case.wait_milliseconds,
         "elapsed_seconds": sample["elapsed_ns"] / 1_000_000_000,
@@ -156,6 +211,9 @@ def write_aggregate(output_dir: Path, rows: list[dict[str, object]]) -> None:
 
 def main() -> int:
     args = parse_args()
+    sweep_cases = cases(args)
+    if args.games <= 0 or args.samples <= 0:
+        raise SystemExit("--games and --samples must be positive")
     if not args.checkpoint.is_file():
         raise SystemExit(f"checkpoint does not exist: {args.checkpoint}")
     if not args.tensor_rt_module.is_file():
@@ -171,7 +229,7 @@ def main() -> int:
     completed: list[dict[str, object]] = []
     pending: list[Case] = []
 
-    for case in cases():
+    for case in sweep_cases:
         result_path = results_dir / f"{case.name}.json"
         if result_path.is_file():
             try:
@@ -184,7 +242,7 @@ def main() -> int:
     if args.dry_run:
         for case in pending:
             print(f"{case.name}: {configs_dir / (case.name + '.toml')}")
-        print(f"completed={len(completed)} pending={len(pending)} total={len(cases())}")
+        print(f"completed={len(completed)} pending={len(pending)} total={len(sweep_cases)}")
         return 0
 
     environment = runtime_environment(args.libtorch, args.trt_site)
@@ -199,7 +257,7 @@ def main() -> int:
             "--experiment", str(config_path),
             "--checkpoint", str(args.checkpoint),
             "--tensor-rt-module", str(args.tensor_rt_module),
-            "--backend", "tensor-rt", "--games", "64", "--samples", str(args.samples),
+            "--backend", "tensor-rt", "--games", str(args.games), "--samples", str(args.samples),
             "--device", "cuda", "--output", str(result_path), "--human",
         ]
         print(f"[{index}/{len(pending)}] {' '.join(command)}", flush=True)
@@ -208,7 +266,7 @@ def main() -> int:
         write_aggregate(output_dir, completed)
 
     write_aggregate(output_dir, completed)
-    print(f"completed={len(completed)} pending={len(cases()) - len(completed)} total={len(cases())}")
+    print(f"completed={len(completed)} pending={len(sweep_cases) - len(completed)} total={len(sweep_cases)}")
     return 0
 
 

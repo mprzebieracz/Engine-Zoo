@@ -104,10 +104,13 @@ The experiment remains immutable. `tensor_rt_module` is a generated artifact
 under the run directory, and is only replaced after compilation succeeds.
 
 The default H4 TensorRT recipe is
-`experiments/chess-puct-wdl-tensorrt.toml`. The 64-game batching screen selected
-preferred batch 128 with a 1 ms wait (maximum batch 256 and queued states 4096).
-Initialize the run with that immutable recipe; `train run` then automatically
-exports, compiles, and reloads `model.trt.ts` before and between generations:
+`experiments/chess-puct-wdl-tensorrt.toml`. The 64-game self-play screen selected
+112 self-play threads, a 32-leaf local search batch, preferred batch 128, and a
+1 ms wait (maximum batch 256 and queued states 4096), with TensorRT compile
+shapes optimal 128 and maximum 256. That validated median was about 2,115
+positions/s. Initialize the run with that immutable recipe; `train run` then
+automatically exports, compiles, and reloads the TensorRT artifact before and
+between generations:
 
 ```bash
 LIBTORCH=/path/to/libtorch
@@ -149,8 +152,10 @@ max_queued_states = 4096
 max_wait = { milliseconds = 1 }
 ```
 
-These are the tuned default TensorRT batching settings. The compiler's dynamic
-batch shapes should cover the same range: minimum 1, optimal 128, maximum 256.
+These are the tuned default TensorRT batching settings, paired with 112
+self-play threads and a 32-leaf search batch in the experiment recipe. The
+compiler's dynamic batch shapes should cover the same range: minimum 1,
+optimal 128, maximum 256.
 
 The C++ custom-class archive in `libtorchtrt.so` must match LibTorch exactly.
 Before Rust loads the compiled TorchScript module, preload LibTorch first and

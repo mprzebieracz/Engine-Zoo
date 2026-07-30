@@ -7,8 +7,9 @@ import argparse
 import json
 import re
 import subprocess
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -46,7 +47,11 @@ def run_metadata(run_dir: Path, game: str) -> tuple[str, str | None]:
         return representation, None
     if representation == "connect4-canonical":
         return representation, None
-    canonical = representation.get("chess-canonical") if isinstance(representation, dict) else None
+    canonical = (
+        representation.get("chess-canonical")
+        if isinstance(representation, dict)
+        else None
+    )
     if canonical is None:
         raise SystemExit(f"unsupported model architecture: {architecture!r}")
     return "chess-canonical", canonical.get("history")
@@ -59,10 +64,15 @@ def agent_record(
     architecture: str,
     history: str | None,
 ) -> dict[str, object]:
-    details = f"architecture={architecture}" + (f", history={history}" if history else "")
+    details = f"architecture={architecture}" + (
+        f", history={history}" if history else ""
+    )
     return {
-        "id": agent_id, "name": name, "kind": "alphazero",
-        "games": [args.game], "model": args.model,
+        "id": agent_id,
+        "name": name,
+        "kind": "alphazero",
+        "games": [args.game],
+        "model": args.model,
         "server": f"http://{args.host}:{args.port}",
         "description": f"{args.game} model {args.model} ({details})",
         "badge": "Local",
@@ -79,14 +89,20 @@ def register_agent(
     history: str | None,
 ) -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config = json.loads(config_path.read_text()) if config_path.exists() else {"agents": []}
-    agents = [agent for agent in config.get("agents", []) if agent.get("id") != agent_id]
+    config = (
+        json.loads(config_path.read_text()) if config_path.exists() else {"agents": []}
+    )
+    agents = [
+        agent for agent in config.get("agents", []) if agent.get("id") != agent_id
+    ]
 
     if not any(agent.get("id") == "human" for agent in agents):
         agents.insert(
             0,
             {
-                "id": "human", "name": "Human", "kind": "human",
+                "id": "human",
+                "name": "Human",
+                "kind": "human",
                 "games": ["chess", "connect4"],
                 "description": "Moves are entered through the board.",
                 "badge": "Local",
@@ -122,12 +138,20 @@ def main() -> int:
         register_agent(config_path, agent_id, name, args, architecture, history)
         print(f"registered {agent_id} in {config_path}")
 
-    subprocess.run(["cargo", "build", "--release", "--bin", "engine-zoo"], cwd=ROOT, check=True)
+    subprocess.run(
+        ["cargo", "build", "--release", "--bin", "engine-zoo"], cwd=ROOT, check=True
+    )
     print(f"serving {args.game} from {args.run_dir} on http://{args.host}:{args.port}/")
     return subprocess.run(
         [
-            "target/release/engine-zoo", "serve", "--game", args.game,
-            "--run-dir", args.run_dir, "--bind", f"{args.host}:{args.port}",
+            "target/release/engine-zoo",
+            "serve",
+            "--game",
+            args.game,
+            "--run-dir",
+            args.run_dir,
+            "--bind",
+            f"{args.host}:{args.port}",
         ],
         cwd=ROOT,
     ).returncode

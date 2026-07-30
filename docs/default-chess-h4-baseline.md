@@ -11,7 +11,7 @@ apart from benchmark-only disabled progress output.
 cargo run --release -p engine-bench -- iteration \
   --experiment benchmarks/configs/default-chess-h4-cuda-500.toml \
   --samples 2 --name default-chess-h4-cuda-500 \
-  --output benchmark-results/default-chess-h4-cuda-500.json --human
+  --output benchmark-results/default-chess-h4-cuda-500-baseline.json --human
 ```
 
 ## Results

@@ -48,7 +48,7 @@ struct RunArgs {
     iterations: usize,
     #[arg(long)]
     forever: bool,
-    #[arg(long, value_enum, default_value_t = DeviceKind::Auto)]
+    #[arg(long, value_enum, default_value_t = DeviceKind::Cuda)]
     device: DeviceKind,
     #[command(flatten)]
     tensor_rt: TensorRtRunArgs,

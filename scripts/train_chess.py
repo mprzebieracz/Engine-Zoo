@@ -1,18 +1,50 @@
 #!/usr/bin/env python3
-"""Initialize, then continuously run the checked-in TensorRT chess experiment."""
+"""Initialize, then continuously run the checked-in TensorRT chess experiment.
+
+Defaults match the validated H4 Torch-TensorRT self-play screen:
+112 threads, leaf batch 32, preferred batch 128, 1 ms wait, and TensorRT
+compile shapes opt=128 / max=256. New runs are seeded from the latest v2
+checkpoint unless --seed-checkpoint is overridden.
+"""
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
-import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EXPERIMENT = ROOT / "experiments/chess-puct-wdl-tensorrt.toml"
+DEFAULT_RUN_DIR = ROOT / "runs/chess-puct-wdl-tensorrt-v5"
+DEFAULT_SEED_CHECKPOINT = (
+    ROOT / "runs/chess-puct-wdl-tensorrt-v2/checkpoints/latest.safetensors"
+)
+DEFAULT_OPT_BATCH = 128
+DEFAULT_MAX_BATCH = 256
+DEFAULT_MIN_BATCH = 1
+
+
+def _libtorch_root() -> Path | None:
+    """Resolve the LibTorch root from $LIBTORCH or `.cargo/config.toml`."""
+
+    configured = os.environ.get("LIBTORCH")
+    if configured:
+        return Path(configured).expanduser()
+
+    config = ROOT / ".cargo/config.toml"
+    if not config.is_file():
+        return None
+
+    match = re.search(
+        r"^LIBTORCH\s*=\s*[\"\']([^\"\']+)",
+        config.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    return Path(match.group(1)).expanduser() if match else None
 
 
 def _can_import_tensor_rt(python: Path) -> bool:
@@ -25,16 +57,16 @@ def _can_import_tensor_rt(python: Path) -> bool:
         stderr=subprocess.DEVNULL,
         check=False,
     )
-
     return result.returncode == 0
 
 
-def _tensor_rt_runtime_environment(python: Path) -> dict[str, str]:
-    """Prepare the dynamic linker environment for TensorRT TorchScript loads."""
+def _tensor_rt_site_lib(python: Path) -> Path:
+    """Return the Torch-TensorRT C++ library directory for *python*."""
 
     query = (
         "from pathlib import Path; import importlib.util; "
-        "print(Path(next(iter(importlib.util.find_spec('torch_tensorrt').submodule_search_locations))) / 'lib')"
+        "print(Path(next(iter(importlib.util.find_spec('torch_tensorrt')"
+        ".submodule_search_locations))) / 'lib')"
     )
     result = subprocess.run(
         [str(python), "-c", query],
@@ -43,47 +75,45 @@ def _tensor_rt_runtime_environment(python: Path) -> dict[str, str]:
         text=True,
         check=True,
     )
-    trt_lib = Path(result.stdout.strip())
+    return Path(result.stdout.strip())
+
+
+def _tensor_rt_runtime_environment(python: Path) -> dict[str, str]:
+    """Prepare the linker environment for Torch-TensorRT module loads."""
+
+    trt_lib = _tensor_rt_site_lib(python)
     runtime_library = trt_lib / "libtorchtrt.so"
     if not runtime_library.is_file():
-        return os.environ.copy()
+        raise SystemExit(f"missing Torch-TensorRT runtime library: {runtime_library}")
 
     environment = os.environ.copy()
-    library_paths = [str(trt_lib)]
+    library_paths: list[str] = [str(trt_lib)]
+    preload: list[str] = []
 
-    # Rust/tch may use a local LibTorch distribution that is not installed in
-    # the system linker cache.  Keep this portable by honoring the standard
-    # LIBTORCH override instead of embedding a machine-specific path.
-    libtorch = environment.get("LIBTORCH")
-    if not libtorch:
-        config = ROOT / ".cargo/config.toml"
-        if config.is_file():
-            contents = config.read_text(encoding="utf-8")
-            match = re.search(r'^LIBTORCH\s*=\s*[\"\']([^\"\']+)', contents, re.MULTILINE)
-            if match:
-                libtorch = match.group(1)
-    if libtorch:
-        libtorch_lib = Path(libtorch).expanduser() / "lib"
+    libtorch = _libtorch_root()
+    if libtorch is not None:
+        libtorch_lib = libtorch / "lib"
+        libtorch_so = libtorch_lib / "libtorch.so"
         if libtorch_lib.is_dir():
-            library_paths.append(str(libtorch_lib))
+            library_paths.insert(0, str(libtorch_lib))
+        if libtorch_so.is_file():
+            preload.append(str(libtorch_so))
 
     nvidia_lib = trt_lib.parent.parent / "tensorrt_libs"
     if nvidia_lib.is_dir():
         library_paths.append(str(nvidia_lib))
 
-    existing_paths = environment.get("LD_LIBRARY_PATH")
-    if existing_paths:
-        library_paths.append(existing_paths)
+    existing = environment.get("LD_LIBRARY_PATH")
+    if existing:
+        library_paths.append(existing)
     environment["LD_LIBRARY_PATH"] = ":".join(library_paths)
 
-    # Keep noisy Python deprecation warnings from optional TensorRT plugins
-    # out of the training log without hiding real subprocess failures.
-    environment.setdefault("PYTHONWARNINGS", "ignore::DeprecationWarning")
-
+    preload.append(str(runtime_library))
     existing_preload = environment.get("LD_PRELOAD")
-    environment["LD_PRELOAD"] = ":".join(
-        [str(runtime_library), existing_preload] if existing_preload else [str(runtime_library)]
-    )
+    if existing_preload:
+        preload.append(existing_preload)
+    environment["LD_PRELOAD"] = ":".join(preload)
+    environment.setdefault("PYTHONWARNINGS", "ignore::DeprecationWarning")
     return environment
 
 
@@ -95,6 +125,8 @@ def _find_tensor_rt_python() -> Path | None:
     configured = os.environ.get("TRT_PYTHON")
     if configured:
         candidates.append(Path(configured).expanduser())
+
+    candidates.insert(0, Path.home() / "venvs/engine-zoo-trt-py313/bin/python")
 
     for environment in ("VIRTUAL_ENV", "CONDA_PREFIX"):
         prefix = os.environ.get(environment)
@@ -125,7 +157,6 @@ def _find_tensor_rt_python() -> Path | None:
         candidate = candidate.expanduser().absolute()
         if candidate in seen or not candidate.is_file():
             continue
-
         seen.add(candidate)
         if _can_import_tensor_rt(candidate):
             return candidate
@@ -153,7 +184,7 @@ def _is_nonfatal_runtime_noise(line: str) -> bool:
     )
 
 
-def _run_training(command: list[Path | str], environment: dict[str, str] | None) -> int:
+def _run_training(command: list[Path | str], environment: dict[str, str]) -> int:
     """Run training while hiding known nonfatal backend noise."""
 
     process = subprocess.Popen(
@@ -172,15 +203,45 @@ def _run_training(command: list[Path | str], environment: dict[str, str] | None)
     return process.wait()
 
 
+def _seed_checkpoint(run_dir: Path, checkpoint: Path) -> None:
+    """Install *checkpoint* as the run's latest weights before the first compile."""
+
+    if not checkpoint.is_file():
+        raise SystemExit(f"seed checkpoint not found: {checkpoint}")
+
+    destination = run_dir / "checkpoints" / "latest.safetensors"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(checkpoint, destination)
+
+    state_path = run_dir / "state.json"
+    state_path.write_text(
+        "{\n"
+        '  "format_version": 2,\n'
+        '  "iteration": 0,\n'
+        '  "model_generation": 0,\n'
+        '  "global_step": 0,\n'
+        '  "total_games_generated": 0,\n'
+        '  "latest_checkpoint": "checkpoints/latest.safetensors",\n'
+        '  "replay_sample_count": 0,\n'
+        '  "optimizer_moments_restored": false,\n'
+        '  "resume_kind": "weights-only"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    print(f"seeded {destination} from {checkpoint}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--experiment", type=Path, default=DEFAULT_EXPERIMENT)
-    parser.add_argument(
-        "--run-dir",
-        type=Path,
-        default=ROOT / "runs/chess-puct-wdl-tensorrt-v2",
-    )
+    parser.add_argument("--run-dir", type=Path, default=DEFAULT_RUN_DIR)
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="cuda")
+    parser.add_argument(
+        "--seed-checkpoint",
+        type=Path,
+        default=DEFAULT_SEED_CHECKPOINT,
+        help="Checkpoint copied into a newly initialized run before the first compile",
+    )
     parser.add_argument(
         "--tensor-rt-python",
         type=Path,
@@ -191,10 +252,27 @@ def main() -> int:
         type=Path,
         help="Optional TensorRT compiler script; defaults to scripts/compile_tensorrt.py",
     )
+    parser.add_argument(
+        "--tensor-rt-min-batch-size",
+        type=int,
+        default=DEFAULT_MIN_BATCH,
+        help=f"TensorRT dynamic min batch (default: {DEFAULT_MIN_BATCH})",
+    )
+    parser.add_argument(
+        "--tensor-rt-opt-batch-size",
+        type=int,
+        default=DEFAULT_OPT_BATCH,
+        help=f"TensorRT dynamic opt batch (default: {DEFAULT_OPT_BATCH})",
+    )
+    parser.add_argument(
+        "--tensor-rt-max-batch-size",
+        type=int,
+        default=DEFAULT_MAX_BATCH,
+        help=f"TensorRT dynamic max batch (default: {DEFAULT_MAX_BATCH})",
+    )
     args = parser.parse_args()
 
-    uses_tensor_rt = args.experiment.resolve() == DEFAULT_EXPERIMENT.resolve()
-    if uses_tensor_rt and args.tensor_rt_python is None:
+    if args.tensor_rt_python is None:
         args.tensor_rt_python = _find_tensor_rt_python()
         if args.tensor_rt_python is None:
             parser.error(
@@ -202,26 +280,65 @@ def main() -> int:
                 "set TRT_PYTHON or pass --tensor-rt-python"
             )
 
-    subprocess.run(["cargo", "build", "--release", "--bin", "train"], cwd=ROOT, check=True)
+    if not 0 < args.tensor_rt_min_batch_size <= args.tensor_rt_opt_batch_size <= args.tensor_rt_max_batch_size:
+        parser.error("TensorRT batch sizes must satisfy 0 < min <= opt <= max")
+
+    environment = _tensor_rt_runtime_environment(args.tensor_rt_python)
+    subprocess.run(
+        ["cargo", "build", "--release", "-p", "engine_app", "--bin", "train"],
+        cwd=ROOT,
+        check=True,
+        env=environment,
+    )
     binary = ROOT / "target/release/train"
-    if not (args.run_dir / "experiment.toml").exists():
+
+    experiment_path = args.run_dir / "experiment.toml"
+    if not experiment_path.exists():
         subprocess.run(
-            [binary, "init", "--experiment", args.experiment, "--run-dir", args.run_dir],
+            [
+                binary,
+                "init",
+                "--experiment",
+                args.experiment,
+                "--run-dir",
+                args.run_dir,
+            ],
             cwd=ROOT,
             check=True,
+            env=environment,
         )
-    command = [binary, "run", "--run-dir", args.run_dir, "--device", args.device, "--forever"]
-    if args.tensor_rt_python is not None:
-        command.extend(["--tensor-rt-python", args.tensor_rt_python])
+        _seed_checkpoint(args.run_dir, args.seed_checkpoint)
+
+    print(
+        "TensorRT defaults: "
+        f"experiment={args.experiment} "
+        f"engine=tensor-rt-torch-script; "
+        f"compile min={args.tensor_rt_min_batch_size} "
+        f"opt={args.tensor_rt_opt_batch_size} "
+        f"max={args.tensor_rt_max_batch_size}"
+    )
+
+    command: list[Path | str] = [
+        binary,
+        "run",
+        "--run-dir",
+        args.run_dir,
+        "--device",
+        args.device,
+        "--forever",
+        "--tensor-rt-python",
+        args.tensor_rt_python,
+        "--tensor-rt-min-batch-size",
+        str(args.tensor_rt_min_batch_size),
+        "--tensor-rt-opt-batch-size",
+        str(args.tensor_rt_opt_batch_size),
+        "--tensor-rt-max-batch-size",
+        str(args.tensor_rt_max_batch_size),
+    ]
     if args.tensor_rt_compiler is not None:
         command.extend(["--tensor-rt-compiler", args.tensor_rt_compiler])
 
-    runtime_environment = (
-        _tensor_rt_runtime_environment(args.tensor_rt_python)
-        if uses_tensor_rt and args.tensor_rt_python is not None
-        else None
-    )
-    return _run_training(command, runtime_environment)
+    return _run_training(command, environment)
 
 
 if __name__ == "__main__":

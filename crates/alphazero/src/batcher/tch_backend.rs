@@ -263,7 +263,7 @@ impl TchInferenceBackend {
                 .to_device_(self.device, Kind::Float, true, false)
                 .to_kind(self.input_kind)
         };
-        let (policy, value) = match &self.model {
+        let (policy, value) = match &mut self.model {
             LoadedModel::Native(native) => {
                 let output = native.net.forward_t(&inputs, false);
                 (

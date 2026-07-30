@@ -1,9 +1,9 @@
 format_version = 3
 seed = 1
 
-# Fixed-weight TensorRT self-play paired with native training. The train command
-# exports and compiles model.trt.ts before the first iteration, then reloads it
-# after each native optimizer update. Keep the native default recipe unchanged.
+# Torch-TensorRT self-play paired with native training. The train command
+# exports and compiles model.trt.ts before the first iteration, then reloads
+# it after each native optimizer update.
 
 [model]
 architecture = "chess-se"
@@ -15,11 +15,14 @@ value_head = { wdl = { hidden = 128 } }
 
 [self_play]
 num_games = 500
-threads = 24
+# Validated on the 64-game H4 Torch-TensorRT screen: 112 threads with
+# preferred batch 128, 1 ms wait, and compile profile opt=128/max=256.
+threads = 112
+progress_every = 100
 
 [self_play.search]
 algorithm = "root-gumbel-puct"
-leaf_batch_size = 16
+leaf_batch_size = 32
 
 [self_play.budget_schedule.playout-cap-randomization]
 full_probability = 0.25
