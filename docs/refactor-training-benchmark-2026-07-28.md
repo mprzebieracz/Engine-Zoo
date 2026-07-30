@@ -37,7 +37,9 @@ This is a 9.0% reduction in self-play wall time and 4.5% in training time
 between these two local runs. It is **not** a fixed-800 result: the historical
 CLI default used playout-cap randomization (25% at 800 simulations and 75% at
 100), or approximately 275 simulations/move on average. Its raw JSON records
-are retained under `benchmark-results/refactor-2026-07-28/*/metrics.jsonl`.
+were part of the superseded refactor experiment and are no longer retained in
+the working tree; the canonical current baselines are documented in
+`docs/default-chess-h4-baseline.md` and `docs/tensorrt-h4-benchmark.md`.
 
 ## Current-refactor observations
 

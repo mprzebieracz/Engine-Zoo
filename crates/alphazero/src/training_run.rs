@@ -329,8 +329,11 @@ where
 
     fn reload_tensor_rt_inference(&mut self) -> Result<()> {
         anyhow::ensure!(
-            self.experiment.inference.engine == InferenceEngine::TensorRtTorchScript,
-            "reload_tensor_rt_inference is only valid for tensor-rt-torch-script inference"
+            matches!(
+                self.experiment.inference.engine,
+                InferenceEngine::TensorRtTorchScript
+            ),
+            "reload_tensor_rt_inference is only valid for TensorRT inference"
         );
         anyhow::ensure!(
             self.pending_tensor_rt_recompile.is_some(),

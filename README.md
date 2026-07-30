@@ -53,27 +53,23 @@ LibTorch for training. It requires the matching TensorRT runtime libraries and
 compiler environment described in [TensorRT inference](docs/tensorrt.md).
 
 ```bash
-LIBTORCH=/path/to/libtorch
-TRT_PYTHON=.venv/engine-zoo-trt/bin/python
-TRT_SITE="$("$TRT_PYTHON" -c 'import site; print(site.getsitepackages()[0])')"
-
-LD_LIBRARY_PATH="$LIBTORCH/lib:$TRT_SITE/torch_tensorrt/lib:$TRT_SITE/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-LD_PRELOAD="$LIBTORCH/lib/libtorch.so:$TRT_SITE/torch_tensorrt/lib/libtorchtrt.so" \
-  python3 scripts/train_chess.py --device cuda \
-  --tensor-rt-python "$TRT_PYTHON"
+python3 scripts/train_chess.py
 ```
 
-The script initializes `runs/chess-puct-wdl-tensorrt` from
-`experiments/chess-puct-wdl-tensorrt.toml` if needed, then invokes `train run
---forever`. TensorRT modules contain fixed weights, so each iteration performs
-TensorRT self-play, native training, then export and compilation for the next
-generation.
+The script initializes `runs/chess-puct-wdl-tensorrt-v4` from
+`experiments/chess-puct-wdl-tensorrt.toml` if needed, seeds it from the latest
+v3 checkpoint, and invokes `train run --forever` on CUDA with Torch-TensorRT
+self-play and the validated compile shapes (`opt=128`, `max=256`). TensorRT
+modules contain fixed weights, so each iteration performs TensorRT self-play,
+native training, then export and compilation for the next generation. Pass
+`--tensor-rt-python` only when the Torch-TensorRT environment is not found
+automatically.
 
 For a system without the matching TensorRT stack, retain the same H4
 Root-Gumbel model and use the native fallback explicitly:
 
 ```bash
-python3 scripts/train_chess.py --device cuda \
+python3 scripts/train_chess.py \
   --experiment experiments/chess-puct-wdl.toml \
   --run-dir runs/chess-puct-wdl
 ```

@@ -30,12 +30,16 @@ weights, while the periodic archives provide rollback and evaluation points.
 ## Default chess recipe
 
 `scripts/train_chess.py` launches
-`experiments/chess-puct-wdl-tensorrt.toml`. It uses TensorRT FP16 inference
-for fixed-weight self-play and native CUDA training, with 24 self-play workers,
-16-leaf local MCTS batches, and dynamic inference batches of 128–256 states
-with a 1 ms wait. The script discovers a matching TensorRT Python runtime
-automatically; use `--tensor-rt-python` only when an explicit interpreter
-override is needed. See [TensorRT inference](tensorrt.md) for runtime details.
+`experiments/chess-puct-wdl-tensorrt.toml` into
+`runs/chess-puct-wdl-tensorrt-v4` on CUDA. It uses Torch-TensorRT FP16
+self-play and native CUDA training with the validated H4 defaults: 112
+self-play threads, 32-leaf local MCTS batches, preferred inference batch 128,
+maximum batch 256, a 1 ms wait, and compile shapes opt=128 / max=256. New runs
+are seeded from `runs/chess-puct-wdl-tensorrt-v3/checkpoints/latest.safetensors`
+unless `--seed-checkpoint` is overridden. The script discovers a matching
+Torch-TensorRT Python runtime automatically; use `--tensor-rt-python` only when
+an explicit interpreter override is needed. See
+[TensorRT inference](tensorrt.md) for runtime details.
 
 It uses Root-Gumbel PUCT: 25% of positions use a 256-playout, 16-action budget;
 the remainder use 64 playouts and 8 considered root actions. Fast positions
@@ -46,5 +50,6 @@ retain value targets but have zero policy-target weight.
 `experiments/chess-puct-wdl.toml` is the explicit native fallback. It preserves
 the same H4 Root-Gumbel schedule while using native CUDA FP16 inference with a
 preferred batch size of 32 and 2 ms wait. Use it when TensorRT is unavailable,
-or when testing native inference. The TensorRT recipe's preferred batch size of
-128 and 1 ms batching wait won the 64-game H4 batching screen.
+or when testing native inference. The TensorRT recipe uses 112 self-play
+threads, preferred batch 128, and a 1 ms batching wait from the 64-game H4
+self-play screen.

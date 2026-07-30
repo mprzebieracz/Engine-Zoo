@@ -70,7 +70,7 @@ impl InferenceConfig {
         if self.engine == InferenceEngine::TensorRtTorchScript {
             ensure!(
                 self.tensor_rt_module.is_some(),
-                "tensor-rt-torch-script inference requires tensor_rt_module"
+                "TensorRT inference requires tensor_rt_module"
             );
         }
         if self.fp16_host_staging {

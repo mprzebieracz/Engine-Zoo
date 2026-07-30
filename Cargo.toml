@@ -22,6 +22,7 @@ authors = ["Mateusz Przebieracz"]
 [workspace.dependencies]
 anyhow = "1"
 axum = "0.8.9"
+cc = "1.2"
 chess = "3.2"
 clap = { version = "4", features = ["derive"] }
 half = "2"
