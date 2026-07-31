@@ -29,6 +29,16 @@ import subprocess
 import sys
 import tempfile
 import time
+import warnings
+
+# TorchScript→ONNX export emits noisy, non-actionable warnings on every
+# generation compile during training.
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings(
+    "ignore",
+    message=r"no signature found for builtin .* skipping _decide_input_format",
+    category=UserWarning,
+)
 
 import tensorrt as trt
 

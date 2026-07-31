@@ -47,6 +47,7 @@ mod ffi {
         pub fn raw_trt_tensor_data_type(engine: *const RawTrtEngine, name: *const c_char) -> i32;
         pub fn raw_trt_create_context(engine: *mut RawTrtEngine) -> *mut RawTrtContext;
         pub fn raw_trt_free_context(context: *mut RawTrtContext);
+        pub fn raw_trt_context_stream(context: *mut RawTrtContext) -> *mut c_void;
         pub fn raw_trt_set_input_shape(
             context: *mut RawTrtContext,
             name: *const c_char,
@@ -400,10 +401,17 @@ impl RawTensorRtBackend {
             );
         }
 
-        let status = unsafe { ffi::raw_trt_enqueue(self.context.0, std::ptr::null_mut()) };
+        let stream = unsafe { ffi::raw_trt_context_stream(self.context.0) };
+        ensure!(
+            !stream.is_null(),
+            "TensorRT context has no CUDA stream: {}",
+            last_error()
+        );
+
+        let status = unsafe { ffi::raw_trt_enqueue(self.context.0, stream) };
         ensure!(status == 0, "TensorRT enqueue failed: {}", last_error());
 
-        let status = unsafe { ffi::raw_trt_synchronize_stream(std::ptr::null_mut()) };
+        let status = unsafe { ffi::raw_trt_synchronize_stream(stream) };
         ensure!(status == 0, "TensorRT stream sync failed: {}", last_error());
 
         Ok(())

@@ -134,7 +134,10 @@ def _raw_tensor_rt_runtime_environment(python: Path) -> dict[str, str]:
     environment.pop("LD_PRELOAD", None)
     environment["TENSORRT_PREFER_SYSTEM_BUILDER"] = "0"
     environment.pop("TENSORRT_BUILD_PYTHON", None)
-    environment.setdefault("PYTHONWARNINGS", "ignore::DeprecationWarning")
+    environment.setdefault(
+        "PYTHONWARNINGS",
+        "ignore::DeprecationWarning,ignore::UserWarning",
+    )
     return environment
 
 
@@ -179,7 +182,10 @@ def _torch_tensor_rt_runtime_environment(python: Path) -> dict[str, str]:
     if existing_preload:
         preload.append(existing_preload)
     environment["LD_PRELOAD"] = ":".join(preload)
-    environment.setdefault("PYTHONWARNINGS", "ignore::DeprecationWarning")
+    environment.setdefault(
+        "PYTHONWARNINGS",
+        "ignore::DeprecationWarning,ignore::UserWarning",
+    )
     return environment
 
 
@@ -236,6 +242,10 @@ def _is_nonfatal_runtime_noise(line: str) -> bool:
     if "Memory.cpp" in line and ("pin_memory" in line or "is_pinned" in line):
         return True
 
+    if line.startswith("engine build time:"):
+        # Redundant with train's "compiled TensorRT module in …s".
+        return True
+
     return any(
         marker in line
         for marker in (
@@ -246,6 +256,10 @@ def _is_nonfatal_runtime_noise(line: str) -> bool:
             "quantized models",
             "modelopt library",
             "WARNING: [Torch-TensorRT] - Mean converter disregards dtype",
+            "no signature found for builtin",
+            "skipping _decide_input_format",
+            "legacy TorchScript-based ONNX export",
+            "You are using the legacy TorchScript-based ONNX export",
         )
     )
 
@@ -369,8 +383,12 @@ def main() -> int:
         parser.error("TensorRT batch sizes must satisfy 0 < min <= opt <= max")
 
     environment = _tensor_rt_runtime_environment(args.tensor_rt_python, cache=args.cache)
+    build_cmd = ["cargo", "build", "--release", "-p", "engine_app", "--bin", "train"]
+    if args.cache:
+        # raw TensorRT + timing cache; leave default builds (serve/eval/uci) free of libnvinfer
+        build_cmd.extend(["--features", "raw-tensorrt"])
     subprocess.run(
-        ["cargo", "build", "--release", "-p", "engine_app", "--bin", "train"],
+        build_cmd,
         cwd=ROOT,
         check=True,
         env=environment,
