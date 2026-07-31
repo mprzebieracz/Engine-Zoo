@@ -55,8 +55,8 @@ struct RunArgs {
     /// Overrides a `tensor-rt-torch-script` experiment at runtime (does not
     /// rewrite `experiment.toml`): compiles via `compile_tensorrt_raw.py` into
     /// `model.raw.engine` and stores timings in `<run-dir>/tensorrt-timing.cache`
-    /// unless `--tensor-rt-timing-cache` is set. Requires the `raw-tensorrt`
-    /// Cargo feature (on by default for this binary).
+    /// unless `--tensor-rt-timing-cache` is set. Requires building with
+    /// `--features raw-tensorrt` (see `scripts/train --cache`).
     #[arg(long)]
     cache: bool,
     #[command(flatten)]
@@ -142,7 +142,7 @@ fn apply_cache_backend(
         let _ = (run_dir, experiment, args);
         anyhow::bail!(
             "--cache requires building train with `--features raw-tensorrt` \
-             (enabled by default for engine_app)"
+             (e.g. cargo build -p engine_app --bin train --features raw-tensorrt)"
         );
     }
 
@@ -255,11 +255,12 @@ fn run_tensor_rt(
                 print_iteration_header(iteration);
                 let iteration_started = Instant::now();
                 let report = training_run.step()?;
-                print_iteration_report(&report, iteration_started.elapsed());
                 ensure_tensor_rt_recompile_required(&report.next_inference)?;
                 println!("COMPILATION");
                 compile_tensor_rt_generation(&run, &experiment, device, &compiler)?;
                 training_run.reload_tensor_rt_inference()?;
+                // Wall clock for self-play + train + compile + reload.
+                print_iteration_report(&report, iteration_started.elapsed());
             }
             println!(
                 "TOTAL TRAINING TIME: {:.2}s",
@@ -273,11 +274,12 @@ fn run_tensor_rt(
                 print_iteration_header(iteration);
                 let iteration_started = Instant::now();
                 let report = training_run.step()?;
-                print_iteration_report(&report, iteration_started.elapsed());
                 ensure_tensor_rt_recompile_required(&report.next_inference)?;
                 println!("COMPILATION");
                 compile_tensor_rt_generation(&run, &experiment, device, &compiler)?;
                 training_run.reload_tensor_rt_inference()?;
+                // Wall clock for self-play + train + compile + reload.
+                print_iteration_report(&report, iteration_started.elapsed());
                 iteration += 1;
             }
         }

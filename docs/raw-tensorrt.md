@@ -27,7 +27,8 @@ machinery, self-play, and training code are unchanged.
 
 ```bash
 # Same TensorRT experiment recipe; --cache selects raw engine + timing cache.
-cargo run -p engine_app --bin train -- run \
+# Feature is opt-in so serve/eval/uci stay free of libnvinfer.
+cargo run -p engine_app --bin train --features raw-tensorrt -- run \
   --run-dir runs/chess-puct-wdl-tensorrt \
   --cache \
   --tensor-rt-python "$TRT_PYTHON" \
@@ -37,8 +38,8 @@ cargo run -p engine_app --bin train -- run \
 
 `--cache` is a runtime override (does not rewrite `experiment.toml`). Defaults:
 compiler `scripts/compile_tensorrt_raw.py`, artifact `model.raw.engine`, timing
-cache `<run-dir>/tensorrt-timing.cache`. The `raw-tensorrt` feature is on by
-default for `engine_app`.
+cache `<run-dir>/tensorrt-timing.cache`. Prefer `scripts/train --cache`, which
+passes `--features raw-tensorrt` automatically.
 
 ## Status
 
