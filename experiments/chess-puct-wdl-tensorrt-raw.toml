@@ -1,0 +1,64 @@
+format_version = 3
+seed = 1
+
+# Raw TensorRT variant of chess-puct-wdl-tensorrt.toml: same self-play/training
+# recipe, but inference uses a deserialized TensorRT engine plan instead of a
+# Torch-TensorRT TorchScript module. Requires `--features raw-tensorrt`.
+
+[model]
+architecture = "chess-se"
+history = "four"
+blocks = 12
+channels = 128
+se_hidden = 16
+value_head = { wdl = { hidden = 128 } }
+
+[self_play]
+num_games = 500
+threads = 112
+max_moves = 512
+progress_every = 100
+
+[self_play.search]
+algorithm = "root-gumbel-puct"
+leaf_batch_size = 32
+
+[self_play.budget_schedule.playout-cap-randomization]
+full_probability = 0.5
+fast_policy_weight = 0.25
+
+[self_play.budget_schedule.playout-cap-randomization.full.gumbel]
+simulations = 400
+max_considered_actions = 16
+
+[self_play.budget_schedule.playout-cap-randomization.fast.gumbel]
+simulations = 128
+max_considered_actions = 8
+
+[replay]
+capacity = 2_000_000
+
+[training]
+batch_size = 2048
+train_steps = 80
+progress_every = 5
+max_replay_reuse_per_iteration = 1.0
+value_loss_weight = 1.0
+lr = 0.0003
+weight_decay = 0.0001
+
+[training.learning_rate_schedule.linear-warmup-then-cosine]
+warmup_steps = 250
+total_steps = 50000
+minimum_lr = 0.00003
+
+[inference]
+engine = "tensor-rt-raw"
+tensor_rt_module = "model.raw.engine"
+precision = "fp16"
+preferred_batch_size = 128
+max_batch_size = 256
+max_queued_states = 4096
+
+[inference.max_wait]
+milliseconds = 1

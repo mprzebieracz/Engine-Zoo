@@ -17,8 +17,12 @@ use std::time::{Duration, Instant};
 use tch::Device;
 
 mod tch_backend;
+#[cfg(feature = "raw-tensorrt")]
+mod raw_trt_backend;
 
 pub use tch_backend::{InferencePrecision, TchInferenceBackend};
+#[cfg(feature = "raw-tensorrt")]
+pub use raw_trt_backend::RawTensorRtBackend;
 
 /// One contiguous input passed to an inference implementation.
 #[derive(Default)]
@@ -389,6 +393,18 @@ impl Batcher {
             TchInferenceBackend::new_tensor_rt_torchscript(spec, module, device)?,
             config,
         )
+    }
+
+    /// Uses a raw, deserialized TensorRT engine plan for inference, bypassing
+    /// Torch-TensorRT/TorchScript entirely. See [`RawTensorRtBackend`].
+    #[cfg(feature = "raw-tensorrt")]
+    pub fn new_with_raw_tensor_rt(
+        spec: ModelSpec,
+        engine: &Path,
+        device: Device,
+        config: BatcherConfig,
+    ) -> Result<Self> {
+        Self::with_backend(RawTensorRtBackend::new(spec, engine, device)?, config)
     }
 
     pub fn client(&self) -> BatcherClient {

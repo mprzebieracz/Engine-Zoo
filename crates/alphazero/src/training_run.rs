@@ -126,14 +126,36 @@ struct TypedRunComponents<S, F> {
 }
 
 impl TrainingRun {
-    /// Opens an initialized run.
+    /// Opens an initialized run using the experiment stored on disk.
     ///
     /// TensorRT uses a fixed module. After each checkpoint, call
     /// [`Self::reload_tensor_rt_inference`] once the configured module has
     /// been rebuilt, before requesting another generation.
     pub fn open(path: &Path, device: Device) -> Result<Self> {
-        let (run_dir, experiment, mut state) = RunDir::open(path)?;
+        let (run_dir, experiment, state) = RunDir::open(path)?;
+        Self::from_opened(run_dir, experiment, state, device)
+    }
 
+    /// Opens an initialized run with a caller-supplied experiment override.
+    ///
+    /// Used by runtime flags such as `train run --cache`, which select the raw
+    /// TensorRT backend without rewriting the immutable `experiment.toml`.
+    pub fn open_with_experiment(
+        path: &Path,
+        experiment: ExperimentConfig,
+        device: Device,
+    ) -> Result<Self> {
+        experiment.validate()?;
+        let (run_dir, _, state) = RunDir::open(path)?;
+        Self::from_opened(run_dir, experiment, state, device)
+    }
+
+    fn from_opened(
+        run_dir: RunDir,
+        experiment: ExperimentConfig,
+        mut state: RunState,
+        device: Device,
+    ) -> Result<Self> {
         let (var_store, network) = load_training_model(&run_dir, &experiment, &mut state, device)?;
         let inference = load_inference_service(&run_dir, &experiment, device)?;
 
@@ -331,7 +353,7 @@ where
         anyhow::ensure!(
             matches!(
                 self.experiment.inference.engine,
-                InferenceEngine::TensorRtTorchScript
+                InferenceEngine::TensorRtTorchScript | InferenceEngine::TensorRtRaw
             ),
             "reload_tensor_rt_inference is only valid for TensorRT inference"
         );
@@ -424,7 +446,7 @@ fn load_inference_service(
                 &experiment.inference,
             )
         }
-        InferenceEngine::TensorRtTorchScript => {
+        InferenceEngine::TensorRtTorchScript | InferenceEngine::TensorRtRaw => {
             let module = tensor_rt_module_path(run_dir, experiment)?;
             InferenceService::load(
                 &experiment.model,
@@ -451,7 +473,7 @@ fn tensor_rt_module_path(run_dir: &RunDir, experiment: &ExperimentConfig) -> Res
 
     anyhow::ensure!(
         module.is_file(),
-        "missing TensorRT TorchScript module: {}",
+        "missing TensorRT inference module: {}",
         module.display()
     );
 

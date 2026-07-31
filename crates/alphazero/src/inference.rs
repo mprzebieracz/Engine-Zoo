@@ -51,11 +51,32 @@ impl Batcher {
                     config.batcher_config(),
                 )
             }
+            (InferenceEngine::TensorRtRaw, InferenceSource::TensorRtModule(module)) => {
+                #[cfg(feature = "raw-tensorrt")]
+                {
+                    Self::new_with_raw_tensor_rt(
+                        model.clone(),
+                        module,
+                        device,
+                        config.batcher_config(),
+                    )
+                }
+                #[cfg(not(feature = "raw-tensorrt"))]
+                {
+                    let _ = (model, module, device, config);
+                    anyhow::bail!(
+                        "raw TensorRT inference requires building with `--features raw-tensorrt`"
+                    )
+                }
+            }
             (InferenceEngine::Native, InferenceSource::TensorRtModule(_)) => {
                 anyhow::bail!("native inference requires a checkpoint source")
             }
-            (InferenceEngine::TensorRtTorchScript, InferenceSource::Checkpoint(_)) => {
-                anyhow::bail!("TensorRT inference requires a TorchScript module source")
+            (
+                InferenceEngine::TensorRtTorchScript | InferenceEngine::TensorRtRaw,
+                InferenceSource::Checkpoint(_),
+            ) => {
+                anyhow::bail!("TensorRT inference requires a compiled module/engine source")
             }
         }
     }

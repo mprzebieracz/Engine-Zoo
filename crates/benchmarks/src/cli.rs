@@ -112,6 +112,13 @@ pub(crate) struct RawInferenceArgs {
     #[arg(long)]
     pub(crate) tensor_rt_module: PathBuf,
 
+    /// Raw TensorRT engine plan produced by `scripts/compile_tensorrt_raw.py`.
+    /// Adds a fourth reported backend when set. Requires the `raw-tensorrt`
+    /// crate feature.
+    #[cfg(feature = "raw-tensorrt")]
+    #[arg(long)]
+    pub(crate) raw_tensor_rt_engine: Option<PathBuf>,
+
     /// Warmup forwards per backend and batch size.
     #[arg(long, default_value_t = 10)]
     pub(crate) warmup: usize,
