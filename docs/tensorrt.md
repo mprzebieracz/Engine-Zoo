@@ -140,19 +140,31 @@ valid module remains on disk for diagnosis or recovery.
 
 ## Builder timing-cache variant
 
-`train run --tensor-rt-timing-cache PATH` is deliberately opt-in. With the
-currently pinned Torch-TensorRT release, the TorchScript compiler frontend
-used here cannot consume or emit a builder timing cache while preserving the
-serialized TorchScript `CModule` ABI loaded by Rust. The compiler therefore
-rejects the flag before building instead of silently switching to the Dynamo
-frontend or producing a differently optimized engine.
+Use `train run --cache` to select the raw TensorRT backend with a persistent
+builder timing cache (see [`raw-tensorrt.md`](raw-tensorrt.md)). This is a
+**runtime** override: it does not rewrite `experiment.toml`. A
+`tensor-rt-torch-script` experiment is compiled via
+`scripts/compile_tensorrt_raw.py` into `model.raw.engine`, with timings stored
+in `<run-dir>/tensorrt-timing.cache` unless `--tensor-rt-timing-cache` is set.
 
-This is separate from the arena's compiled-module artifact cache. That cache
-is profile- and GPU-specific so a module built for a small arena batch cannot
-be reused by the 128/256 self-play batcher. Revisit the timing-cache variant
-only after the installed TorchScript frontend exposes a compatible cache API;
-then compare cold/warm compilation and raw inference against this unchanged
-baseline.
+```bash
+LD_LIBRARY_PATH="$LIBTORCH/lib:$TRT_SITE/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+  cargo run -p engine_app --bin train -- run \
+  --run-dir runs/chess-puct-wdl-tensorrt --device cuda --iterations 3 \
+  --cache \
+  --tensor-rt-python "$TRT_PYTHON" \
+  --tensor-rt-min-batch-size 1 \
+  --tensor-rt-opt-batch-size 128 \
+  --tensor-rt-max-batch-size 256
+```
+
+Do **not** preload `libtorchtrt.so` for `--cache` (raw TensorRT does not use
+it). Ensure `libnvinfer.so.10` from the TensorRT 10.x wheel is on
+`LD_LIBRARY_PATH`.
+
+The older `train run --tensor-rt-timing-cache PATH` flag alone still targets
+the Torch-TensorRT TorchScript compiler, which rejects the cache before
+building. Prefer `--cache` for the working timing-cache path.
 
 ## Manual enablement
 

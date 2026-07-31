@@ -9,6 +9,9 @@ authors.workspace = true
 description = "Reproducible benchmarks for engine-zoo"
 build = "build.rs"
 
+[features]
+raw-tensorrt = ["alphazero/raw-tensorrt"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

@@ -9,6 +9,14 @@ authors.workspace = true
 description = "Neural AlphaZero training and inference for engine-zoo"
 build = "build.rs"
 
+[features]
+# Builds and links the raw TensorRT runtime backend (native/raw_trt_runtime.cpp)
+# against a locally installed TensorRT (headers under an include path, and
+# `libnvinfer`/`libcudart` on the linker search path). Off by default because
+# it requires TensorRT to be present at build time, unlike the Torch-TensorRT
+# TorchScript path which only needs it at runtime via `dlopen`/`LD_PRELOAD`.
+raw-tensorrt = ["dep:cc"]
+
 [dependencies]
 anyhow.workspace = true
 chess.workspace = true
@@ -22,6 +30,9 @@ serde_json.workspace = true
 sha2.workspace = true
 tch.workspace = true
 toml.workspace = true
+
+[build-dependencies]
+cc = { workspace = true, optional = true }
 
 [[bench]]
 name = "replay"

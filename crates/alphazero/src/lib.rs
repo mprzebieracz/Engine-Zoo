@@ -22,6 +22,8 @@ pub use batcher::{
     Batcher, BatcherClient, BatcherConfig, BatcherError, BatcherStats, CombinedEncodedBatch,
     InferenceBackend, InferencePrecision, TchInferenceBackend,
 };
+#[cfg(feature = "raw-tensorrt")]
+pub use batcher::RawTensorRtBackend;
 pub use evaluator::{EncodedEvalBatch, EncodedEvaluator, RepresentedEvaluator};
 pub use experiment::{
     DurationConfig, ExperimentConfig, InferenceConfig, InferenceEngine, ReplayConfig, ResumeKind,

@@ -23,6 +23,9 @@ pub enum InferenceEngine {
     #[default]
     Native,
     TensorRtTorchScript,
+    /// Raw TensorRT engine plan (ONNX builder + C++ runtime). Requires the
+    /// `raw-tensorrt` Cargo feature at build time.
+    TensorRtRaw,
 }
 
 impl DurationConfig {
@@ -67,7 +70,10 @@ impl Default for InferenceConfig {
 
 impl InferenceConfig {
     fn validate(&self) -> Result<()> {
-        if self.engine == InferenceEngine::TensorRtTorchScript {
+        if matches!(
+            self.engine,
+            InferenceEngine::TensorRtTorchScript | InferenceEngine::TensorRtRaw
+        ) {
             ensure!(
                 self.tensor_rt_module.is_some(),
                 "TensorRT inference requires tensor_rt_module"
