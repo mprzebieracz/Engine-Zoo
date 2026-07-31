@@ -149,7 +149,7 @@ in `<run-dir>/tensorrt-timing.cache` unless `--tensor-rt-timing-cache` is set.
 
 ```bash
 LD_LIBRARY_PATH="$LIBTORCH/lib:$TRT_SITE/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-  cargo run -p engine_app --bin train -- run \
+  cargo run -p engine_app --bin train --features raw-tensorrt -- run \
   --run-dir runs/chess-puct-wdl-tensorrt --device cuda --iterations 3 \
   --cache \
   --tensor-rt-python "$TRT_PYTHON" \

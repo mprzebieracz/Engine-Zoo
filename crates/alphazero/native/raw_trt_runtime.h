@@ -37,6 +37,9 @@ int32_t raw_trt_tensor_data_type(const RawTrtEngine *engine, const char *name);
 
 RawTrtContext *raw_trt_create_context(RawTrtEngine *engine);
 void raw_trt_free_context(RawTrtContext *context);
+// Dedicated non-default CUDA stream owned by the context. Valid until
+// `raw_trt_free_context`.
+void *raw_trt_context_stream(RawTrtContext *context);
 
 // `dims`/`nb_dims` describe the concrete shape used for this batch; it must
 // be within the engine's compiled optimization profile.
@@ -51,8 +54,8 @@ int32_t raw_trt_set_tensor_address(RawTrtContext *context, const char *name,
 int32_t raw_trt_get_tensor_shape(RawTrtContext *context, const char *name,
                                   int64_t *dims_out, int32_t *nb_dims_out);
 
-// Enqueues inference on `stream` (a `cudaStream_t`; pass null for the
-// default stream). Returns 0 on success.
+// Enqueues inference on `stream` (a `cudaStream_t`). Pass null to use the
+// context's dedicated non-default stream. Returns 0 on success.
 int32_t raw_trt_enqueue(RawTrtContext *context, void *stream);
 // Blocks until all work queued on `stream` completes. Returns 0 on success.
 int32_t raw_trt_synchronize_stream(void *stream);
