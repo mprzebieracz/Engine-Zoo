@@ -205,7 +205,7 @@ pub struct ResignationConfig {
 impl Default for ResignationConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             threshold: -0.95,
             consecutive_moves: 3,
             minimum_ply: 60,

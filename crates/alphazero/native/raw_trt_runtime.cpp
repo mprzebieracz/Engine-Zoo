@@ -43,6 +43,9 @@ struct RawTrtContext {
   // Keeps the owning engine alive for as long as any context exists.
   RawTrtEngine *engine;
   std::unique_ptr<nvinfer1::IExecutionContext> context;
+  // Non-default stream: enqueueV3(nullptr) makes TensorRT insert extra
+  // cudaStreamSynchronize calls and warns on every batch.
+  cudaStream_t stream = nullptr;
 };
 
 extern "C" {
@@ -112,10 +115,34 @@ RawTrtContext *raw_trt_create_context(RawTrtEngine *engine) {
     set_error("failed to create TensorRT execution context");
     return nullptr;
   }
-  return new RawTrtContext{engine, std::move(context)};
+  cudaStream_t stream = nullptr;
+  const cudaError_t status = cudaStreamCreate(&stream);
+  if (status != cudaSuccess) {
+    set_error(std::string("cudaStreamCreate failed: ") +
+              cudaGetErrorString(status));
+    return nullptr;
+  }
+  return new RawTrtContext{engine, std::move(context), stream};
 }
 
-void raw_trt_free_context(RawTrtContext *context) { delete context; }
+void raw_trt_free_context(RawTrtContext *context) {
+  if (context == nullptr) {
+    return;
+  }
+  if (context->stream != nullptr) {
+    cudaStreamDestroy(context->stream);
+    context->stream = nullptr;
+  }
+  delete context;
+}
+
+void *raw_trt_context_stream(RawTrtContext *context) {
+  if (context == nullptr) {
+    set_error("null context");
+    return nullptr;
+  }
+  return context->stream;
+}
 
 int32_t raw_trt_set_input_shape(RawTrtContext *context, const char *name,
                                  const int64_t *dims, int32_t nb_dims) {
@@ -180,7 +207,15 @@ int32_t raw_trt_enqueue(RawTrtContext *context, void *stream) {
     set_error("not all input dimensions were specified before enqueue");
     return -1;
   }
-  if (!context->context->enqueueV3(static_cast<cudaStream_t>(stream))) {
+  // Null means "use the context's dedicated non-default stream".
+  cudaStream_t cuda_stream = stream == nullptr
+                                 ? context->stream
+                                 : static_cast<cudaStream_t>(stream);
+  if (cuda_stream == nullptr) {
+    set_error("no CUDA stream available for enqueueV3");
+    return -1;
+  }
+  if (!context->context->enqueueV3(cuda_stream)) {
     set_error("enqueueV3 failed");
     return -1;
   }
