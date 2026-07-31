@@ -68,6 +68,10 @@ struct TensorRtRunArgs {
     tensor_rt_opt_batch_size: Option<usize>,
     #[arg(long)]
     tensor_rt_max_batch_size: Option<usize>,
+    /// Experimental builder timing-cache path. The compiler rejects this when
+    /// its TorchScript frontend cannot preserve the Rust CModule runtime ABI.
+    #[arg(long)]
+    tensor_rt_timing_cache: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -94,8 +98,7 @@ fn run(args: RunArgs) -> Result<()> {
     let (_, experiment, state) = RunDir::open(&args.run_dir)?;
     let limit = if args.forever {
         RunLimit::Forever
-    }
-    else {
+    } else {
         RunLimit::Iterations(args.iterations)
     };
 
@@ -244,8 +247,7 @@ fn print_iteration_report(report: &alphazero::IterationReport, elapsed: std::tim
             training.forward_backward_seconds,
             training.optimizer_seconds,
         );
-    }
-    else {
+    } else {
         println!("no training steps configured");
     }
 
@@ -283,6 +285,8 @@ fn tensor_rt_compiler(
         python,
         script,
         batch_shapes,
+        precision: experiment.inference.precision,
+        timing_cache: args.tensor_rt_timing_cache,
     })
 }
 

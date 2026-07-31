@@ -138,6 +138,22 @@ uses this checkout's `scripts/compile_tensorrt.py`. Compilation failure stops
 the run before a stale module can be used for another generation. The latest
 valid module remains on disk for diagnosis or recovery.
 
+## Builder timing-cache variant
+
+`train run --tensor-rt-timing-cache PATH` is deliberately opt-in. With the
+currently pinned Torch-TensorRT release, the TorchScript compiler frontend
+used here cannot consume or emit a builder timing cache while preserving the
+serialized TorchScript `CModule` ABI loaded by Rust. The compiler therefore
+rejects the flag before building instead of silently switching to the Dynamo
+frontend or producing a differently optimized engine.
+
+This is separate from the arena's compiled-module artifact cache. That cache
+is profile- and GPU-specific so a module built for a small arena batch cannot
+be reused by the 128/256 self-play batcher. Revisit the timing-cache variant
+only after the installed TorchScript frontend exposes a compatible cache API;
+then compare cold/warm compilation and raw inference against this unchanged
+baseline.
+
 ## Manual enablement
 
 Copy the experiment TOML used by the run and set:

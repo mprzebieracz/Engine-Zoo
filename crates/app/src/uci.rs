@@ -1,4 +1,6 @@
-use alphazero::{ChessAlphaZeroEngine, ExperimentConfig, GameKind, InferenceSource, RunDir};
+use alphazero::{
+    ChessAlphaZeroEngine, ExperimentConfig, GameKind, InferenceEngine, InferenceSource, RunDir,
+};
 use anyhow::{Context, Result};
 use engine_core::game::GameState;
 use engine_core::notation::GameNotation;
@@ -20,6 +22,11 @@ pub struct Settings {
     pub temperature: f32,
     pub threads: usize,
     pub opening_plies: usize,
+    /// Optional precompiled Torch-TensorRT TorchScript module. When set, the
+    /// engine uses TensorRT inference regardless of the run's configured
+    /// engine; when None, the engine forces native inference so it can serve
+    /// checkpoints from TensorRT training runs without their compiled module.
+    pub tensor_rt_module: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -32,6 +39,7 @@ impl Default for Settings {
             temperature: 0.0,
             threads: 1,
             opening_plies: 0,
+            tensor_rt_module: None,
         }
     }
 }
@@ -90,13 +98,38 @@ impl ChessUciEngine {
         if self.engine.is_some() {
             return Ok(());
         }
-        let (weights, cfg) = load_config_and_model(&self.settings.run_dir, &self.settings.model)?;
-        let engine = ChessAlphaZeroEngine::open(
-            cfg.model,
-            InferenceSource::Checkpoint(&weights),
-            self.settings.device,
-            &cfg.inference,
-        )?;
+        let (weights, mut cfg) =
+            load_config_and_model(&self.settings.run_dir, &self.settings.model)?;
+        let engine = match &self.settings.tensor_rt_module {
+            Some(module) => {
+                anyhow::ensure!(
+                    module.is_file(),
+                    "TensorRtModule path is not a file: {}",
+                    module.display()
+                );
+                cfg.inference.engine = InferenceEngine::TensorRtTorchScript;
+                ChessAlphaZeroEngine::open(
+                    cfg.model,
+                    InferenceSource::TensorRtModule(module),
+                    self.settings.device,
+                    &cfg.inference,
+                )?
+            }
+            None => {
+                // A run configured for TensorRT stores tensor_rt_module in its
+                // experiment; force native inference so arenas can serve those
+                // checkpoints from a plain safetensors file without the
+                // compiled module.
+                cfg.inference.engine = InferenceEngine::Native;
+                cfg.inference.tensor_rt_module = None;
+                ChessAlphaZeroEngine::open(
+                    cfg.model,
+                    InferenceSource::Checkpoint(&weights),
+                    self.settings.device,
+                    &cfg.inference,
+                )?
+            }
+        };
         self.engine = Some(engine);
         Ok(())
     }

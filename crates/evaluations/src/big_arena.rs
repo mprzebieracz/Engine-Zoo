@@ -10,8 +10,20 @@ use crate::model_engine::infer_run_dir;
 use crate::report::{EvaluationSpec, Score, SearchSpec, SCHEMA_VERSION};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Inference backend used by an [`ArenaModel`] when it is loaded through the
+/// UCI adapter. The default is [`ArenaBackend::Native`] so that existing
+/// arenas—and their tests—do not silently start requiring TensorRT tooling.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArenaBackend {
+    #[default]
+    Native,
+    TensorRt,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ArenaModel {
@@ -22,6 +34,15 @@ pub struct ArenaModel {
     pub simulations: Option<usize>,
     #[serde(default)]
     pub device: Option<String>,
+    #[serde(default)]
+    pub backend: ArenaBackend,
+    /// Precompiled Torch-TensorRT TorchScript module for this checkpoint. When
+    /// `backend` is `tensor-rt` and this is `None`, the caller (typically the
+    /// Python arena wrapper) is expected to compile the module into the
+    /// configured cache directory and populate this field before Rust runs
+    /// matches. Providing it directly for a `native` model is not allowed.
+    #[serde(default)]
+    pub tensor_rt_module: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -48,6 +69,23 @@ pub struct ArenaSettings {
     pub opening_file: Option<PathBuf>,
     #[serde(default)]
     pub opening_plies: u32,
+    /// Python interpreter used by the Torch-TensorRT compiler. Only consumed
+    /// by the Python arena wrapper; the Rust binary carries it forward so
+    /// that `arena.toml` is the single source of truth.
+    #[serde(default)]
+    pub tensor_rt_python: Option<PathBuf>,
+    #[serde(default = "default_trt_cache")]
+    pub trt_cache_dir: PathBuf,
+    #[serde(default = "default_trt_opt")]
+    pub trt_opt_batch_size: usize,
+    #[serde(default = "default_trt_max")]
+    pub trt_max_batch_size: usize,
+    #[serde(default = "default_trt_min")]
+    pub trt_min_batch_size: usize,
+    #[serde(default = "default_trt_compiler")]
+    pub tensor_rt_compiler: PathBuf,
+    #[serde(default = "default_model_cli")]
+    pub model_cli: PathBuf,
 }
 
 impl Default for ArenaSettings {
@@ -64,6 +102,13 @@ impl Default for ArenaSettings {
             max_moves: default_max_moves(),
             opening_file: None,
             opening_plies: 0,
+            tensor_rt_python: None,
+            trt_cache_dir: default_trt_cache(),
+            trt_opt_batch_size: default_trt_opt(),
+            trt_max_batch_size: default_trt_max(),
+            trt_min_batch_size: default_trt_min(),
+            tensor_rt_compiler: default_trt_compiler(),
+            model_cli: default_model_cli(),
         }
     }
 }
@@ -80,6 +125,8 @@ pub struct ArenaConfig {
 pub struct OpponentResult {
     pub name: String,
     pub architecture: String,
+    pub backend: ArenaBackend,
+    pub simulations: usize,
     pub report: String,
     pub score: Score,
     pub score_fraction: f64,
@@ -138,6 +185,8 @@ pub fn run(config: &ArenaConfig) -> Result<ArenaSummary> {
         results.push(OpponentResult {
             name: opponent.name.clone(),
             architecture: opponent.architecture.clone(),
+            backend: opponent.backend,
+            simulations: opponent.simulations.unwrap_or(settings.simulations),
             report: format!("{}/report.json", opponent.name),
             score: report.score,
             score_fraction: report.score_fraction,
@@ -164,11 +213,15 @@ pub fn run(config: &ArenaConfig) -> Result<ArenaSummary> {
         output_root.join("arena.json"),
         serde_json::to_string_pretty(&summary)?,
     )?;
+    fs::write(
+        output_root.join("REPORT.md"),
+        render_report(&summary, config),
+    )?;
     Ok(summary)
 }
 
-fn model_engine(model: &ArenaModel, config: &ArenaConfig) -> Engine {
-    Engine::new(&config.settings.uci, &model.name)
+pub(crate) fn model_engine(model: &ArenaModel, config: &ArenaConfig) -> Engine {
+    let mut engine = Engine::new(&config.settings.uci, &model.name)
         .option("RunDir", infer_run_dir(&model.path).display().to_string())
         .option("Model", model.path.display().to_string())
         .option(
@@ -183,7 +236,15 @@ fn model_engine(model: &ArenaModel, config: &ArenaConfig) -> Engine {
             model.device.as_deref().unwrap_or(&config.settings.device),
         )
         .option("Temperature", "0")
-        .option("OpeningPlies", config.settings.opening_plies.to_string())
+        .option("OpeningPlies", config.settings.opening_plies.to_string());
+
+    // Set TensorRtModule when we have a compiled module. UCI treats an empty
+    // value as "force native", so we only advertise the option when it has a
+    // concrete path.
+    if let Some(module) = &model.tensor_rt_module {
+        engine = engine.option("TensorRtModule", module.display().to_string());
+    }
+    engine
 }
 
 fn build_command(
@@ -253,6 +314,11 @@ fn resolve_paths(config: &mut ArenaConfig, root: &Path) {
         if model.path.is_relative() {
             model.path = root.join(&model.path);
         }
+        if let Some(module) = &mut model.tensor_rt_module {
+            if module.is_relative() {
+                *module = root.join(&*module);
+            }
+        }
     }
     if should_resolve(&config.settings.fastchess) {
         config.settings.fastchess = root.join(&config.settings.fastchess);
@@ -263,10 +329,19 @@ fn resolve_paths(config: &mut ArenaConfig, root: &Path) {
     if config.settings.output_dir.is_relative() {
         config.settings.output_dir = root.join(&config.settings.output_dir);
     }
+    if config.settings.trt_cache_dir.is_relative() {
+        config.settings.trt_cache_dir = root.join(&config.settings.trt_cache_dir);
+    }
     if let Some(path) = &mut config.settings.opening_file {
         if path.is_relative() {
             *path = root.join(&*path);
         }
+    }
+    if should_resolve(&config.settings.tensor_rt_compiler) {
+        config.settings.tensor_rt_compiler = root.join(&config.settings.tensor_rt_compiler);
+    }
+    if should_resolve(&config.settings.model_cli) {
+        config.settings.model_cli = root.join(&config.settings.model_cli);
     }
 }
 
@@ -300,8 +375,95 @@ fn validate(config: &ArenaConfig) -> Result<()> {
         if !names.insert(&model.name) {
             bail!("duplicate model name {}", model.name);
         }
+        if model.backend == ArenaBackend::Native && model.tensor_rt_module.is_some() {
+            bail!(
+                "model {} has backend=native but a tensor_rt_module path is set",
+                model.name
+            );
+        }
     }
     Ok(())
+}
+
+fn render_report(summary: &ArenaSummary, config: &ArenaConfig) -> String {
+    let mut out = String::new();
+    let settings = &config.settings;
+    let candidate_sims = summary
+        .candidate
+        .simulations
+        .unwrap_or(settings.simulations);
+    let device = summary
+        .candidate
+        .device
+        .clone()
+        .unwrap_or_else(|| settings.device.clone());
+
+    let _ = writeln!(out, "# Arena report: {}", summary.candidate.name);
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "- candidate architecture: `{}`",
+        summary.candidate.architecture
+    );
+    let _ = writeln!(
+        out,
+        "- candidate checkpoint: `{}`",
+        summary.candidate.path.display()
+    );
+    let _ = writeln!(
+        out,
+        "- candidate backend: `{}`",
+        backend_label(summary.candidate.backend)
+    );
+    let _ = writeln!(out, "- candidate simulations: {candidate_sims}");
+    let _ = writeln!(out, "- device: `{device}`");
+    let _ = writeln!(
+        out,
+        "- games per opponent: {} ({} total)",
+        summary.games, summary.total_games
+    );
+    let _ = writeln!(out, "- time control: `{}`", settings.time_control);
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "Aggregate score {:.1}% ({}W / {}D / {}L), smoothed Elo {:+.1}.",
+        summary.score_fraction * 100.0,
+        summary.total_score.wins,
+        summary.total_score.draws,
+        summary.total_score.losses,
+        summary.elo_delta
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "| Opponent | Backend | Sims | W | D | L | Score % | Elo Δ |"
+    );
+    let _ = writeln!(
+        out,
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+    );
+    for opponent in &summary.opponents {
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | {} | {} | {} | {} | {:.1}% | {:+.1} |",
+            opponent.name,
+            backend_label(opponent.backend),
+            opponent.simulations,
+            opponent.score.wins,
+            opponent.score.draws,
+            opponent.score.losses,
+            opponent.score_fraction * 100.0,
+            opponent.elo_delta
+        );
+    }
+    out
+}
+
+fn backend_label(backend: ArenaBackend) -> &'static str {
+    match backend {
+        ArenaBackend::Native => "native",
+        ArenaBackend::TensorRt => "tensor-rt",
+    }
 }
 
 fn default_fastchess() -> PathBuf {
@@ -331,6 +493,24 @@ fn default_tc() -> String {
 fn default_max_moves() -> u32 {
     512
 }
+fn default_trt_cache() -> PathBuf {
+    PathBuf::from("data/evaluations/trt-cache")
+}
+fn default_trt_min() -> usize {
+    1
+}
+fn default_trt_opt() -> usize {
+    32
+}
+fn default_trt_max() -> usize {
+    256
+}
+fn default_trt_compiler() -> PathBuf {
+    PathBuf::from("scripts/compile_tensorrt.py")
+}
+fn default_model_cli() -> PathBuf {
+    PathBuf::from("target/release/engine-zoo-model")
+}
 
 #[cfg(test)]
 mod tests {
@@ -359,6 +539,38 @@ mod tests {
         validate(&config).unwrap();
         assert_eq!(config.settings.games, 4);
         assert_eq!(config.opponents[0].name, "old");
+        assert_eq!(config.candidate.backend, ArenaBackend::Native);
+        assert!(config.candidate.tensor_rt_module.is_none());
+    }
+
+    #[test]
+    fn parses_tensor_rt_backend_and_optional_module() {
+        let config: ArenaConfig = toml::from_str(
+            r#"
+            [candidate]
+            name = "trt"
+            path = "models/trt.safetensors"
+            architecture = "chess-se-h4"
+            backend = "tensor-rt"
+            tensor_rt_module = "cache/trt.ts"
+
+            [[opponents]]
+            name = "native"
+            path = "models/native.safetensors"
+            architecture = "chess-se"
+
+            [settings]
+            games = 2
+            simulations = 100
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.candidate.backend, ArenaBackend::TensorRt);
+        assert_eq!(
+            config.candidate.tensor_rt_module.as_deref(),
+            Some(Path::new("cache/trt.ts"))
+        );
+        assert_eq!(config.opponents[0].backend, ArenaBackend::Native);
     }
 
     #[test]
@@ -369,6 +581,8 @@ mod tests {
             architecture: "a".into(),
             simulations: None,
             device: None,
+            backend: ArenaBackend::Native,
+            tensor_rt_module: None,
         };
         let config = ArenaConfig {
             candidate: model.clone(),
@@ -379,5 +593,76 @@ mod tests {
             },
         };
         assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn rejects_tensor_rt_module_on_native_backend() {
+        let candidate = ArenaModel {
+            name: "candidate".into(),
+            path: "candidate.safetensors".into(),
+            architecture: "chess-se".into(),
+            simulations: None,
+            device: None,
+            backend: ArenaBackend::Native,
+            tensor_rt_module: Some(PathBuf::from("trt.ts")),
+        };
+        let opponent = ArenaModel {
+            name: "opponent".into(),
+            path: "opponent.safetensors".into(),
+            architecture: "chess-se".into(),
+            simulations: None,
+            device: None,
+            backend: ArenaBackend::Native,
+            tensor_rt_module: None,
+        };
+        let config = ArenaConfig {
+            candidate,
+            opponents: vec![opponent],
+            settings: ArenaSettings {
+                games: 2,
+                ..Default::default()
+            },
+        };
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn model_engine_includes_tensor_rt_module_option_when_set() {
+        let config = ArenaConfig {
+            candidate: ArenaModel {
+                name: "candidate".into(),
+                path: PathBuf::from("candidate.safetensors"),
+                architecture: "chess-se".into(),
+                simulations: None,
+                device: None,
+                backend: ArenaBackend::TensorRt,
+                tensor_rt_module: Some(PathBuf::from("cache/candidate.trt.ts")),
+            },
+            opponents: vec![ArenaModel {
+                name: "baseline".into(),
+                path: PathBuf::from("baseline.safetensors"),
+                architecture: "chess-se".into(),
+                simulations: None,
+                device: None,
+                backend: ArenaBackend::Native,
+                tensor_rt_module: None,
+            }],
+            settings: ArenaSettings {
+                games: 2,
+                ..Default::default()
+            },
+        };
+
+        let candidate = model_engine(&config.candidate, &config);
+        assert!(candidate
+            .options
+            .iter()
+            .any(|(key, value)| key == "TensorRtModule" && value == "cache/candidate.trt.ts"));
+
+        let opponent = model_engine(&config.opponents[0], &config);
+        assert!(!opponent
+            .options
+            .iter()
+            .any(|(key, _)| key == "TensorRtModule"));
     }
 }

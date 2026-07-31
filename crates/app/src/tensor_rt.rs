@@ -1,6 +1,6 @@
 //! TensorRT artifact creation for fixed-weight self-play generations.
 
-use alphazero::{ExperimentConfig, Network, RunDir, RunState};
+use alphazero::{ExperimentConfig, InferencePrecision, Network, RunDir, RunState};
 use anyhow::{bail, ensure, Context, Result};
 use std::ffi::OsString;
 use std::fs;
@@ -33,6 +33,13 @@ pub struct TensorRtCompiler {
     pub python: PathBuf,
     pub script: PathBuf,
     pub batch_shapes: TensorRtBatchShapes,
+    /// TensorRT tactic-selection precision. Keep this explicit because the
+    /// inference-service precision alone does not configure the external
+    /// compiler process.
+    pub precision: InferencePrecision,
+    /// Optional builder timing-cache request. The compiler validates whether
+    /// its selected frontend can honor it without changing the runtime ABI.
+    pub timing_cache: Option<PathBuf>,
 }
 
 impl TensorRtCompiler {
@@ -60,7 +67,15 @@ impl TensorRtCompiler {
             .arg("--opt-batch-size")
             .arg(self.batch_shapes.optimal.to_string())
             .arg("--max-batch-size")
-            .arg(self.batch_shapes.max.to_string());
+            .arg(self.batch_shapes.max.to_string())
+            .arg("--precision")
+            .arg(match self.precision {
+                InferencePrecision::Fp16 => "fp16",
+                InferencePrecision::Fp32 => "fp32-fp16",
+            });
+        if let Some(timing_cache) = &self.timing_cache {
+            command.arg("--timing-cache").arg(timing_cache);
+        }
 
         Ok(command)
     }
@@ -110,6 +125,69 @@ pub fn compile_latest_tensor_rt(
     let _ = fs::remove_file(export);
 
     Ok(module)
+}
+
+/// Compiles an arbitrary checkpoint into a TensorRT module at *output*.
+///
+/// This mirrors [`compile_latest_tensor_rt`] but decouples the input checkpoint
+/// from the run's `latest.safetensors` and the output path from
+/// `inference.tensor_rt_module`. It exists for tooling that caches per-model
+/// TensorRT artifacts outside a run directory, such as the multi-opponent
+/// arena. The final module is only installed after compilation succeeds.
+pub fn compile_checkpoint_tensor_rt(
+    experiment: &ExperimentConfig,
+    checkpoint: &Path,
+    output: &Path,
+    device: Device,
+    compiler: &TensorRtCompiler,
+) -> Result<PathBuf> {
+    ensure!(
+        checkpoint.is_file(),
+        "checkpoint does not exist: {}",
+        checkpoint.display()
+    );
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("creating TensorRT cache directory {}", parent.display())
+            })?;
+        }
+    }
+
+    let export = temporary_path(output, "torchscript.ts")?;
+    let temporary_module = temporary_path(output, "tmp.trt.ts")?;
+
+    export_torchscript(experiment, checkpoint, &export, device)?;
+    let status = compiler
+        .command(
+            &export,
+            &temporary_module,
+            experiment.model.state_shape()[0],
+        )?
+        .status()
+        .with_context(|| format!("starting TensorRT compiler {}", compiler.python.display()))?;
+
+    if !status.success() {
+        let _ = fs::remove_file(&temporary_module);
+        let _ = fs::remove_file(&export);
+        bail!("TensorRT compilation failed with {status}");
+    }
+
+    ensure!(
+        temporary_module.is_file(),
+        "TensorRT compiler succeeded but did not create {}",
+        temporary_module.display()
+    );
+
+    fs::rename(&temporary_module, output).with_context(|| {
+        format!(
+            "installing newly compiled TensorRT module at {}",
+            output.display()
+        )
+    })?;
+    let _ = fs::remove_file(export);
+
+    Ok(output.to_path_buf())
 }
 
 /// Creates the deterministic initial checkpoint when a newly initialized run
@@ -206,6 +284,8 @@ mod tests {
                 optimal: 32,
                 max: 256,
             },
+            precision: InferencePrecision::Fp16,
+            timing_cache: None,
         };
         let command = compiler
             .command(Path::new("input.ts"), Path::new("output.trt.ts"), 63)
@@ -229,6 +309,8 @@ mod tests {
                 OsStr::new("32"),
                 OsStr::new("--max-batch-size"),
                 OsStr::new("256"),
+                OsStr::new("--precision"),
+                OsStr::new("fp16"),
             ]
         );
         assert_linker_overrides_are_removed(&command);
@@ -244,11 +326,39 @@ mod tests {
                 optimal: 16,
                 max: 64,
             },
+            precision: InferencePrecision::Fp16,
+            timing_cache: None,
         };
 
         assert!(compiler
             .command(Path::new("input.ts"), Path::new("output.ts"), 63)
             .is_err());
+    }
+
+    #[test]
+    fn compiler_command_passes_an_explicit_timing_cache_request() {
+        let compiler = TensorRtCompiler {
+            python: "python".into(),
+            script: "compile.py".into(),
+            batch_shapes: TensorRtBatchShapes {
+                min: 1,
+                optimal: 32,
+                max: 256,
+            },
+            precision: InferencePrecision::Fp16,
+            timing_cache: Some("artifacts/timing.cache".into()),
+        };
+
+        let command = compiler
+            .command(Path::new("input.ts"), Path::new("output.ts"), 63)
+            .unwrap();
+        let arguments: Vec<_> = command.get_args().collect();
+
+        assert!(arguments.windows(2).any(|pair| pair
+            == [
+                OsStr::new("--timing-cache"),
+                OsStr::new("artifacts/timing.cache")
+            ]));
     }
 
     fn assert_linker_overrides_are_removed(command: &Command) {

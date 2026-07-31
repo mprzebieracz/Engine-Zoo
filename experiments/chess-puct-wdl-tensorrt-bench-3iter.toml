@@ -1,12 +1,8 @@
 format_version = 3
 seed = 1
 
-# Torch-TensorRT self-play paired with native training. The train command
-# exports and compiles model.trt.ts before the first iteration, then reloads
-# it after each native optimizer update.
-#
-# v6 defaults: stronger value training, longer games, larger replay window,
-# stronger self-play teacher (50% @ 400 sims), and Adam with cosine decay.
+# Three-iteration TensorRT training screen. Matches the v6 production recipe
+# except num_games=64 so compile and throughput stay measurable.
 
 [model]
 architecture = "chess-se"
@@ -17,21 +13,17 @@ se_hidden = 16
 value_head = { wdl = { hidden = 128 } }
 
 [self_play]
-num_games = 500
-# Validated on the 64-game H4 Torch-TensorRT screen: 112 threads with
-# preferred batch 128, 1 ms wait, and compile profile opt=128/max=256.
+num_games = 64
 threads = 112
 max_moves = 512
-progress_every = 100
+progress_every = 16
 
 [self_play.search]
 algorithm = "root-gumbel-puct"
 leaf_batch_size = 32
 
 [self_play.budget_schedule.playout-cap-randomization]
-# Half the positions get a strong Gumbel teacher; the rest stay cheap.
 full_probability = 0.5
-# Fast searches still contribute a light policy signal instead of value-only.
 fast_policy_weight = 0.25
 
 [self_play.budget_schedule.playout-cap-randomization.full.gumbel]
@@ -43,18 +35,14 @@ simulations = 128
 max_considered_actions = 8
 
 [replay]
-# ~30–35 recent iterations at ~60k positions/game-batch; was 500k (~8 iters).
 capacity = 2_000_000
 
 [training]
 batch_size = 2048
 train_steps = 80
 progress_every = 5
-# Keep optimizer work paced to fresh self-play (~1× over new positions).
 max_replay_reuse_per_iteration = 1.0
-# Match Lc0-style equal policy/value weighting; 0.25 was for oversampling.
 value_loss_weight = 1.0
-# Continuation-friendly Adam peak; cosine anneals over ~50k optimizer steps.
 lr = 0.0003
 weight_decay = 0.0001
 

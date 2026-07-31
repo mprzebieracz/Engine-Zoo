@@ -10,8 +10,9 @@ replay buffer retains older positions for diversity. Existing experiments leave
 this unset and preserve their configured training-step count.
 
 `training.value_loss_weight` defaults to `1.0` and scales only the value term
-in the combined objective. The H4 TensorRT chess recipe uses `0.25` to reduce
-value-head pressure on the shared trunk while preserving policy training.
+in the combined objective. The current H4 TensorRT chess recipe uses `1.0`
+(equal policy/value weighting). Older v2/v5 runs used `0.25` to reduce
+value-head pressure on the shared trunk.
 
 The trainer seeds each replay batch from the experiment seed and global step. A bounded scoped prefetch thread overlaps CPU sampling/encoding with device work without detached threads or unbounded memory. Each sampled batch transfers to the device once; microbatches are device views rather than repeated host-to-device copies.
 
@@ -29,21 +30,25 @@ weights, while the periodic archives provide rollback and evaluation points.
 
 ## Default chess recipe
 
-`scripts/train_chess.py` launches
+`scripts/train` (wrapper around `scripts/train_chess.py`) launches
 `experiments/chess-puct-wdl-tensorrt.toml` into
-`runs/chess-puct-wdl-tensorrt-v4` on CUDA. It uses Torch-TensorRT FP16
+`runs/chess-puct-wdl-tensorrt-v6` on CUDA. It uses Torch-TensorRT FP16
 self-play and native CUDA training with the validated H4 defaults: 112
 self-play threads, 32-leaf local MCTS batches, preferred inference batch 128,
 maximum batch 256, a 1 ms wait, and compile shapes opt=128 / max=256. New runs
-are seeded from `runs/chess-puct-wdl-tensorrt-v3/checkpoints/latest.safetensors`
+are seeded from
+`runs/chess-puct-wdl-tensorrt-v5/checkpoints/generation-000800.safetensors`
 unless `--seed-checkpoint` is overridden. The script discovers a matching
 Torch-TensorRT Python runtime automatically; use `--tensor-rt-python` only when
 an explicit interpreter override is needed. See
 [TensorRT inference](tensorrt.md) for runtime details.
 
-It uses Root-Gumbel PUCT: 25% of positions use a 256-playout, 16-action budget;
-the remainder use 64 playouts and 8 considered root actions. Fast positions
-retain value targets but have zero policy-target weight.
+It uses Root-Gumbel PUCT: 50% of positions use a 400-playout, 16-action budget;
+the remainder use 128 playouts and 8 considered root actions with
+`fast_policy_weight = 0.25`. Games are capped at 512 plies. Training uses
+Adam at peak LR `3e-4` with linear warmup then cosine decay to `3e-5` over
+50k steps, `value_loss_weight = 1.0`, replay capacity 2M, and
+`max_replay_reuse_per_iteration = 1.0`.
 
 ## Native chess fallback
 

@@ -2,6 +2,7 @@
 """Compile an Engine-zoo TorchScript export into an opt-in TensorRT module."""
 
 from argparse import ArgumentParser
+from pathlib import Path
 import warnings
 
 # Torch-TensorRT currently emits deprecation warnings from optional plugin
@@ -39,12 +40,26 @@ def main() -> None:
         metavar="0-5",
         help="TensorRT builder optimization level",
     )
+    parser.add_argument(
+        "--timing-cache",
+        type=Path,
+        help=(
+            "Request a persistent TensorRT builder timing cache. "
+            "The TorchScript frontend must support this artifact ABI."
+        ),
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
         parser.error("TensorRT compilation requires CUDA")
     if not 0 < args.min_batch_size <= args.opt_batch_size <= args.max_batch_size:
         parser.error("batch sizes must satisfy 0 < min <= opt <= max")
+    if args.timing_cache is not None:
+        parser.error(
+            "--timing-cache is unsupported by the installed Torch-TensorRT "
+            "TorchScript frontend; refusing to switch compiler frontends because "
+            "Rust inference requires a loadable TorchScript CModule"
+        )
 
     module = torch.jit.load(args.input, map_location="cuda").eval()
     compile_kwargs: dict[str, object] = dict(

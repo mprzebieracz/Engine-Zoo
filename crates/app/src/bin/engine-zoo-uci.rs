@@ -67,13 +67,15 @@ fn write_uci_options(out: &mut impl Write, settings: &Settings) -> anyhow::Resul
         "option name Threads type spin default {} min 1 max 256",
         settings.threads
     )?;
+    writeln!(out, "option name TensorRtModule type string default")?;
     writeln!(out, "uciok")?;
     Ok(())
 }
 
 fn set_option(engine: &mut ChessUciEngine, name: &str, value: String) -> anyhow::Result<()> {
     let name = name.to_ascii_lowercase();
-    let invalidates_model = matches!(name.as_str(), "model" | "rundir" | "device");
+    let invalidates_model =
+        matches!(name.as_str(), "model" | "rundir" | "device" | "tensorrtmodule");
 
     match name.as_str() {
         "model" => engine.settings.model = value,
@@ -83,6 +85,14 @@ fn set_option(engine: &mut ChessUciEngine, name: &str, value: String) -> anyhow:
         "temperature" => engine.settings.temperature = value.parse::<f32>()?,
         "openingplies" => engine.settings.opening_plies = value.parse::<usize>()?,
         "threads" => engine.settings.threads = value.parse::<usize>()?.max(1),
+        "tensorrtmodule" => {
+            engine.settings.tensor_rt_module = if value.trim().is_empty() {
+                None
+            }
+            else {
+                Some(PathBuf::from(value))
+            };
+        }
         _ => return Ok(()),
     }
 

@@ -39,7 +39,10 @@ cargo run -p engine_app --bin train -- run \
 cargo run -p engine_app --bin train -- inspect --run-dir runs/connect4-demo
 ```
 
-Chess configurations are in `experiments/`: PUCT/WDL, Full Gumbel/WDL, canonical scalar ablation, and the classic 19-plane / 20,480-action scalar model. The classic model remains a supported option for existing checkpoints; it is not a deprecated runtime path.
+Chess configurations are in `experiments/`: TensorRT PUCT/WDL (default),
+native PUCT/WDL fallback, classic 19-plane chess, Connect Four, and a small
+profiling/bench recipe. The classic model remains supported for existing
+checkpoints.
 
 ## Chess training and LibTorch
 
@@ -53,23 +56,22 @@ LibTorch for training. It requires the matching TensorRT runtime libraries and
 compiler environment described in [TensorRT inference](docs/tensorrt.md).
 
 ```bash
-python3 scripts/train_chess.py
+scripts/train
 ```
 
-The script initializes `runs/chess-puct-wdl-tensorrt-v4` from
-`experiments/chess-puct-wdl-tensorrt.toml` if needed, seeds it from the latest
-v3 checkpoint, and invokes `train run --forever` on CUDA with Torch-TensorRT
-self-play and the validated compile shapes (`opt=128`, `max=256`). TensorRT
-modules contain fixed weights, so each iteration performs TensorRT self-play,
-native training, then export and compilation for the next generation. Pass
-`--tensor-rt-python` only when the Torch-TensorRT environment is not found
-automatically.
+That launches `experiments/chess-puct-wdl-tensorrt.toml` into
+`runs/chess-puct-wdl-tensorrt-v6`, seeded from the v5 generation-800 archive,
+and invokes `train run --forever` on CUDA with Torch-TensorRT self-play and the
+validated compile shapes (`opt=128`, `max=256`). TensorRT modules contain fixed
+weights, so each iteration performs TensorRT self-play, native training, then
+export and compilation for the next generation. Pass `--tensor-rt-python` only
+when the Torch-TensorRT environment is not found automatically.
 
 For a system without the matching TensorRT stack, retain the same H4
 Root-Gumbel model and use the native fallback explicitly:
 
 ```bash
-python3 scripts/train_chess.py \
+scripts/train \
   --experiment experiments/chess-puct-wdl.toml \
   --run-dir runs/chess-puct-wdl
 ```
@@ -107,7 +109,7 @@ The repository has a reproducible `engine-bench` CLI covering search, representa
 - [Architecture](docs/architecture.md), [PUCT](docs/search/puct.md), and [Full Gumbel](docs/search/full-gumbel.md).
 - [Training](docs/training.md), [Chess representation](docs/chess-representation.md), and [reproducibility](docs/reproducibility.md).
 - [TensorRT inference](docs/tensorrt.md).
-- [Testing](docs/testing.md) and [archived refactor plan](docs/archive/architecture-refactor-plan-2026-07.md).
+- [Testing](docs/testing.md).
 
 ## License
 

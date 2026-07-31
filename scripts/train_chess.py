@@ -3,8 +3,8 @@
 
 Defaults match the validated H4 Torch-TensorRT self-play screen:
 112 threads, leaf batch 32, preferred batch 128, 1 ms wait, and TensorRT
-compile shapes opt=128 / max=256. New runs are seeded from the latest v2
-checkpoint unless --seed-checkpoint is overridden.
+compile shapes opt=128 / max=256. New runs are seeded from the v5
+generation-800 archive unless --seed-checkpoint is overridden.
 """
 
 from __future__ import annotations
@@ -19,9 +19,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EXPERIMENT = ROOT / "experiments/chess-puct-wdl-tensorrt.toml"
-DEFAULT_RUN_DIR = ROOT / "runs/chess-puct-wdl-tensorrt-v5"
+DEFAULT_RUN_DIR = ROOT / "runs/chess-puct-wdl-tensorrt-v6"
 DEFAULT_SEED_CHECKPOINT = (
-    ROOT / "runs/chess-puct-wdl-tensorrt-v2/checkpoints/latest.safetensors"
+    ROOT
+    / "runs/chess-puct-wdl-tensorrt-v5/checkpoints/generation-000800.safetensors"
 )
 DEFAULT_OPT_BATCH = 128
 DEFAULT_MAX_BATCH = 256
@@ -270,6 +271,15 @@ def main() -> int:
         default=DEFAULT_MAX_BATCH,
         help=f"TensorRT dynamic max batch (default: {DEFAULT_MAX_BATCH})",
     )
+    parser.add_argument(
+        "--tensor-rt-timing-cache",
+        type=Path,
+        help=(
+            "Experimental TensorRT builder timing-cache path. "
+            "The current TorchScript frontend rejects it safely because it "
+            "cannot serialize a compatible cached build."
+        ),
+    )
     args = parser.parse_args()
 
     if args.tensor_rt_python is None:
@@ -337,6 +347,8 @@ def main() -> int:
     ]
     if args.tensor_rt_compiler is not None:
         command.extend(["--tensor-rt-compiler", args.tensor_rt_compiler])
+    if args.tensor_rt_timing_cache is not None:
+        command.extend(["--tensor-rt-timing-cache", args.tensor_rt_timing_cache])
 
     return _run_training(command, environment)
 
