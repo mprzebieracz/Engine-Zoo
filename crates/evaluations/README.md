@@ -9,7 +9,7 @@ Checkpoint evaluation is run explicitly with the current Rust evaluation binarie
 Useful training settings:
 
 ```bash
-python3 scripts/train_chess.py
+scripts/train
 ```
 
 The arena and Stockfish evaluation binaries accept their current parameters directly; use `--help` for the available options.

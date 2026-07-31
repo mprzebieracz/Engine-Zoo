@@ -35,6 +35,20 @@ enum Command {
         #[arg(long)]
         run_dir: PathBuf,
     },
+    /// Print the encoded-state channel count for an experiment TOML. Used by
+    /// the TensorRT compile helper to size `--channels` without duplicating
+    /// the ModelSpec shape math in Python.
+    Channels {
+        #[arg(long)]
+        experiment: PathBuf,
+    },
+    /// Ensure a run directory has `experiment.toml` (migrating legacy
+    /// `config.json` / `experiment.json` when needed) and print its path.
+    /// Used by the arena wrapper before TensorRT compilation.
+    EnsureExperiment {
+        #[arg(long)]
+        run_dir: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -46,7 +60,23 @@ fn main() -> Result<()> {
             device,
         } => export_torchscript(experiment, checkpoint, output, select_device(device)?),
         Command::Inspect { run_dir } => inspect(run_dir),
+        Command::Channels { experiment } => channels(experiment),
+        Command::EnsureExperiment { run_dir } => ensure_experiment(run_dir),
     }
+}
+
+fn ensure_experiment(run_dir: PathBuf) -> Result<()> {
+    let (run, _, _) = RunDir::open_or_create(&run_dir, || {
+        panic!("no experiment found at {}", run_dir.display())
+    })?;
+    println!("{}", run.experiment_path().display());
+    Ok(())
+}
+
+fn channels(experiment_path: PathBuf) -> Result<()> {
+    let experiment = ExperimentConfig::read_toml(&experiment_path)?;
+    println!("{}", experiment.model.state_shape()[0]);
+    Ok(())
 }
 
 fn export_torchscript(

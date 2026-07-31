@@ -1,28 +1,55 @@
-# Candidate-versus-roster arena. Keep checkpoint files under data/models/alphazero.
-# All paths are relative to this file.
+# Candidate-versus-roster arena. All paths are relative to this file.
+#
+# `architecture` is a human label for the report. The ModelSpec actually loaded
+# comes from the checkpoint's run directory (`experiment.toml`, or a migrated
+# legacy `config.json`).
+#
+# `backend = "native"` loads safetensors via tch/LibTorch (simple, portable).
+# `backend = "tensor-rt"` compiles once into `settings.trt_cache_dir` via
+# `scripts/arena_big.py` (faster, but TensorRT engines are GPU-specific).
 
 [candidate]
-name = "candidate"
-path = "../data/models/alphazero/candidate.safetensors"
-architecture = "chess-se"
-simulations = 256
+name = "v6-latest"
+path = "../runs/chess-puct-wdl-tensorrt-v6/checkpoints/latest.safetensors"
+architecture = "chess-se-h4"
+simulations = 400
 device = "cuda"
+backend = "native"
 
 [[opponents]]
-name = "baseline"
-path = "../data/models/alphazero/baseline.safetensors"
-architecture = "chess-se"
-simulations = 256
+name = "v5-gen800"
+path = "../runs/chess-puct-wdl-tensorrt-v5/checkpoints/generation-000800.safetensors"
+architecture = "chess-se-h4"
+simulations = 400
 device = "cuda"
+backend = "native"
+
+[[opponents]]
+name = "v2-latest"
+path = "../runs/chess-puct-wdl-tensorrt-v2/checkpoints/latest.safetensors"
+architecture = "chess-se-h4"
+simulations = 400
+device = "cuda"
+backend = "native"
 
 [settings]
-games = 40
-simulations = 256
+games = 20
+simulations = 400
 device = "cuda"
 concurrency = 1
 time_control = "1000000+0"
 max_moves = 512
 opening_plies = 8
 output_dir = "../data/evaluations/arena"
-fastchess = "fastchess"
-uci = "../target/release/engine-zoo-uci"
+fastchess = "../crates/evaluations/bin/fastchess/fastchess"
+
+# Optional TensorRT settings (used only when a model sets backend = "tensor-rt").
+trt_cache_dir = "../data/evaluations/trt-cache"
+# The wrapper derives the compile profile from each checkpoint's
+# experiment.toml. Set trt_override_batch_sizes = true only for an explicit
+# benchmark profile; a mismatch can make a cached module much slower.
+# trt_override_batch_sizes = true
+# trt_min_batch_size = 1
+# trt_opt_batch_size = 128
+# trt_max_batch_size = 256
+tensor_rt_compiler = "../scripts/compile_tensorrt.py"

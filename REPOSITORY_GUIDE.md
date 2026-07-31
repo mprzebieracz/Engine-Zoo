@@ -30,9 +30,9 @@ engine_core → games, search → alphazero → engine_app, checkpoint-eval
 
 The workspace uses Rust 2021. Release builds enable thin LTO, trading extra link time for better optimized binaries; development builds use optimization level 1 so the numerical/search code is less misleadingly slow while still compiling reasonably quickly. `Cargo.lock` pins the resolved dependency graph for reproducible builds.
 
-`README.md` is the project entry point; `rustfmt.toml` contains formatting policy; `LICENSE` records the GPL-3.0-or-later license. `experiments/` holds immutable, checked-in TOML specifications for Connect Four PUCT, chess PUCT/WDL, chess Full Gumbel/WDL, a canonical scalar ablation, and classic chess. Root-level generated Fastchess data and archived upload snapshots are intentionally not repository inputs.
+`README.md` is the project entry point; `rustfmt.toml` contains formatting policy; `LICENSE` records the GPL-3.0-or-later license. `experiments/` holds immutable, checked-in TOML specifications for the default TensorRT chess recipe, its native fallback, classic chess, Connect Four, and profiling/bench fixtures. Root-level generated Fastchess data and archived upload snapshots are intentionally not repository inputs.
 
-The historical implementation plan lives at `docs/archive/architecture-refactor-plan-2026-07.md`. The post-refactor audit is a review input, not runtime configuration. `scripts/make_lichess_easy_suite.py` and `crates/evaluations/install_stockfish.py` are opt-in tools rather than build inputs.
+`crates/evaluations/install_stockfish.py` is an opt-in tool rather than a build input.
 
 ## 2. The vocabulary that makes the rest make sense
 
@@ -203,11 +203,11 @@ The page sequence is deliberately linear:
 
 The Python scripts are deliberately thin wrappers around Rust binaries, not duplicate engine implementations.
 
-- `scripts/train_chess.py` exposes editable defaults, builds release `train`, and runs continuous chess-v2 training.
-- `scripts/serve_agent.py` reads run metadata, builds release `engine-zoo`, starts `serve`, and inserts/replaces a matching entry in the UI agent registry. This is convenient locally; it intentionally edits `web/static/config/agents.json`.
-- `scripts/arena_chess.py` builds UCI/evaluation binaries and launches an arena between candidate/baseline checkpoints.
-- `scripts/eval_chess_puzzles.py` launches the deterministic puzzle evaluator.
-- `scripts/make_lichess_easy_suite.py` is an optional suite-construction helper for Lichess-derived examples.
+- `scripts/train` / `scripts/train_chess.py` expose editable defaults, build release `train`, and run continuous chess-v6 TensorRT training (seeded from v5 gen-800).
+- `scripts/serve_agent.py` reads run metadata, builds release `engine-zoo`, starts `serve`, and replaces the UI agent registry with human + one local agent.
+- `scripts/arena_big.py` drives multi-opponent arenas from `configs/arena.toml`.
+- `scripts/bench_tensorrt_training.py` runs the short TensorRT training screen.
+- `scripts/compile_tensorrt.py` compiles a TorchScript checkpoint into a TensorRT module.
 
 The expected production/research loop is: choose a model/run configuration → self-play with MCTS → append sparse trajectories to replay → train network → checkpoint/promote candidate → use puzzles for fast regression checks → use paired arenas/Stockfish for strength checks → serve the selected checkpoint for people or the web UI.
 
