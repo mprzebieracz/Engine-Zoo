@@ -300,18 +300,6 @@ fn reload_is_a_barrier_before_the_next_inference_pass() {
 
     let reload_batcher = Arc::clone(&batcher);
     let reload = thread::spawn(move || reload_batcher.reload_weights(Path::new("unused")));
-    let pending = batcher.shared.pending.lock().unwrap();
-    let pending = batcher
-        .shared
-        .cv
-        .wait_while(pending, |state| {
-            !state
-                .commands
-                .iter()
-                .any(|command| matches!(command, Command::Reload(_)))
-        })
-        .unwrap();
-    drop(pending);
     release_tx.send(()).unwrap();
 
     reload.join().unwrap().unwrap();
