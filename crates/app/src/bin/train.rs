@@ -110,7 +110,8 @@ fn run(args: RunArgs) -> Result<()> {
     let (_, experiment, state) = RunDir::open(&args.run_dir)?;
     let limit = if args.forever {
         RunLimit::Forever
-    } else {
+    }
+    else {
         RunLimit::Iterations(args.iterations)
     };
     anyhow::ensure!(
@@ -273,7 +274,8 @@ fn print_iteration_report(report: &alphazero::IterationReport, elapsed: std::tim
             training.forward_backward_seconds,
             training.optimizer_seconds,
         );
-    } else {
+    }
+    else {
         println!("no training steps configured");
     }
 
@@ -294,7 +296,8 @@ fn tensor_rt_compiler(
     let script = args.tensor_rt_compiler.unwrap_or_else(|| {
         if experiment.inference.engine == InferenceEngine::TensorRtRaw {
             default_raw_tensor_rt_compiler_script()
-        } else {
+        }
+        else {
             default_tensor_rt_compiler_script()
         }
     });
@@ -317,11 +320,14 @@ fn tensor_rt_compiler(
     );
     let timing_cache = if args.disable_tensor_rt_timing_cache {
         TimingCachePolicy::Disabled
-    } else if let Some(path) = args.tensor_rt_timing_cache {
+    }
+    else if let Some(path) = args.tensor_rt_timing_cache {
         TimingCachePolicy::Explicit(path)
-    } else if experiment.inference.engine == InferenceEngine::TensorRtRaw {
+    }
+    else if experiment.inference.engine == InferenceEngine::TensorRtRaw {
         TimingCachePolicy::Auto
-    } else {
+    }
+    else {
         TimingCachePolicy::Disabled
     };
 
@@ -349,7 +355,8 @@ fn compile_tensor_rt_generation(
         "{} TensorRT artifact in {:.3}s",
         if artifact.reused {
             "reused"
-        } else {
+        }
+        else {
             "compiled"
         },
         started.elapsed().as_secs_f64(),
