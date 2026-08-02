@@ -22,10 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EXPERIMENT = ROOT / "experiments/chess-puct-wdl-tensorrt.toml"
 DEFAULT_RUN_DIR = ROOT / "runs/chess-puct-wdl-tensorrt-v6"
-DEFAULT_SEED_CHECKPOINT = (
-    ROOT
-    / "runs/chess-puct-wdl-tensorrt-v5/checkpoints/generation-000800.safetensors"
-)
+DEFAULT_SEED_CHECKPOINT = None
 DEFAULT_OPT_BATCH = 128
 DEFAULT_MAX_BATCH = 256
 DEFAULT_MIN_BATCH = 1
@@ -117,21 +114,8 @@ def _raw_tensor_rt_runtime_environment(python: Path) -> dict[str, str]:
         check=False,
     )
     nvidia_lib = Path(probed.stdout.strip()) if probed.returncode == 0 else Path()
-    if not nvidia_lib.is_dir():
-        nvidia_lib = (
-            Path.home()
-            / "venvs/engine-zoo-trt-py313/lib/python3.13/site-packages/tensorrt_libs"
-        )
     if nvidia_lib.is_dir():
         library_paths.append(str(nvidia_lib))
-
-    library_paths.extend(
-        [
-            "/opt/cuda/targets/x86_64-linux/lib",
-            "/opt/cuda/lib64",
-            "/usr/lib",
-        ]
-    )
     if existing := environment.get("LD_LIBRARY_PATH"):
         library_paths.append(existing)
     environment["LD_LIBRARY_PATH"] = ":".join(library_paths)
@@ -202,18 +186,12 @@ def _find_tensor_rt_python(*, raw: bool) -> Path | None:
     if configured:
         candidates.append(Path(configured).expanduser())
 
-    candidates.insert(0, Path.home() / "venvs/engine-zoo-trt-py313/bin/python")
-
     for environment in ("VIRTUAL_ENV", "CONDA_PREFIX"):
         prefix = os.environ.get(environment)
         if prefix:
             candidates.append(Path(prefix) / "bin/python")
 
     candidates.append(Path(sys.executable))
-
-    for parent in (Path.home() / "venvs", Path.home() / ".venvs"):
-        if parent.is_dir():
-            candidates.extend(parent.glob("*/bin/python"))
 
     for relative in (
         ".venv/engine-zoo-trt/bin/python",
@@ -337,7 +315,7 @@ def main() -> int:
         "--seed-checkpoint",
         type=Path,
         default=DEFAULT_SEED_CHECKPOINT,
-        help="Checkpoint copied into a newly initialized run before the first compile",
+        help="Checkpoint copied into a newly initialized run (required; historical checkpoints are not bundled)",
     )
     parser.add_argument(
         "--cache",
@@ -437,6 +415,8 @@ def main() -> int:
             check=True,
             env=environment,
         )
+        if args.seed_checkpoint is None:
+            parser.error("--seed-checkpoint is required; no historical checkpoint is bundled")
         _seed_checkpoint(args.run_dir, args.seed_checkpoint)
 
     backend = "tensor-rt-raw" if raw_backend else "tensor-rt-torch-script"

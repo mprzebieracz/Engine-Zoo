@@ -24,10 +24,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EXPERIMENT = ROOT / "experiments/chess-puct-wdl-tensorrt-bench-3iter.toml"
-DEFAULT_SEED = (
-    ROOT
-    / "runs/chess-puct-wdl-tensorrt-v5/checkpoints/generation-000800.safetensors"
-)
 DEFAULT_OPT = 128
 DEFAULT_MAX = 256
 DEFAULT_MIN = 1
@@ -89,8 +85,14 @@ def _find_tensor_rt_python(hint: Path | None) -> Path | None:
         candidates.append(hint)
     if configured := os.environ.get("TRT_PYTHON"):
         candidates.append(Path(configured).expanduser())
-    candidates.append(Path.home() / "venvs/engine-zoo-trt-py313/bin/python")
-    candidates.append(Path("/tmp/engine-zoo-arena/venv/bin/python"))
+    candidates.extend(
+        ROOT / relative
+        for relative in (
+            ".venv/bin/python",
+            ".venv/engine-zoo-trt/bin/python",
+            ".venv/engine-zoo-trt-py313/bin/python",
+        )
+    )
     for environment in ("VIRTUAL_ENV", "CONDA_PREFIX"):
         if prefix := os.environ.get(environment):
             candidates.append(Path(prefix) / "bin/python")
@@ -211,7 +213,7 @@ def main() -> int:
         type=Path,
         default=ROOT / "runs/chess-puct-wdl-tensorrt-bench-3iter",
     )
-    parser.add_argument("--seed-checkpoint", type=Path, default=DEFAULT_SEED)
+    parser.add_argument("--seed-checkpoint", type=Path, required=True)
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="cuda")
     parser.add_argument("--tensor-rt-python", type=Path)
