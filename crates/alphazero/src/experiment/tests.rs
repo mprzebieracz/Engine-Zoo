@@ -207,6 +207,7 @@ fn version_one_state_migrates_with_a_new_global_game_sequence() {
         }"#,
     )
     .unwrap();
+    drop(run);
 
     let (_, _, state) = RunDir::open_or_create(&root, config).unwrap();
     assert_eq!(state.format_version, STATE_FORMAT_VERSION);
