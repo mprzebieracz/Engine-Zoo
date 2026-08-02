@@ -89,16 +89,19 @@ def _find_tensor_rt_python(hint: Path | None) -> Path | None:
     if configured:
         candidates.append(Path(configured).expanduser())
 
-    candidates.append(Path.home() / "venvs/engine-zoo-trt-py313/bin/python")
-    candidates.append(Path("/tmp/engine-zoo-arena/venv/bin/python"))
+    candidates.extend(
+        ROOT / relative
+        for relative in (
+            ".venv/bin/python",
+            ".venv/engine-zoo-trt/bin/python",
+            ".venv/engine-zoo-trt-py313/bin/python",
+        )
+    )
     for environment in ("VIRTUAL_ENV", "CONDA_PREFIX"):
         prefix = os.environ.get(environment)
         if prefix:
             candidates.append(Path(prefix) / "bin/python")
     candidates.append(Path(sys.executable))
-    for parent in (Path.home() / "venvs", Path.home() / ".venvs"):
-        if parent.is_dir():
-            candidates.extend(parent.glob("*/bin/python"))
     for relative in (
         ".venv/engine-zoo-trt/bin/python",
         ".venv/engine-zoo-trt-py313/bin/python",
