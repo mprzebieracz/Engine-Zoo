@@ -55,7 +55,10 @@ Select the backend in the experiment, not with a cache flag:
 [inference]
 engine = "tensor-rt-raw"
 compiled_artifact = "model.raw.engine"
+# Native-model precision remains `fp16` or `fp32`; this explicitly selects
+# the TensorRT build/I/O contract.
 precision = "fp16"
+tensor_rt_precision = "fp16" # or "mixed-fp32-io-fp16-tactics", "fp32"
 preferred_batch_size = 128
 max_batch_size = 256
 ```

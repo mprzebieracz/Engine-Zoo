@@ -99,16 +99,18 @@ impl RawTensorRtBackend {
         kind: Kind,
         device: Device,
     ) -> Tensor {
+        // Keep an exact column width so narrow() views stay contiguous. A wider
+        // grow-only buffer makes row-strided views that TRT/FFI reject.
         let needs_allocation = match slot {
             Some(tensor) => {
-                tensor.size()[0] < rows || tensor.size()[1] < columns || tensor.kind() != kind
+                tensor.size()[0] < rows || tensor.size()[1] != columns || tensor.kind() != kind
             }
             None => true,
         };
 
         if needs_allocation {
-            let old_columns = slot.as_ref().map_or(0, |tensor| tensor.size()[1]);
-            let tensor = Tensor::zeros([rows, columns.max(old_columns)], (kind, Device::Cpu));
+            let old_rows = slot.as_ref().map_or(0, |tensor| tensor.size()[0]);
+            let tensor = Tensor::zeros([rows.max(old_rows), columns], (kind, Device::Cpu));
             *slot = Some(tensor.pin_memory(device));
         }
 
