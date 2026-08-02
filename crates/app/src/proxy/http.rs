@@ -88,14 +88,17 @@ pub fn resolve_model(run_dir: &Path, model: &str) -> PathBuf {
                 let path = PathBuf::from(other);
                 if path.is_absolute() {
                     path
-                } else if other.starts_with("ckpt_") || other.starts_with("generation-") {
+                }
+                else if other.starts_with("ckpt_") || other.starts_with("generation-") {
                     let file = if other.ends_with(".safetensors") {
                         other.to_string()
-                    } else {
+                    }
+                    else {
                         format!("{other}.safetensors")
                     };
                     run_dir.join("checkpoints").join(file)
-                } else {
+                }
+                else {
                     run_dir.join(path)
                 }
             }
@@ -119,18 +122,11 @@ fn named_model_path(run_dir: &Path, name: &str, fallback: Option<&str>) -> PathB
 
 pub fn open_existing_run(root: &Path, expected_game: &str) -> Result<(RunDir, ExperimentConfig)> {
     anyhow::ensure!(
-        root.join("experiment.toml").is_file()
-            || root.join("experiment.json").is_file()
-            || root.join("config.json").is_file(),
+        root.join("experiment.toml").is_file(),
         "no run found at {}; train first or pass --run-dir",
         root.display()
     );
-    let (run, cfg, _) = RunDir::open_or_create(root, || {
-        panic!(
-            "no run found at {}; train first or pass --run-dir",
-            root.display()
-        )
-    })?;
+    let (run, cfg, _) = RunDir::open(root)?;
     anyhow::ensure!(
         matches!(
             (cfg.model.game(), expected_game),

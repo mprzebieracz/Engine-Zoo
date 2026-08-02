@@ -80,7 +80,7 @@ fn effective_experiment(args: &ChessSelfPlayArgs) -> Result<ExperimentConfig> {
                 "--checkpoint is required for --backend native"
             );
             experiment.inference.engine = InferenceEngine::Native;
-            experiment.inference.tensor_rt_module = None;
+            experiment.inference.compiled_artifact = None;
         }
         ChessInferenceBackend::TensorRt => {
             let module = args
@@ -88,7 +88,7 @@ fn effective_experiment(args: &ChessSelfPlayArgs) -> Result<ExperimentConfig> {
                 .clone()
                 .context("--tensor-rt-module is required for --backend tensor-rt")?;
             experiment.inference.engine = InferenceEngine::TensorRtTorchScript;
-            experiment.inference.tensor_rt_module = Some(module);
+            experiment.inference.compiled_artifact = Some(module);
         }
     }
 
@@ -107,7 +107,7 @@ fn run_once(
                 .as_deref()
                 .expect("validated native checkpoint"),
         ),
-        ChessInferenceBackend::TensorRt => InferenceSource::TensorRtModule(
+        ChessInferenceBackend::TensorRt => InferenceSource::TensorRtTorchScript(
             args.tensor_rt_module
                 .as_deref()
                 .expect("validated TensorRT module"),

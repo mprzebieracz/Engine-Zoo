@@ -14,7 +14,7 @@ use crate::{
     AlphaZeroRepresentation, BatcherStats, ChessHistory, GameKind, Network, ReplayBuffer,
     TrainMetrics, Trainer, TrainingSeed,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use engine_core::GameState;
 use games::{ChessPosition, Connect4};
 use serde::Serialize;
@@ -55,7 +55,7 @@ pub enum NextInference {
     NativeReloaded,
     TensorRtRecompileRequired {
         checkpoint: PathBuf,
-        tensor_rt_module: PathBuf,
+        compiled_artifact: PathBuf,
     },
 }
 
@@ -132,7 +132,7 @@ impl TrainingRun {
     /// [`Self::reload_tensor_rt_inference`] once the configured module has
     /// been rebuilt, before requesting another generation.
     pub fn open(path: &Path, device: Device) -> Result<Self> {
-        let (run_dir, experiment, state) = RunDir::open(path)?;
+        let (run_dir, experiment, state) = RunDir::open_writer(path)?;
         Self::from_opened(run_dir, experiment, state, device)
     }
 
@@ -146,7 +146,7 @@ impl TrainingRun {
         device: Device,
     ) -> Result<Self> {
         experiment.validate()?;
-        let (run_dir, _, state) = RunDir::open(path)?;
+        let (run_dir, _, state) = RunDir::open_writer(path)?;
         Self::from_opened(run_dir, experiment, state, device)
     }
 
@@ -157,7 +157,7 @@ impl TrainingRun {
         device: Device,
     ) -> Result<Self> {
         let (var_store, network) = load_training_model(&run_dir, &experiment, &mut state, device)?;
-        let inference = load_inference_service(&run_dir, &experiment, device)?;
+        let inference = load_inference_service(&run_dir, &experiment, &state, device)?;
 
         let inner = match experiment.model.game() {
             GameKind::Connect4 => TrainingRunKind::Connect4(open_connect4(
@@ -301,13 +301,6 @@ where
         self.run_dir
             .write_latest(&mut state, |path| Ok(self.var_store.save(path)?))?;
 
-        if state.iteration % 25 == 0 {
-            self.run_dir
-                .write_archived(state.model_generation, |path| {
-                    Ok(self.var_store.save(path)?)
-                })?;
-        }
-
         Ok(state)
     }
 
@@ -315,7 +308,7 @@ where
         if let Some(requirement) = &self.pending_tensor_rt_recompile {
             let NextInference::TensorRtRecompileRequired {
                 checkpoint,
-                tensor_rt_module,
+                compiled_artifact,
             } = requirement
             else {
                 unreachable!("only TensorRT requirements are stored as pending")
@@ -324,7 +317,7 @@ where
             anyhow::bail!(
                 "TensorRT inference is stale after checkpoint {}; compile it into {} and call reload_tensor_rt_inference before another self-play generation",
                 checkpoint.display(),
-                tensor_rt_module.display(),
+                compiled_artifact.display(),
             );
         }
 
@@ -342,7 +335,7 @@ where
 
         let requirement = NextInference::TensorRtRecompileRequired {
             checkpoint: self.run_dir.latest_path(),
-            tensor_rt_module: tensor_rt_module_path(&self.run_dir, &self.experiment)?,
+            compiled_artifact: compiled_artifact_path(&self.run_dir, &self.experiment)?,
         };
         self.pending_tensor_rt_recompile = Some(requirement.clone());
 
@@ -362,7 +355,8 @@ where
             "TensorRT inference is already current; run an iteration before reloading it"
         );
 
-        let inference = load_inference_service(&self.run_dir, &self.experiment, self.device)?;
+        let inference =
+            load_inference_service(&self.run_dir, &self.experiment, &self.state, self.device)?;
         let workers = (self.make_workers)(&inference, self.experiment.self_play.clone())?;
 
         self.workers = workers;
@@ -434,11 +428,14 @@ fn load_training_model(
 fn load_inference_service(
     run_dir: &RunDir,
     experiment: &ExperimentConfig,
+    state: &RunState,
     device: Device,
 ) -> Result<InferenceService> {
     match experiment.inference.engine {
         InferenceEngine::Native => {
-            let checkpoint = run_dir.latest_path();
+            let checkpoint = run_dir
+                .latest_checkpoint(state)
+                .context("run has no current checkpoint")?;
             InferenceService::load(
                 &experiment.model,
                 InferenceSource::Checkpoint(&checkpoint),
@@ -446,11 +443,24 @@ fn load_inference_service(
                 &experiment.inference,
             )
         }
-        InferenceEngine::TensorRtTorchScript | InferenceEngine::TensorRtRaw => {
-            let module = tensor_rt_module_path(run_dir, experiment)?;
+        InferenceEngine::TensorRtTorchScript => {
+            let artifact = compiled_artifact_path(run_dir, experiment)?;
+            validate_checkpoint_identity(&artifact, state)?;
+
             InferenceService::load(
                 &experiment.model,
-                InferenceSource::TensorRtModule(&module),
+                InferenceSource::TensorRtTorchScript(&artifact),
+                device,
+                &experiment.inference,
+            )
+        }
+        InferenceEngine::TensorRtRaw => {
+            let artifact = compiled_artifact_path(run_dir, experiment)?;
+            validate_checkpoint_identity(&artifact, state)?;
+
+            InferenceService::load(
+                &experiment.model,
+                InferenceSource::TensorRtEngine(&artifact),
                 device,
                 &experiment.inference,
             )
@@ -458,26 +468,42 @@ fn load_inference_service(
     }
 }
 
-fn tensor_rt_module_path(run_dir: &RunDir, experiment: &ExperimentConfig) -> Result<PathBuf> {
-    let module = experiment
+fn compiled_artifact_path(run_dir: &RunDir, experiment: &ExperimentConfig) -> Result<PathBuf> {
+    let artifact = experiment
         .inference
-        .tensor_rt_module
+        .compiled_artifact
         .as_ref()
         .expect("validated TensorRT inference configuration");
-    let module = if module.is_absolute() {
-        module.clone()
+    let artifact = if artifact.is_absolute() {
+        artifact.clone()
     }
     else {
-        run_dir.root().join(module)
+        run_dir.root().join(artifact)
     };
 
     anyhow::ensure!(
-        module.is_file(),
-        "missing TensorRT inference module: {}",
-        module.display()
+        artifact.is_file(),
+        "missing TensorRT compiled artifact: {}",
+        artifact.display()
     );
 
-    Ok(module)
+    Ok(artifact)
+}
+
+fn validate_checkpoint_identity(artifact: &Path, state: &RunState) -> Result<()> {
+    let checkpoint = state
+        .checkpoint_identity
+        .as_ref()
+        .context("run has no current checkpoint identity")?;
+    let manifest = crate::artifact::read_manifest(artifact)?;
+    if manifest.checkpoint_sha256 != checkpoint.sha256 {
+        return Err(crate::artifact::RecompileRequired {
+            reason: crate::artifact::RecompileReason::StaleIdentity("checkpoint_sha256"),
+        }
+        .into());
+    }
+
+    Ok(())
 }
 
 fn log_weights_only_resume(run_dir: &RunDir) -> Result<()> {
@@ -660,13 +686,13 @@ mod tests {
     fn tensor_rt_requirement_identifies_the_checkpoint_and_module() {
         let requirement = NextInference::TensorRtRecompileRequired {
             checkpoint: PathBuf::from("checkpoints/latest.safetensors"),
-            tensor_rt_module: PathBuf::from("model.trt.ts"),
+            compiled_artifact: PathBuf::from("model.trt.ts"),
         };
 
         let value = serde_json::to_value(&requirement).unwrap();
 
         assert_eq!(value["kind"], "tensor-rt-recompile-required");
         assert_eq!(value["checkpoint"], "checkpoints/latest.safetensors");
-        assert_eq!(value["tensor_rt_module"], "model.trt.ts");
+        assert_eq!(value["compiled_artifact"], "model.trt.ts");
     }
 }

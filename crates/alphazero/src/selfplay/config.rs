@@ -217,8 +217,8 @@ impl Default for ResignationConfig {
 impl ResignationConfig {
     fn validate(self) -> Result<()> {
         ensure!(
-            self.threshold.is_finite(),
-            "resignation threshold must be finite"
+            self.threshold.is_finite() && (-1.0..=0.0).contains(&self.threshold),
+            "resignation threshold must be in [-1, 0]"
         );
         ensure!(
             self.consecutive_moves > 0,
@@ -229,6 +229,35 @@ impl ResignationConfig {
             "resignation disable_probability must be in [0, 1]"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod resignation_tests {
+    use super::ResignationConfig;
+
+    #[test]
+    fn losing_threshold_accepts_both_boundaries() {
+        for threshold in [-1.0, 0.0] {
+            assert!(ResignationConfig {
+                threshold,
+                ..ResignationConfig::default()
+            }
+            .validate()
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn losing_threshold_rejects_values_outside_the_value_range() {
+        for threshold in [-1.01, 0.01, f32::NAN] {
+            assert!(ResignationConfig {
+                threshold,
+                ..ResignationConfig::default()
+            }
+            .validate()
+            .is_err());
+        }
     }
 }
 

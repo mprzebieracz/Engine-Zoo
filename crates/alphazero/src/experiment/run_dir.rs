@@ -1,17 +1,17 @@
 use super::migration::migrate_old_config;
-use super::state::RunStateV1;
+use super::state::{CheckpointIdentity, RunStateV1, RunStateV2};
 use super::{
     migration::{migrate_version_two, VersionTwoExperiment},
     ExperimentConfig, RunState, STATE_FORMAT_VERSION,
 };
 use anyhow::{Context, Result};
-use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub struct RunDir {
     root: PathBuf,
+    writer_lock: Option<File>,
 }
 
 impl RunDir {
@@ -19,6 +19,7 @@ impl RunDir {
     pub fn open(root: &Path) -> Result<(Self, ExperimentConfig, RunState)> {
         let run = Self {
             root: root.to_path_buf(),
+            writer_lock: None,
         };
         anyhow::ensure!(
             run.experiment_path().is_file(),
@@ -33,18 +34,30 @@ impl RunDir {
         Ok((
             run,
             read_experiment(&root.join("experiment.toml"))?,
-            read_state(&root.join("state.json"))?,
+            read_state(&root.join("state.json"), root)?,
         ))
+    }
+
+    pub fn open_writer(root: &Path) -> Result<(Self, ExperimentConfig, RunState)> {
+        let (mut run, _, _) = Self::open(root)?;
+        run.acquire_writer_lock()?;
+        let config = read_experiment(&run.experiment_path())?;
+        let mut state = read_state(&run.state_path(), root)?;
+        run.make_checkpoint_generation_addressed(&mut state)?;
+
+        Ok((run, config, state))
     }
 
     pub fn open_or_create(
         root: &Path,
         make_config: impl FnOnce() -> ExperimentConfig,
     ) -> Result<(Self, ExperimentConfig, RunState)> {
-        let run = Self {
+        let mut run = Self {
             root: root.to_path_buf(),
+            writer_lock: None,
         };
         fs::create_dir_all(run.checkpoints_dir())?;
+        run.acquire_writer_lock()?;
         let config = if run.experiment_path().is_file() {
             read_experiment(&run.experiment_path())?
         }
@@ -66,14 +79,16 @@ impl RunDir {
             config
         };
         config.validate()?;
-        let state = if run.state_path().is_file() {
-            read_state(&run.state_path())?
+        let mut state = if run.state_path().is_file() {
+            read_state(&run.state_path(), &run.root)?
         }
         else {
             let state = RunState::default();
             run.write_state(&state)?;
             state
         };
+        run.make_checkpoint_generation_addressed(&mut state)?;
+
         Ok((run, config, state))
     }
 
@@ -84,8 +99,9 @@ impl RunDir {
     /// Creates a run from a validated TOML experiment. Existing experiments
     /// are never overwritten: algorithm and model settings are immutable.
     pub fn initialize(root: &Path, config: ExperimentConfig) -> Result<(Self, RunState)> {
-        let run = Self {
+        let mut run = Self {
             root: root.to_path_buf(),
+            writer_lock: None,
         };
         if root.exists() {
             anyhow::ensure!(
@@ -103,6 +119,7 @@ impl RunDir {
         );
         config.validate()?;
         fs::create_dir_all(run.checkpoints_dir())?;
+        run.acquire_writer_lock()?;
         write_toml_atomic(&run.experiment_path(), &config)?;
         let state = RunState::default();
         run.write_state(&state)?;
@@ -134,9 +151,9 @@ impl RunDir {
 
     pub fn latest_checkpoint(&self, state: &RunState) -> Option<PathBuf> {
         state
-            .latest_checkpoint
+            .checkpoint_identity
             .as_ref()
-            .map(|path| self.root.join(path))
+            .map(|identity| self.root.join(&identity.relative_path))
             .filter(|path| path.is_file())
     }
 
@@ -147,10 +164,18 @@ impl RunDir {
         state: &mut RunState,
         write_model: impl FnOnce(&Path) -> Result<()>,
     ) -> Result<()> {
-        let latest = self.latest_path();
-        write_model_atomically(&latest, write_model)?;
-        state.latest_checkpoint = Some(relative_to_root(&self.root, &latest)?);
-        self.write_state(state)
+        self.ensure_writer()?;
+
+        let checkpoint = self.archived_checkpoint_path(state.model_generation);
+        write_model_immutably(&checkpoint, write_model)?;
+
+        state.checkpoint_identity = Some(CheckpointIdentity {
+            generation: state.model_generation,
+            relative_path: relative_to_root(&self.root, &checkpoint)?,
+            sha256: crate::artifact::sha256_file(&checkpoint)?,
+        });
+        self.write_state(state)?;
+        copy_atomically(&checkpoint, &self.latest_path())
     }
 
     /// Writes an immutable periodic snapshot without changing run state.
@@ -159,10 +184,14 @@ impl RunDir {
         generation: u64,
         write_model: impl FnOnce(&Path) -> Result<()>,
     ) -> Result<()> {
-        write_model_atomically(&self.archived_checkpoint_path(generation), write_model)
+        self.ensure_writer()?;
+
+        write_model_immutably(&self.archived_checkpoint_path(generation), write_model)
     }
 
     pub fn write_state(&self, state: &RunState) -> Result<()> {
+        self.ensure_writer()?;
+
         anyhow::ensure!(
             state.format_version == STATE_FORMAT_VERSION,
             "unsupported state format version {}",
@@ -172,6 +201,8 @@ impl RunDir {
     }
 
     pub fn log_metrics(&self, mut record: serde_json::Value) -> Result<()> {
+        self.ensure_writer()?;
+
         record["time"] = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs_f64()
@@ -181,7 +212,55 @@ impl RunDir {
             .append(true)
             .open(self.root.join("metrics.jsonl"))?;
         writeln!(file, "{record}")?;
+        file.flush()?;
         Ok(())
+    }
+
+    fn acquire_writer_lock(&mut self) -> Result<()> {
+        let path = self.root.join(".writer.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+
+        lock_exclusive(&file)?;
+        self.writer_lock = Some(file);
+
+        Ok(())
+    }
+
+    fn ensure_writer(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.writer_lock.is_some(),
+            "run directory is open read-only; open a writer before modifying it"
+        );
+
+        Ok(())
+    }
+
+    fn make_checkpoint_generation_addressed(&self, state: &mut RunState) -> Result<()> {
+        let Some(identity) = &state.checkpoint_identity
+        else {
+            return Ok(());
+        };
+        let generation_path = self.archived_checkpoint_path(identity.generation);
+        if self.root.join(&identity.relative_path) == generation_path {
+            return Ok(());
+        }
+
+        let source = self.root.join(&identity.relative_path);
+        write_model_immutably(&generation_path, |temporary| {
+            fs::copy(&source, temporary)?;
+            Ok(())
+        })?;
+        state.checkpoint_identity = Some(CheckpointIdentity {
+            generation: identity.generation,
+            relative_path: relative_to_root(&self.root, &generation_path)?,
+            sha256: crate::artifact::sha256_file(&generation_path)?,
+        });
+        self.write_state(state)
     }
 
     fn old_config_path(&self) -> PathBuf {
@@ -194,10 +273,7 @@ impl RunDir {
 }
 
 fn read_experiment(path: &Path) -> Result<ExperimentConfig> {
-    let config: ExperimentConfig = toml::from_str(&fs::read_to_string(path)?)
-        .with_context(|| format!("parsing {}", path.display()))?;
-    config.validate()?;
-    Ok(config)
+    ExperimentConfig::read_toml(path).with_context(|| format!("parsing {}", path.display()))
 }
 
 fn read_legacy_experiment(path: &Path) -> Result<ExperimentConfig> {
@@ -207,7 +283,7 @@ fn read_legacy_experiment(path: &Path) -> Result<ExperimentConfig> {
         .and_then(serde_json::Value::as_u64)
         .context("experiment format_version must be an unsigned integer")?;
     let config = match version {
-        1 | 3 => serde_json::from_str::<ExperimentConfig>(&contents)
+        1 | 3 | 4 => serde_json::from_str::<ExperimentConfig>(&contents)
             .with_context(|| format!("parsing {}", path.display()))?,
         2 => migrate_version_two(
             serde_json::from_str::<VersionTwoExperiment>(&contents)
@@ -215,8 +291,8 @@ fn read_legacy_experiment(path: &Path) -> Result<ExperimentConfig> {
         )?,
         version => anyhow::bail!("unsupported experiment format version {version}"),
     };
-    let config = if config.format_version == 1 {
-        config.upgrade_from_v1()?
+    let config = if matches!(config.format_version, 1 | 3) {
+        config.upgrade_to_current()?
     }
     else {
         config
@@ -225,7 +301,7 @@ fn read_legacy_experiment(path: &Path) -> Result<ExperimentConfig> {
     Ok(config)
 }
 
-fn read_state(path: &Path) -> Result<RunState> {
+fn read_state(path: &Path, root: &Path) -> Result<RunState> {
     let json = fs::read_to_string(path)?;
     let format_version = serde_json::from_str::<serde_json::Value>(&json)
         .with_context(|| format!("parsing {}", path.display()))?
@@ -240,48 +316,120 @@ fn read_state(path: &Path) -> Result<RunState> {
             let state: RunStateV1 = serde_json::from_str(&json)
                 .with_context(|| format!("parsing {}", path.display()))?;
             anyhow::ensure!(state.format_version == 1, "invalid version-1 state");
-            Ok(RunState::from_v1(state))
+            let (state, checkpoint) = RunState::from_v1(state);
+
+            add_legacy_checkpoint_identity(state, checkpoint, root)
+        }
+        2 => {
+            let state: RunStateV2 = serde_json::from_str(&json)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            anyhow::ensure!(state.format_version == 2, "invalid version-2 state");
+            let (state, checkpoint) = RunState::from_v2(state);
+
+            add_legacy_checkpoint_identity(state, checkpoint, root)
         }
         version => anyhow::bail!("unsupported state format version {version}"),
     }
 }
 
-fn temporary_model_path(final_path: &Path) -> Result<PathBuf> {
-    let stem = final_path
-        .file_stem()
-        .context("checkpoint path must have a file stem")?;
-    let extension = final_path
-        .extension()
-        .context("checkpoint path must have a file extension")?;
-    let mut name = OsString::from(stem);
-    name.push(".tmp.");
-    name.push(extension);
-    Ok(final_path.with_file_name(name))
+fn add_legacy_checkpoint_identity(
+    mut state: RunState,
+    relative_path: Option<String>,
+    root: &Path,
+) -> Result<RunState> {
+    let Some(relative_path) = relative_path
+    else {
+        return Ok(state);
+    };
+    let path = root.join(&relative_path);
+    if !path.is_file() {
+        return Ok(state);
+    }
+
+    state.checkpoint_identity = Some(CheckpointIdentity {
+        generation: state.model_generation,
+        relative_path,
+        sha256: crate::artifact::sha256_file(&path)?,
+    });
+
+    Ok(state)
 }
 
-fn write_model_atomically(
+fn write_model_immutably(
     final_path: &Path,
     write_model: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<()> {
-    let temporary = temporary_model_path(final_path)?;
-    let _ = fs::remove_file(&temporary);
+    let temporary = crate::artifact::unique_sibling(final_path);
+    let mut cleanup = crate::artifact::TemporaryPath::new(temporary.clone());
+
     write_model(&temporary).with_context(|| format!("writing {}", temporary.display()))?;
+    File::open(&temporary)?.sync_all()?;
+
+    if final_path.exists() {
+        anyhow::ensure!(
+            crate::artifact::sha256_file(&temporary)? == crate::artifact::sha256_file(final_path)?,
+            "checkpoint generation already exists with different contents: {}",
+            final_path.display()
+        );
+
+        return Ok(());
+    }
+
     fs::rename(&temporary, final_path)?;
+    cleanup.keep();
+    crate::artifact::sync_parent(final_path)?;
+
     Ok(())
 }
 
 fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
-    fs::rename(temporary, path)?;
+    write_bytes_atomic(path, &serde_json::to_vec_pretty(value)?)?;
+
     Ok(())
 }
 
 fn write_toml_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
-    let temporary = path.with_extension("toml.tmp");
-    fs::write(&temporary, toml::to_string_pretty(value)?)?;
-    fs::rename(temporary, path)?;
+    write_bytes_atomic(path, toml::to_string_pretty(value)?.as_bytes())?;
+
     Ok(())
+}
+
+fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let temporary = crate::artifact::unique_sibling(path);
+    let mut cleanup = crate::artifact::TemporaryPath::new(temporary.clone());
+    let mut file = File::create(&temporary)?;
+
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    fs::rename(&temporary, path)?;
+    cleanup.keep();
+    crate::artifact::sync_parent(path)
+}
+
+fn copy_atomically(source: &Path, destination: &Path) -> Result<()> {
+    let temporary = crate::artifact::unique_sibling(destination);
+    let mut cleanup = crate::artifact::TemporaryPath::new(temporary.clone());
+
+    fs::copy(source, &temporary)?;
+    File::open(&temporary)?.sync_all()?;
+    fs::rename(&temporary, destination)?;
+    cleanup.keep();
+    crate::artifact::sync_parent(destination)
+}
+
+#[cfg(unix)]
+fn lock_exclusive(file: &File) -> Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    anyhow::ensure!(status == 0, "run is already locked by another writer");
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn lock_exclusive(_file: &File) -> Result<()> {
+    anyhow::bail!("run writer locking is unsupported on this platform")
 }
 
 fn relative_to_root(root: &Path, path: &Path) -> Result<String> {
