@@ -208,8 +208,7 @@ fn remove_intermediates(directory: &Path) -> Result<()> {
         if !keep {
             if path.is_dir() {
                 fs::remove_dir_all(path)?;
-            }
-            else {
+            } else {
                 fs::remove_file(path)?;
             }
         }
@@ -243,8 +242,7 @@ fn install_content_addressed(
             "content-addressed TensorRT target has conflicting metadata"
         );
         fs::remove_dir_all(temporary_root)?;
-    }
-    else {
+    } else {
         fs::rename(temporary_root, &installed_directory)?;
         File::open(&store)?.sync_all()?;
     }
@@ -280,6 +278,7 @@ fn compile_to_temporary(
         request.checkpoint,
         &torchscript,
         request.device,
+        request.compiler.precision,
     )?;
 
     let artifact = temporary_root.join("artifact");
@@ -548,8 +547,7 @@ fn expected_io(model: &ModelSpec, precision: TensorRtBuildPrecision) -> Artifact
     let [channels, height, width] = model.state_shape();
     let dtype = if precision == TensorRtBuildPrecision::Fp16 {
         ArtifactDType::Fp16
-    }
-    else {
+    } else {
         ArtifactDType::Fp32
     };
 
@@ -575,8 +573,7 @@ fn parse_dtype(value: &str) -> Result<ArtifactDType> {
 fn expected_dtype(precision: TensorRtBuildPrecision) -> &'static str {
     if precision == TensorRtBuildPrecision::Fp16 {
         "fp16"
-    }
-    else {
+    } else {
         "fp32"
     }
 }
@@ -670,7 +667,13 @@ pub fn export_torchscript(
     output: &Path,
     device: Device,
 ) -> Result<()> {
-    export_torchscript_for_model(&experiment.model, checkpoint, output, device)
+    export_torchscript_for_model(
+        &experiment.model,
+        checkpoint,
+        output,
+        device,
+        experiment.inference.tensor_rt_build_precision(),
+    )
 }
 
 fn export_torchscript_for_model(
@@ -678,17 +681,32 @@ fn export_torchscript_for_model(
     checkpoint: &Path,
     output: &Path,
     device: Device,
+    precision: TensorRtBuildPrecision,
 ) -> Result<()> {
     let mut var_store = nn::VarStore::new(device);
     let network = Network::new(&var_store.root(), model)?;
     var_store.load(checkpoint)?;
+    if precision == TensorRtBuildPrecision::Fp16 {
+        var_store.half();
+    }
     var_store.freeze();
 
     let [channels, height, width] = model.state_shape();
-    let input = Tensor::zeros([1, channels, height, width], (Kind::Float, device));
+    let input_kind = if precision == TensorRtBuildPrecision::Fp16 {
+        Kind::Half
+    } else {
+        Kind::Float
+    };
+    let input = Tensor::zeros([1, channels, height, width], (input_kind, device));
     let mut forward = |inputs: &[Tensor]| {
         let output = network.forward_t(&inputs[0], false);
-        let scalar = output.value.expected_value();
+        // WDL expected-value intentionally uses FP32 softmax for stability.
+        // Exact FP16 TensorRT artifacts still need a homogeneous FP16 I/O
+        // contract, so cast only the packed scalar at the export boundary.
+        let scalar = output
+            .value
+            .expected_value()
+            .to_kind(output.policy_logits.kind());
 
         vec![Tensor::cat(&[output.policy_logits, scalar], 1)]
     };

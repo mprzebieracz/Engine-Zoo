@@ -144,6 +144,21 @@ fn fp16_host_staging_requires_native_fp16_inference() {
 }
 
 #[test]
+fn tensor_rt_precision_can_select_mixed_fp16_tactics() {
+    let mut config = config();
+    config.inference.engine = InferenceEngine::TensorRtRaw;
+    config.inference.compiled_artifact = Some("model.engine".into());
+    config.inference.tensor_rt_precision =
+        Some(crate::artifact::TensorRtBuildPrecision::MixedFp32IoFp16Tactics);
+
+    assert!(config.validate().is_ok());
+    assert_eq!(
+        config.inference.tensor_rt_build_precision(),
+        crate::artifact::TensorRtBuildPrecision::MixedFp32IoFp16Tactics
+    );
+}
+
+#[test]
 fn initialize_refuses_a_nonempty_directory() {
     let root = std::env::temp_dir().join(format!("engine-zoo-init-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);

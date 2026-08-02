@@ -56,6 +56,9 @@ minimum_lr = 0.00003
 engine = "tensor-rt-raw"
 tensor_rt_module = "model.raw.engine"
 precision = "fp16"
+# TensorRT build/I/O contract; choose `fp16`, `mixed-fp32-io-fp16-tactics`,
+# or `fp32`. Omitted configs retain the historical mapping from `precision`.
+tensor_rt_precision = "fp16"
 preferred_batch_size = 128
 max_batch_size = 256
 max_queued_states = 4096
