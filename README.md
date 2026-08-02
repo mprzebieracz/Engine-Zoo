@@ -1,32 +1,39 @@
 # Engine Zoo
 
-Engine Zoo is a Rust workspace for experimenting with board-game engines: today, Chess and Connect Four backed by AlphaZero-style neural search.
-
-It keeps four concerns separate: authoritative game rules, generic tree search, model-specific representations/inference, and application/UI code. That separation matters because a future alpha-beta engine can use `games` and `search` without inheriting PyTorch, replay, or policy-vector concepts.
+Engine Zoo is a project for implementing board-game engines. It currently
+contains Chess and Connect Four, with shared rules, search, neural-network,
+self-play, training, evaluation, and web-UI code.
 
 ## What is here
 
-| Capability | Connect Four | Chess |
-| --- | --- | --- |
-| Native rules and notation | Yes | Yes (FEN/UCI/SAN at the boundary) |
-| PUCT MCTS | Yes | Yes |
-| Full Gumbel MCTS | Yes | Yes |
-| Scalar value head | Yes | Yes |
-| WDL value head | — | Yes |
-| Self-play and sparse replay | Yes | Yes |
-| UCI/evaluation/web analysis | Reference | Primary |
+- `crates/games` — board states, legal moves, notation, and game rules.
+- `crates/search` — reusable Monte Carlo Tree Search, including PUCT and
+  Gumbel-based search.
+- `crates/alphazero` — board representations, neural inference, batching,
+  replay, self-play, and training.
+- `crates/app` and `crates/evaluations` — command-line tools, UCI, arenas,
+  puzzles, and HTTP services.
+- `web` — a small Svelte interface for playing and analyzing games.
+- `experiments` — checked-in experiment configurations.
 
-```text
-games (authoritative state) → representation → batcher/network → MCTS
-          ↑                                      ↓
-      setup / UCI                         self-play → replay → trainer
-```
+## AlphaZero in this project
 
-`crates/core` defines only portable game/agent contracts. `crates/games` owns legal moves and terminal rules. `crates/search` is pure generic MCTS. `crates/alphazero` owns representations, neural inference, batching, replay, self-play, and training. `crates/app` and `crates/evaluations` are the executable boundaries; `web` is the Svelte frontend.
+The training loop follows the usual AlphaZero shape:
 
-## Quick start: CPU Connect Four
+1. Self-play uses MCTS to choose moves from the neural network's policy and
+   value predictions.
+2. Positions, search policies, and game outcomes are stored in replay.
+3. Training updates the network from replayed positions.
+4. The updated network is exported and used for the next self-play iteration.
 
-The experiment is immutable after initialization. Runtime flags only select device and how long to run.
+The main performance work is around the hot paths: batched inference,
+persistent search state, compact board representations, deterministic replay,
+and optional TensorRT inference for fixed-weight self-play. TensorRT artifacts
+and checkpoints are content-addressed and checked against their source model.
+
+## Quick start
+
+CPU Connect Four can be run without CUDA or TensorRT:
 
 ```bash
 cargo run -p engine_app --bin train -- init \
@@ -35,82 +42,18 @@ cargo run -p engine_app --bin train -- init \
 
 cargo run -p engine_app --bin train -- run \
   --run-dir runs/connect4-demo --device cpu --iterations 1
-
-cargo run -p engine_app --bin train -- inspect --run-dir runs/connect4-demo
 ```
 
-Chess configurations are in `experiments/`: TensorRT PUCT/WDL (default),
-native PUCT/WDL fallback, classic 19-plane chess, Connect Four, and a small
-profiling/bench recipe. The classic model remains supported for existing
-checkpoints.
+Chess training uses LibTorch and, for the fastest self-play path, TensorRT.
+See [docs/tensorrt.md](docs/tensorrt.md) and [docs/training.md](docs/training.md)
+for environment setup and experiment details.
 
-## Chess training and LibTorch
-
-Training/inference use `tch` 0.24 and require LibTorch/PyTorch 2.11.0. The
-CUDA configuration in this repository is CUDA 13.0. Set `LIBTORCH` explicitly,
-or use a matching Python PyTorch installation with `LIBTORCH_USE_PYTORCH=1`.
-The build scripts deliberately do not guess a machine-local path.
-
-The default chess path uses TensorRT for fixed-weight self-play and native
-LibTorch for training. It requires the matching TensorRT runtime libraries and
-compiler environment described in [TensorRT inference](docs/tensorrt.md).
-
-```bash
-scripts/train
-```
-
-That launches `experiments/chess-puct-wdl-tensorrt.toml` into
-`runs/chess-puct-wdl-tensorrt-v6`, seeded from the v5 generation-800 archive,
-and invokes `train run --forever` on CUDA with Torch-TensorRT self-play and the
-validated compile shapes (`opt=128`, `max=256`). TensorRT modules contain fixed
-weights, so each iteration performs TensorRT self-play, native training, then
-export and compilation for the next generation. Pass `--tensor-rt-python` only
-when the Torch-TensorRT environment is not found automatically.
-
-For a system without the matching TensorRT stack, retain the same H4
-Root-Gumbel model and use the native fallback explicitly:
-
-```bash
-scripts/train \
-  --experiment experiments/chess-puct-wdl.toml \
-  --run-dir runs/chess-puct-wdl
-```
-
-## Experiment files
-
-An experiment TOML fixes model shape/representation, search policy, replay, training, inference batching, and random seed. `state.json` is mutable progress: iteration, generation, global step, checkpoint location, generated games, and honest resume information. Checkpoints are written as `latest.tmp.safetensors`, renamed to `latest.safetensors`, and only then recorded in state.
-
-The canonical chess model uses the 8×8×73 policy layout and a parameterized squeeze-excitation trunk. The classic chess model uses the preserved 19-plane, 20,480-action layout with a scalar head. A SHA-256 fingerprint of the complete `ModelSpec` identifies shape-compatible model data.
-
-## Correctness and reproducibility
-
-- MCTS uses typed terminal outcomes and rejects invalid evaluator values/logits rather than converting them to draws.
-- Cache keys include a post-reload namespace, so neural results cannot survive a successful weight reload.
-- Self-play game IDs and seeds are global and worker-independent; completed games are committed to replay in game-ID order.
-- Replay sampling is seeded from experiment seed plus global training step.
-- Replay persists in memory for now. A resumed checkpoint is explicitly recorded as weights-only: replay count is reset and optimizer moments are not claimed restored.
-
-Run the checks locally with:
+## Checks
 
 ```bash
 cargo fmt --check
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cd web && npm ci && npm run check && npm run build
 ```
 
-## Benchmarks
-
-The repository has a reproducible `engine-bench` CLI covering search, representation, inference, batching, self-play, training, and end-to-end workloads. Run `cargo run -p engine-bench -- suite --human` on an intentional benchmark machine. GPU inference/training results are not presented as measurements until they are run on suitable hardware. Methodology and the benchmark matrix live in [docs/benchmarks.md](docs/benchmarks.md).
-
-## Further reading
-
-- [Repository guide](REPOSITORY_GUIDE.md): linear, file-level architecture tour.
-- [Architecture](docs/architecture.md), [PUCT](docs/search/puct.md), and [Full Gumbel](docs/search/full-gumbel.md).
-- [Training](docs/training.md), [Chess representation](docs/chess-representation.md), and [reproducibility](docs/reproducibility.md).
-- [TensorRT inference](docs/tensorrt.md).
-- [Testing](docs/testing.md).
-
-## License
-
-Engine Zoo is GPL-3.0-or-later. The web frontend uses Chessground, which is also GPL-3.0-or-later; see `web/README.md` for its frontend-specific notes.
+The project is licensed under GPL-3.0-or-later.
