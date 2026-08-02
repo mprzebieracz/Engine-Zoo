@@ -1,161 +1,93 @@
-# Raw TensorRT inference backend (experimental variant)
+# Raw TensorRT inference backend
 
-This is an alternative to the Torch-TensorRT TorchScript path in
-[`docs/tensorrt.md`](tensorrt.md). It bypasses Torch-TensorRT entirely: an
-ONNX export is parsed and built directly with the TensorRT Python builder
-API, producing a raw serialized engine plan (not a TorchScript module). A
-small C shim (`crates/alphazero/native/raw_trt_runtime.cpp`) loads and runs
-that plan in-process from Rust through the TensorRT C++ runtime, so
-self-play still gets in-process, no-subprocess inference.
+The `tensor-rt-raw` variant builds a serialized TensorRT engine from ONNX and executes it in process. It is behind the `raw-tensorrt` Cargo feature because compilation and linking require CUDA and TensorRT headers and libraries. Default CPU builds do not enable it.
 
-It exists to unlock a genuine persistent **builder timing cache**, which the
-Torch-TensorRT path cannot support today (see the "Builder timing-cache
-variant" section of `docs/tensorrt.md`): tactic timings measured while
-compiling one checkpoint carry over to the next, since architecture/profile
-stay fixed across a training run and only weights change. The goal is fewer
-seconds spent per-generation compiling, without regressing inference
-throughput relative to the existing TensorRT TorchScript path.
+## Responsibility and data flow
 
-Implemented as a variant behind a Cargo feature (`raw-tensorrt`, off by
-default) so it does not affect existing builds or require TensorRT headers
-to be present unless explicitly opted into. It implements the same
-`InferenceBackend` trait as `TchInferenceBackend` (see
-`crates/alphazero/src/batcher/mod.rs`), so the batching/dynamic-batch
-machinery, self-play, and training code are unchanged.
+`scripts/compile_tensorrt_raw.py` provides separate `export-onnx` and `build-engine` operations. They may use different Python interpreters. Rust supplies temporary paths and validates structured result JSON; normal compilation removes intermediates unless `--keep-tensor-rt-intermediates` is set.
 
-## Training entry point
+At runtime one opaque C++ session owns the TensorRT runtime, engine, execution context, CUDA device, CUDA stream, discovered tensor contract, and grow-only device input allocation. A run accepts pinned host input and a Rust-owned device output buffer:
+
+```text
+pinned host input
+  -> cudaMemcpyAsync on the session stream
+  -> enqueueV3 on the same stream
+  -> synchronize the session stream
+  -> Rust gathers legal logits on CUDA
+```
+
+This ordering prevents TensorRT from reading input before H2D completes. Rust does not expose TensorRT enum ordinals, bind tensor names, manage a separate context, or sequence raw enqueue/synchronization calls. The session is movable to the single batcher executor thread but is not concurrent.
+
+The constructor validates one input and one packed output, dtypes, `[channels, height, width]`, `action_size + 1` output columns, and min/opt/max batch profile. Every exported C function is exception-contained and returns project-owned status codes plus diagnostic text.
+
+## SDK discovery and build
+
+Use a coherent TensorRT SDK and CUDA toolkit. TensorRT discovery order is:
+
+1. `TENSORRT_ROOT` with `include/` and `lib/` or `lib64/`;
+2. both `TENSORRT_INCLUDE_DIR` and `TENSORRT_LIB_DIR`;
+3. `TENSORRT_PYTHON`, if its package includes both headers and libraries.
+
+CUDA uses either `CUDA_ROOT` or both `CUDA_INCLUDE_DIR` and `CUDA_LIB_DIR`. Linux also checks `/opt/cuda` and `/usr/local/cuda`. The build does not embed a developer-specific RPATH, so configure the runtime loader path for the selected SDK. Keep TensorRT headers, Python builder, and loaded `libnvinfer` on compatible versions.
 
 ```bash
-# Same TensorRT experiment recipe; --cache selects raw engine + timing cache.
-# Feature is opt-in so serve/eval/uci stay free of libnvinfer.
+TENSORRT_ROOT=/opt/tensorrt \
+CUDA_ROOT=/opt/cuda \
+LIBTORCH=/opt/libtorch \
+cargo build -p engine_app --bin train --features raw-tensorrt --release
+```
+
+Alternatively:
+
+```bash
+TENSORRT_INCLUDE_DIR=/opt/tensorrt/include \
+TENSORRT_LIB_DIR=/opt/tensorrt/lib \
+CUDA_INCLUDE_DIR=/opt/cuda/include \
+CUDA_LIB_DIR=/opt/cuda/lib64 \
+cargo check -p alphazero --features raw-tensorrt
+```
+
+## Compile and train
+
+Select the backend in the experiment, not with a cache flag:
+
+```toml
+[inference]
+engine = "tensor-rt-raw"
+compiled_artifact = "model.raw.engine"
+precision = "fp16"
+preferred_batch_size = 128
+max_batch_size = 256
+```
+
+Then run the normal training command with a TensorRT builder Python. Raw builds use automatic timing-cache reuse unless disabled:
+
+```bash
 cargo run -p engine_app --bin train --features raw-tensorrt -- run \
-  --run-dir runs/chess-puct-wdl-tensorrt \
-  --cache \
+  --run-dir runs/chess-puct-wdl-tensorrt-raw \
+  --device cuda \
   --tensor-rt-python "$TRT_PYTHON" \
+  --tensor-rt-export-python "$TORCH_PYTHON" \
   --tensor-rt-opt-batch-size 128 \
   --tensor-rt-max-batch-size 256
 ```
 
-`--cache` is a runtime override (does not rewrite `experiment.toml`). Defaults:
-compiler `scripts/compile_tensorrt_raw.py`, artifact `model.raw.engine`, timing
-cache `<run-dir>/tensorrt-timing.cache`. Prefer `scripts/train --cache`, which
-passes `--features raw-tensorrt` automatically.
-
-## Status
-
-Requires TensorRT **10.x** headers + libs (FP16 via `BuilderFlag.FP16`).
-Defaults: vendored headers in `third_party/tensorrt-10.15.1/include` and the
-pip `libnvinfer.so.10` from the Torch-TensorRT venv. System TensorRT 11.x
-dropped `BuilderFlag.FP16` and is not used for this path.
-
-## Tensor contract
-
-Matches the existing Torch-TensorRT path exactly: one input tensor `input`
-of shape `[batch, channels, 8, 8]`, one packed output tensor `output` of
-shape `[batch, action_size + 1]` (policy logits followed by one scalar-value
-column), both FP32. Both backends can be built from the exact same
-TorchScript export (`export_torchscript` / `engine-zoo-model
-export-torch-script`), so they are directly comparable.
-
-## Building
+For direct compiler diagnosis, use explicit subcommands rather than generated `python -c` source:
 
 ```bash
-LIBTORCH=/path/to/libtorch \
-TENSORRT_INCLUDE_DIR=/usr/include \
-CUDA_ROOT=/opt/cuda \
-cargo build -p engine-bench --features raw-tensorrt --release
-```
+"$TORCH_PYTHON" scripts/compile_tensorrt_raw.py export-onnx \
+  --input model.ts --output model.onnx --channels 63 \
+  --precision fp16 --result-json export.json
 
-`TENSORRT_INCLUDE_DIR`/`TENSORRT_LIB_DIR` and `CUDA_ROOT` (or
-`CUDA_INCLUDE_DIR`/`CUDA_LIB_DIR`) are overridable in
-`crates/alphazero/build.rs`; defaults assume a system TensorRT package under
-`/usr/include`/`/usr/lib` and a CUDA toolkit under `/opt/cuda` or
-`/usr/local/cuda`.
-
-**Version note:** this repo's tested Torch-TensorRT stack is pinned to
-TensorRT `10.15.1.29` (`docs/tensorrt.md`). This raw path was built and
-link-checked against whatever TensorRT happens to be installed
-system-wide (`11.1.0` in this environment) because pip-installed TensorRT
-wheels don't ship C++ headers and no `10.x` SDK with headers was available
-here. The two paths are fully decoupled (no `LD_PRELOAD`/`LD_LIBRARY_PATH`
-matching needed between them), so this is fine as an independent
-comparison, but for like-for-like results against the pinned Torch-TensorRT
-stack, point `TENSORRT_INCLUDE_DIR`/`TENSORRT_LIB_DIR` at a `10.15.1.29` SDK
-if you have one, and use `scripts/compile_tensorrt_raw.py` against a
-matching Python `tensorrt` install.
-
-**Precision:** TensorRT 11 removed the legacy weak-typing
-`BuilderFlag.FP16` in favor of "strongly typed" networks driven by the
-ONNX graph's own tensor dtypes. `scripts/compile_tensorrt_raw.py` detects
-this and falls back to FP32 with a warning rather than silently building an
-engine whose FP16 numerics were never checked against the native reference.
-On a TensorRT 10.x build (`BuilderFlag.FP16` present), `--precision fp16`
-and `fp32-fp16` behave like `compile_tensorrt.py` today.
-
-## Compiling an engine
-
-```bash
-LIBTORCH=/path/to/libtorch \
-cargo run -p engine_app --bin engine-zoo-model -- export-torch-script \
-  --experiment experiments/chess-puct-wdl.toml \
-  --checkpoint runs/chess-puct-wdl/checkpoints/latest.safetensors \
-  --output runs/chess-puct-wdl/model.ts \
-  --device cuda
-
-TRT_PYTHON=.venv/engine-zoo-trt/bin/python  # or a python with `tensorrt` installed
-"$TRT_PYTHON" scripts/compile_tensorrt_raw.py \
-  --input runs/chess-puct-wdl/model.ts \
-  --output runs/chess-puct-wdl/model.raw.engine \
-  --channels 63 \
+"$TRT_PYTHON" scripts/compile_tensorrt_raw.py build-engine \
+  --input model.onnx --output model.engine \
   --min-batch-size 1 --opt-batch-size 128 --max-batch-size 256 \
-  --precision fp16 \
-  --timing-cache runs/chess-puct-wdl/tensorrt-timing.cache
+  --precision fp16 --timing-cache tactics.cache \
+  --result-json build.json
 ```
 
-Rebuild after changing the checkpoint (same architecture, new weights): the
-`--timing-cache` file is reused and updated atomically (temp file + rename,
-so a killed process cannot leave a truncated cache) rather than requiring a
-cold rebuild each generation the way the Torch-TensorRT path currently does.
+Exact FP16 fails if the graph, TensorRT version, or produced engine cannot satisfy FP16 I/O. Mixed mode has FP32 I/O and may use FP16 tactics. The manifest records both the request and actual contract.
 
-## Benchmarking against the existing backends
+Raw engines have frozen weights and reject backend reload. Training compiles a checkpoint-specific replacement artifact and replaces the inference service between generations. Timing-cache reuse only accelerates tactic selection and never validates an engine from another checkpoint.
 
-`engine-bench raw-inference` already compares native FP16 and Torch-TensorRT
-FP16; with this feature it adds a third:
-
-```bash
-LIBTORCH=/path/to/libtorch \
-cargo run -p engine-bench --features raw-tensorrt --release -- raw-inference \
-  --experiment experiments/chess-puct-wdl.toml \
-  --checkpoint runs/chess-puct-wdl/checkpoints/latest.safetensors \
-  --tensor-rt-module runs/chess-puct-wdl/model.trt.ts \
-  --raw-tensor-rt-engine runs/chess-puct-wdl/model.raw.engine \
-  --batch-sizes 8,16,32,64,128,256 \
-  --human
-```
-
-This reports `positions_per_second`/`backend_latency_ms` for all backends at
-each batch size, plus numerical-difference metadata for the Torch-TensorRT
-path. For compile-time comparisons, time `compile_tensorrt.py` vs
-`compile_tensorrt_raw.py` cold (no cache / fresh checkpoint) and warm (cache
-present, next generation's weights) — `scripts/bench_tensorrt_training.py`
-is a useful template for scripting this across iterations.
-
-## Known limitations / follow-ups
-
-- **Synchronous by design.** `RawTensorRtBackend` fully synchronizes the
-  device around each `enqueueV3` (matching today's non-overlapped batcher
-  execution), rather than using a dedicated CUDA stream with async
-  host-to-device/device-to-host transfers. That's the natural next
-  optimization once this is validated for correctness and throughput parity
-  — but validate parity first before adding overlap.
-- **Fixed weights.** Like the Torch-TensorRT path, an engine's weights are
-  frozen at compile time; `reload_weights` is rejected. Compile a new
-  engine for the next checkpoint.
-- **No CUDA graphs.** Deliberately not attempted first: the AlphaZero
-  reference implementation this was inspired by found CUDA graph mode
-  increased total runtime for their workload and disabled it by default.
-- Two independent copies of `libcudart` end up loaded in the same process
-  (one from the CUDA toolkit this shim links against, one bundled with
-  LibTorch) — the same situation Torch-TensorRT's own `libtorchtrt.so`
-  already creates in this codebase. Established as safe in practice, but
-  worth knowing about if you see unexpected CUDA errors during testing.
+GPU integration and same-stream stress tests must run on the dedicated CUDA/TensorRT CI runner. Ordinary hosts run default-feature tests only.

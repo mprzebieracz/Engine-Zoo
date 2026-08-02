@@ -47,7 +47,7 @@ pub(super) fn analyze_request_with_registry(
     let mode = req.mode.unwrap_or(AnalyzeMode::Net);
     let cfg = AnalyzeConfig {
         mode,
-        mcts: puct_search(req.simulations),
+        mcts: puct_search(),
         wait_for_count: req.wait_for_count.max(1),
         timeout: BATCH_TIMEOUT,
     };

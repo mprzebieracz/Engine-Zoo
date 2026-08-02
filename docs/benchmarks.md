@@ -2,6 +2,8 @@
 
 Timing is evidence, not a unit-test assertion. Do not claim a performance improvement without recording machine, compiler, device/driver, configuration, median, spread, and workload.
 
+The finalization comparison commit and required post-change CUDA matrix are recorded in [alphazero-closure-baseline.md](alphazero-closure-baseline.md). Existing measurements remain authoritative until that matrix is rerun on the provisioned CUDA host.
+
 Use the reproducible benchmark CLI rather than ad hoc benchmark binaries. Run `cargo run -p engine-bench -- search --algorithm puct --human` for the deterministic Connect Four search workload, or `cargo run -p engine-bench -- suite --human` for the complete matrix. Run benchmarks only on an intentional benchmark machine. Required future matrices cover PUCT leaf batches, Full Gumbel budgets, cold/hot caches, representative chess positions, arena allocations, and depth.
 
 The benchmark CLI defaults to `--device cuda`; it deliberately errors when

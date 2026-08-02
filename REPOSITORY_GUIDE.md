@@ -113,12 +113,14 @@ The external `chess` crate supplies legal board mechanics. Engine Zoo layers clo
 - `network/legacy.rs` implements the basic residual trunk selected by Connect Four and the classic chess model spec. Its filename is historical; its architecture and parameter names are deliberately retained so classic checkpoints load unchanged.
 - `network/chess_v2.rs` implements the squeeze-excitation residual trunk selected by the chess canonical model spec. Separate source keeps chess-only tensor shapes from leaking into generic games.
 - `evaluator.rs` wraps a representation plus batcher client as a `PolicyValueEvaluator`. It encodes states, converts legal native moves to policy actions, sends batches, then restores logits in original legal-move order. The MCTS contract remains native moves.
-- `batcher/mod.rs` exposes `Batcher` and per-thread `BatcherClient`, request/result buffers, statistics, reload support, inference precision selection, and legal-logit gather interfaces.
-- `batcher/tch_backend.rs` owns the production network backend. The batcher worker coalesces requests, uses grow-only staging buffers, runs inference, gathers only legal policy logits on-device, and returns client buffers for reuse. That is necessary to avoid one GPU launch/allocation or a full policy GPU-to-host copy for every leaf.
+- `batcher/mod.rs` exposes `Batcher` and per-thread `BatcherClient`, request/result buffers, statistics, reload requests, inference precision selection, and legal-logit gather interfaces. Native inference can reload weights; compiled backends reject reload, so generation changes replace their service.
+- `batcher/tch_backend.rs` owns native LibTorch and Torch-TensorRT CModule execution. `batcher/raw_trt_backend.rs` uses one owning C++ TensorRT session whose pinned-host H2D copy and `enqueueV3` run on the same CUDA stream. Both paths reuse staging, gather only legal policy logits on-device, and return client buffers on success and error paths.
 
 ### Checkpoints, replay, and training
 
-`experiment/` separates durable experiment intent from mutable progress. `experiment.toml` is immutable and contains the model, search/self-play, replay, training, inference settings, and experiment seed; `state.json` records iteration, generation, global step, replay count, resume kind, generated-game total, and the latest checkpoint. `train init` validates and copies a TOML experiment; `train run` cannot mutate it. `RunDir::write_latest` writes `latest.tmp.safetensors`, atomically renames it to `checkpoints/latest.safetensors`, then atomically updates state. `best.safetensors` is reserved for an actual gated evaluation result rather than incorrectly naming the continuously trained model.
+`experiment/` separates durable experiment intent from mutable progress. `experiment.toml` is immutable and contains the model, search/self-play, replay, training, inference settings, and experiment seed; `state.json` records iteration, generation, global step, replay count, resume kind, generated-game total, and a generation-addressed checkpoint identity with SHA-256. A run writer holds a process lock. Checkpoints and state use unique sibling temporaries and atomic installation; `latest.safetensors` is a convenience copy, while the generation path in state is authoritative. `best.safetensors` is reserved for an actual gated evaluation result.
+
+`artifact/` defines the versioned manifest for Torch-TensorRT and raw TensorRT outputs. Compiler reuse validates checkpoint bytes, model and I/O contracts, precision/profile/build environment, compiler identity, and artifact digest; loading separately checks the manifest, artifact digest, backend, and model contract. Engine artifacts contain fixed weights. TensorRT timing caches are a separate tactic-measurement cache and may be reused after a weight-only checkpoint change.
 
 `replay/mod.rs` defines `Transition`, packed `SparsePolicyBatch`, `ReplayBatch`, and a fixed-capacity, lock-protected ring `ReplayBuffer`. States are stored densely, but policies are stored only as nonzero `(Action, probability)` entries. Sampling chooses distinct positions and packs actions/probabilities/row offsets. Sparse targets are necessary for chess: allocating a dense policy target for every stored position wastes substantial memory and bandwidth.
 
@@ -208,12 +210,13 @@ The Python scripts are deliberately thin wrappers around Rust binaries, not dupl
 - `scripts/arena_big.py` drives multi-opponent arenas from `configs/arena.toml`.
 - `scripts/bench_tensorrt_training.py` runs the short TensorRT training screen.
 - `scripts/compile_tensorrt.py` compiles a TorchScript checkpoint into a TensorRT module.
+- `scripts/compile_tensorrt_raw.py` exports ONNX and builds a raw TensorRT engine through explicit, machine-readable compiler commands.
 
 The expected production/research loop is: choose a model/run configuration → self-play with MCTS → append sparse trajectories to replay → train network → checkpoint/promote candidate → use puzzles for fast regression checks → use paired arenas/Stockfish for strength checks → serve the selected checkpoint for people or the web UI.
 
 ## 11. What is verified, and what is not
 
-On 2026-07-22, `cargo test --workspace` passed: **158 tests passed, 0 failed**. This covers core rule behavior, representations, batching, replay/training, MCTS variants, UCI parsing, server/job safety, evaluation report/tool logic, and classic-chess model migration. It does not prove a trained model is strong, GPU performance is optimal, Fastchess/Stockfish are installed, or a browser build has been run on this machine. Those require the corresponding data, hardware, external binaries, and `web` dependency build.
+Portable CI runs default-feature workspace checks with CPU PyTorch and keeps Python syntax/protocol tests independent. It does not use `--all-features`: raw TensorRT is checked on a separately provisioned CUDA/TensorRT runner. GPU correctness, performance, Fastchess/Stockfish strength, and browser behavior require their corresponding hardware, artifacts, external binaries, and dependency builds.
 
 ## 12. A practical reading order
 
@@ -248,7 +251,7 @@ ChessGame / Connect4                 authoritative real game
                                                    │
                                   PolicyValueEvaluator<Result<…>>
                                                    │
-                    Batcher ──> InferenceBackend ──> TchInferenceBackend
+                    Batcher ──> Native / Torch-TensorRT / raw TensorRT
                                                    │
                          RawNetworkOutput { policy_logits, Scalar | WDL }
 ```
@@ -318,13 +321,12 @@ value output. The evaluator converts both value-head choices into the one
 `PositionValue` required by search.
 
 The dynamic `Batcher` owns queueing, bounded coalescing, request splitting,
-reload ordering, response routing, and error propagation. The
-`InferenceBackend` trait owns one inference pass. `TchInferenceBackend` is the
-only production implementation today and retains the performance-sensitive
-details: persistent model/staging buffers, pinned CUDA host buffers, FP16
-device conversion, and gathering legal logits on the device before copying
-them back. A mock backend makes queueing and failure behavior testable without
-LibTorch.
+reload ordering, response routing, and error propagation. Native LibTorch,
+Torch-TensorRT CModule, and raw TensorRT engine execution remain explicit
+variants. The raw backend's opaque session owns its engine, context, stream,
+and device input buffer; H2D and enqueue share that stream. All variants retain
+performance-sensitive staging and legal-logit gathering, while compiled
+artifacts are validated through their manifest before loading.
 
 ### Replay, training, and self-play
 
@@ -361,16 +363,18 @@ progress:
 ```text
 run/
 ├── experiment.toml    immutable model/search/self-play/training specification and seed
-├── state.json         iteration, generation, step, replay count, latest model
-├── latest.safetensors continuously trained model
+├── state.json         iteration, generation, step, replay count, checkpoint digest
+├── checkpoints/       immutable generation-addressed models
+├── latest.safetensors convenience copy of current weights
+├── manifest.json      compiled-artifact identity when present
 ├── candidate.safetensors  optional gating candidate
 ├── best.safetensors       only an evaluated/gated best model
-├── checkpoints/
 └── metrics.jsonl
 ```
 
-Writes use temporary files followed by rename; state advances only after the
-corresponding model exists. Old run configuration parsing is isolated as a
+One writer lock protects mutable run state. Writes use unique sibling
+temporaries followed by rename; state advances only after the corresponding
+generation checkpoint exists and its digest is known. Old run configuration parsing is isolated as a
 migration concern rather than retained as a normal model API. Historical
 classic chess configs are validated against their exact `19×8×8` input and
 20,480-action policy shape, then migrated to the explicit `ChessClassic` model

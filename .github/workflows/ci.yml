@@ -3,10 +3,11 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   rust:
-    name: Rust checks
+    name: Rust CPU/default
     runs-on: ubuntu-latest
     env:
       LIBTORCH_USE_PYTORCH: "1"
@@ -21,10 +22,37 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      - name: Install CPU libtorch through PyTorch 2.11.0
+      - name: Install CPU LibTorch through PyTorch
         run: python -m pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
-      - name: Configure libtorch
+      - name: Configure LibTorch
         run: echo "LIBTORCH=$(python -c 'import torch, os; print(os.path.dirname(torch.__file__))')" >> "$GITHUB_ENV"
       - run: cargo +nightly fmt --check
-      - run: cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo +stable test --workspace --all-features
+      - run: cargo +stable clippy --workspace --all-targets -- -D warnings
+      - run: cargo +stable test --workspace
+
+  python:
+    name: Python helpers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Syntax check
+        run: python -m compileall -q scripts
+      - name: Compiler protocol unit tests
+        run: python -m unittest scripts/test_compile_tensorrt.py
+
+  raw-tensorrt:
+    name: Raw TensorRT (provisioned GPU)
+    if: ${{ vars.RAW_TENSORRT_CI == 'true' }}
+    runs-on: [self-hosted, linux, x64, cuda, tensorrt]
+    env:
+      LIBTORCH_USE_PYTORCH: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check raw TensorRT feature
+        run: cargo check -p alphazero --features raw-tensorrt
+      - name: Test raw TensorRT feature
+        run: cargo test -p alphazero --features raw-tensorrt

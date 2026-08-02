@@ -16,23 +16,32 @@ value-head pressure on the shared trunk.
 
 The trainer seeds each replay batch from the experiment seed and global step. A bounded scoped prefetch thread overlaps CPU sampling/encoding with device work without detached threads or unbounded memory. Each sampled batch transfers to the device once; microbatches are device views rather than repeated host-to-device copies.
 
+Self-play workers retain their configured PUCT, Root-Gumbel PUCT, or Full Gumbel MCTS instance and its scratch capacity across moves. Search randomness is reseeded from purpose-specific game seeds; played-action selection remains a separate policy choice.
+
 `TrainConfig` makes Adam parameters and learning-rate schedules explicit. Supported schedules are constant, linear warmup plus cosine decay, and piecewise values. The effective learning rate and timing breakdown are written to `metrics.jsonl` with batcher statistics.
 
 Optimizer moments are not serializable through the pinned `tch` API. Until that changes, a resume is accurately marked weights-only even when replay persistence is introduced.
 
 ## Checkpoint retention
 
-Every completed training iteration atomically updates
-`checkpoints/latest.safetensors`. Completed iterations whose number is a
-multiple of 25 are also retained as immutable archives under `checkpoints/`,
-for example `generation-000025.safetensors`. Resuming always uses the latest
-weights, while the periodic archives provide rollback and evaluation points.
+Every checkpoint is first installed at an immutable generation-addressed path,
+for example `checkpoints/generation-000025.safetensors`. `state.json` records
+that relative path, generation, and SHA-256; it is the authority for resume and
+compiled-artifact identity. `latest.safetensors` is updated afterward as a
+convenience copy. A run-level writer lock prevents concurrent trainers from
+interleaving checkpoint, state, and metrics writes.
+
+For TensorRT self-play, each compiled CModule or engine has fixed weights and a
+validated sibling manifest. A checkpoint change requires a new engine artifact;
+the raw builder may reuse a compatible graph/profile/environment timing cache.
+Training replaces the compiled inference service between generations rather
+than requesting unsupported in-place reload.
 
 ## Default chess recipe
 
 `scripts/train` (wrapper around `scripts/train_chess.py`) launches
 `experiments/chess-puct-wdl-tensorrt.toml` into
-`runs/chess-puct-wdl-tensorrt-v6` on CUDA. It uses Torch-TensorRT FP16
+`runs/chess-puct-wdl-tensorrt-v6` on CUDA. It uses exact Torch-TensorRT FP16
 self-play and native CUDA training with the validated H4 defaults: 112
 self-play threads, 32-leaf local MCTS batches, preferred inference batch 128,
 maximum batch 256, a 1 ms wait, and compile shapes opt=128 / max=256. New runs

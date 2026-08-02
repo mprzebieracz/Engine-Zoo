@@ -1,5 +1,5 @@
 use alphazero::{ExperimentConfig, RunDir};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use engine_app::tensor_rt;
 use std::path::PathBuf;
@@ -42,8 +42,7 @@ enum Command {
         #[arg(long)]
         experiment: PathBuf,
     },
-    /// Ensure a run directory has `experiment.toml` (migrating legacy
-    /// `config.json` / `experiment.json` when needed) and print its path.
+    /// Require an initialized run directory and print its experiment path.
     /// Used by the arena wrapper before TensorRT compilation.
     EnsureExperiment {
         #[arg(long)]
@@ -66,10 +65,11 @@ fn main() -> Result<()> {
 }
 
 fn ensure_experiment(run_dir: PathBuf) -> Result<()> {
-    let (run, _, _) = RunDir::open_or_create(&run_dir, || {
-        panic!("no experiment found at {}", run_dir.display())
-    })?;
+    let (run, _, _) = RunDir::open(&run_dir)
+        .with_context(|| format!("no experiment found at {}", run_dir.display()))?;
+
     println!("{}", run.experiment_path().display());
+
     Ok(())
 }
 

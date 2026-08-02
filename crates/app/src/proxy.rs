@@ -41,7 +41,7 @@ use crate::visualization::render_chess_play_page;
 
 const BATCH_TIMEOUT: Duration = Duration::from_millis(2);
 
-fn puct_search(_simulations: usize) -> SearchConfig {
+fn puct_search() -> SearchConfig {
     SearchConfig::Puct(search::PuctConfig {
         leaf_batch_size: 1,
         root_noise: None,
@@ -185,7 +185,7 @@ fn server_inference_config(
     // Server model aliases resolve to checkpoint files. Preserve the previous
     // HTTP behavior by using reloadable native inference for those aliases.
     config.engine = alphazero::InferenceEngine::Native;
-    config.tensor_rt_module = None;
+    config.compiled_artifact = None;
     config.preferred_batch_size = wait_for_count.max(1);
     config.max_wait = alphazero::DurationConfig {
         milliseconds: timeout.as_millis().try_into().unwrap_or(u64::MAX),
@@ -215,6 +215,7 @@ struct SessionState<G: GameState> {
     simulations: usize,
     wait_for_count: usize,
     chess_history: Option<alphazero::ChessHistory>,
+    chess_engine: Option<Box<alphazero::ChessAlphaZeroEngine>>,
 }
 
 pub async fn serve(cfg: ServeConfig) -> Result<()> {
@@ -335,6 +336,7 @@ mod tests {
                 8 => alphazero::ChessHistory::Eight,
                 _ => unreachable!(),
             }),
+            chess_engine: None,
         };
         let mv = games::chess::ChessUciNotation
             .parse_move(&session.game.position(), "e2e4")
