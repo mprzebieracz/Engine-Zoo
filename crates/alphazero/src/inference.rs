@@ -132,10 +132,7 @@ fn validate_build_config(
     build: &crate::artifact::ArtifactBuildConfig,
     config: &InferenceConfig,
 ) -> Result<()> {
-    let precision = match config.precision {
-        InferencePrecision::Fp32 => crate::artifact::TensorRtBuildPrecision::Fp32,
-        InferencePrecision::Fp16 => crate::artifact::TensorRtBuildPrecision::Fp16,
-    };
+    let precision = config.tensor_rt_build_precision();
     let matches = build.requested_precision == precision
         && build.opt_batch == config.preferred_batch_size
         && build.max_batch == config.max_batch_size;

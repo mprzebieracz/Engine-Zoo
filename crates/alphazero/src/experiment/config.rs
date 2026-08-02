@@ -1,5 +1,8 @@
 use super::migration::{migrate_version_two, VersionTwoExperiment};
-use crate::{BatcherConfig, InferencePrecision, ModelSpec, SelfPlayConfig, TrainConfig};
+use crate::{
+    artifact::TensorRtBuildPrecision, BatcherConfig, InferencePrecision, ModelSpec, SelfPlayConfig,
+    TrainConfig,
+};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -42,6 +45,9 @@ pub struct InferenceConfig {
     #[serde(alias = "tensor_rt_module")]
     pub compiled_artifact: Option<PathBuf>,
     pub precision: InferencePrecision,
+    /// TensorRT build and I/O contract. When omitted, retain the historical
+    /// mapping from `precision` (`fp16` or `fp32`).
+    pub tensor_rt_precision: Option<TensorRtBuildPrecision>,
     /// For native CUDA FP16 inference, convert encoded states to FP16 in the
     /// pinned host buffer before the asynchronous upload. This is an opt-in
     /// benchmark variant; the default keeps the established FP32 upload path.
@@ -58,6 +64,7 @@ impl Default for InferenceConfig {
             engine: InferenceEngine::Native,
             compiled_artifact: None,
             precision: InferencePrecision::Fp32,
+            tensor_rt_precision: None,
             fp16_host_staging: false,
             preferred_batch_size: 32,
             max_batch_size: 256,
@@ -76,6 +83,15 @@ impl InferenceConfig {
             ensure!(
                 self.compiled_artifact.is_some(),
                 "TensorRT inference requires compiled_artifact"
+            );
+        }
+        if self.tensor_rt_precision.is_some() {
+            ensure!(
+                matches!(
+                    self.engine,
+                    InferenceEngine::TensorRtTorchScript | InferenceEngine::TensorRtRaw
+                ),
+                "tensor_rt_precision requires TensorRT inference"
             );
         }
         if self.fp16_host_staging {
@@ -105,6 +121,13 @@ impl InferenceConfig {
             max_wait: self.max_wait.as_duration(),
             max_queued_states: self.max_queued_states,
         }
+    }
+
+    pub fn tensor_rt_build_precision(&self) -> TensorRtBuildPrecision {
+        self.tensor_rt_precision.unwrap_or(match self.precision {
+            InferencePrecision::Fp16 => TensorRtBuildPrecision::Fp16,
+            InferencePrecision::Fp32 => TensorRtBuildPrecision::Fp32,
+        })
     }
 }
 
