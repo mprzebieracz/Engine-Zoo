@@ -1,6 +1,7 @@
 //! Neural AlphaZero training and inference.
 
 mod analysis;
+pub mod artifact;
 mod batcher;
 mod evaluator;
 pub mod experiment;
@@ -18,16 +19,22 @@ pub use analysis::{
     analyze_game_mcts, analyze_game_mcts_with_repetitions, analyze_game_net, Analysis,
     AnalyzeConfig, AnalyzeMode,
 };
+pub use artifact::{
+    ArtifactBuildConfig, ArtifactCacheIdentity, ArtifactDType, ArtifactEnvironment,
+    ArtifactIoContract, CompiledArtifactManifest, CompiledBackendKind, CompilerIdentity,
+    RecompileReason, RecompileRequired, TensorRtBuildPrecision, ValueLayout,
+    ARTIFACT_MANIFEST_VERSION,
+};
+#[cfg(feature = "raw-tensorrt")]
+pub use batcher::RawTensorRtBackend;
 pub use batcher::{
     Batcher, BatcherClient, BatcherConfig, BatcherError, BatcherStats, CombinedEncodedBatch,
     InferenceBackend, InferencePrecision, TchInferenceBackend,
 };
-#[cfg(feature = "raw-tensorrt")]
-pub use batcher::RawTensorRtBackend;
 pub use evaluator::{EncodedEvalBatch, EncodedEvaluator, RepresentedEvaluator};
 pub use experiment::{
-    DurationConfig, ExperimentConfig, InferenceConfig, InferenceEngine, ReplayConfig, ResumeKind,
-    RunDir, RunState, EXPERIMENT_FORMAT_VERSION, STATE_FORMAT_VERSION,
+    CheckpointIdentity, DurationConfig, ExperimentConfig, InferenceConfig, InferenceEngine,
+    ReplayConfig, ResumeKind, RunDir, RunState, EXPERIMENT_FORMAT_VERSION, STATE_FORMAT_VERSION,
 };
 pub use inference::{InferenceClient, InferenceService, InferenceSource};
 pub use network::{

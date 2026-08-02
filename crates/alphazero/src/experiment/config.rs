@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const EXPERIMENT_FORMAT_VERSION: u32 = 3;
+pub const EXPERIMENT_FORMAT_VERSION: u32 = 4;
 
 /// Serializable duration used by immutable experiment files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,8 +15,7 @@ pub struct DurationConfig {
 
 /// Selects the implementation used for self-play inference.
 ///
-/// TensorRT modules are opt-in because they require the matching Torch-TensorRT
-/// runtime to be available to LibTorch at process startup.
+/// Compiled artifacts are opt-in because they require their matching runtime.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InferenceEngine {
@@ -39,9 +38,9 @@ impl DurationConfig {
 #[serde(default)]
 pub struct InferenceConfig {
     pub engine: InferenceEngine,
-    /// A TorchScript module compiled with Torch-TensorRT. Its `forward` method
-    /// returns the policy logits and scalar value packed along dimension one.
-    pub tensor_rt_module: Option<PathBuf>,
+    /// A Torch-TensorRT module or raw TensorRT plan, according to `engine`.
+    #[serde(alias = "tensor_rt_module")]
+    pub compiled_artifact: Option<PathBuf>,
     pub precision: InferencePrecision,
     /// For native CUDA FP16 inference, convert encoded states to FP16 in the
     /// pinned host buffer before the asynchronous upload. This is an opt-in
@@ -57,7 +56,7 @@ impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
             engine: InferenceEngine::Native,
-            tensor_rt_module: None,
+            compiled_artifact: None,
             precision: InferencePrecision::Fp32,
             fp16_host_staging: false,
             preferred_batch_size: 32,
@@ -75,8 +74,8 @@ impl InferenceConfig {
             InferenceEngine::TensorRtTorchScript | InferenceEngine::TensorRtRaw
         ) {
             ensure!(
-                self.tensor_rt_module.is_some(),
-                "TensorRT inference requires tensor_rt_module"
+                self.compiled_artifact.is_some(),
+                "TensorRT inference requires compiled_artifact"
             );
         }
         if self.fp16_host_staging {
@@ -152,6 +151,11 @@ impl ExperimentConfig {
             .ok_or_else(|| anyhow::anyhow!("experiment format_version must be an integer"))?;
         let config = match version {
             2 => migrate_version_two(toml::from_str::<VersionTwoExperiment>(&contents)?)?,
+            3 => {
+                let mut config: ExperimentConfig = toml::from_str(&contents)?;
+                config.format_version = EXPERIMENT_FORMAT_VERSION;
+                config
+            }
             version if version == i64::from(EXPERIMENT_FORMAT_VERSION) => {
                 toml::from_str(&contents)?
             }
@@ -183,10 +187,10 @@ impl ExperimentConfig {
         self.model.fingerprint()
     }
 
-    pub(crate) fn upgrade_from_v1(mut self) -> Result<Self> {
+    pub(crate) fn upgrade_to_current(mut self) -> Result<Self> {
         ensure!(
-            self.format_version == 1,
-            "expected experiment format version 1, got {}",
+            matches!(self.format_version, 1 | 3),
+            "expected experiment format version 1 or 3, got {}",
             self.format_version
         );
         self.format_version = EXPERIMENT_FORMAT_VERSION;

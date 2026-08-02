@@ -1,5 +1,11 @@
 # Default chess H4 performance baseline
 
+These existing measurements are the pre-finalization baseline. Compare the
+post-finalization CUDA run against commit
+`efdd74d8c7e2701d330b066f4686df55b7e08457` as recorded in
+[alphazero-closure-baseline.md](alphazero-closure-baseline.md). No replacement
+measurements were taken during the non-CUDA finalization pass.
+
 This document is the results record for
 `benchmarks/configs/default-chess-h4-cuda-500.toml`. The fixture is an
 immutable 500-game, 80-step full iteration matching the user-facing H4 default

@@ -74,8 +74,10 @@ fn write_uci_options(out: &mut impl Write, settings: &Settings) -> anyhow::Resul
 
 fn set_option(engine: &mut ChessUciEngine, name: &str, value: String) -> anyhow::Result<()> {
     let name = name.to_ascii_lowercase();
-    let invalidates_model =
-        matches!(name.as_str(), "model" | "rundir" | "device" | "tensorrtmodule");
+    let invalidates_model = matches!(
+        name.as_str(),
+        "model" | "rundir" | "device" | "tensorrtmodule"
+    );
 
     match name.as_str() {
         "model" => engine.settings.model = value,

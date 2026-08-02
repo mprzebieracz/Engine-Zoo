@@ -5,7 +5,7 @@ use engine_core::agent::{Agent, PolicyMode};
 use engine_core::game::GameState;
 use engine_core::notation::GameNotation;
 use games::{Connect4, Connect4Notation};
-use search::{Mcts, SearchBudget, SearchConfig, SearchRequest, SearchRules};
+use search::{Mcts, SearchAlgorithm, SearchBudget, SearchConfig, SearchRequest, SearchRules};
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -125,9 +125,10 @@ impl<G: InteractiveGame> AlphaZeroAgent<G> {
                 .with_context(|| format!("loading AlphaZero agent from {}", weights.display()))?;
         let mcts = Mcts::new(
             RepresentedEvaluator::new(G::Representation::default(), inference.client()),
-            puct_search(simulations),
+            puct_search(),
             G::Rules::default(),
         );
+
         Ok(AlphaZeroAgent {
             _inference: inference,
             mcts,
@@ -138,7 +139,7 @@ impl<G: InteractiveGame> AlphaZeroAgent<G> {
 
 impl<G: InteractiveGame> Agent<G> for AlphaZeroAgent<G> {
     fn select_move(&mut self, game: &G, mode: PolicyMode) -> G::Move {
-        let is_puct = matches!(self.mcts.config(), SearchConfig::Puct(_));
+        let is_puct = self.mcts.algorithm() == SearchAlgorithm::Puct;
         let state = game.search_state();
         let result = self
             .mcts
@@ -162,7 +163,7 @@ impl<G: InteractiveGame> Agent<G> for AlphaZeroAgent<G> {
     }
 }
 
-fn puct_search(_simulations: usize) -> SearchConfig {
+fn puct_search() -> SearchConfig {
     SearchConfig::Puct(search::PuctConfig::analysis_default(1))
 }
 
