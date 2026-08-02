@@ -10,6 +10,7 @@ pub use manifest::{
 };
 
 use anyhow::{Context, Result};
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -82,9 +83,24 @@ pub fn write_manifest_last(
 
 pub fn unique_sibling(path: &Path) -> PathBuf {
     let id = TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let suffix = format!(".tmp-{}-{id}", std::process::id());
+    let mut name = OsString::from(".");
 
-    path.with_file_name(format!(".{name}.tmp-{}-{id}", std::process::id()))
+    if !path.is_dir() {
+        if let (Some(stem), Some(extension)) = (path.file_stem(), path.extension()) {
+            name.push(stem);
+            name.push(&suffix);
+            name.push(".");
+            name.push(extension);
+
+            return path.with_file_name(name);
+        }
+    }
+
+    name.push(path.file_name().unwrap_or_default());
+    name.push(suffix);
+
+    path.with_file_name(name)
 }
 
 pub(crate) fn sync_parent(path: &Path) -> Result<()> {
@@ -182,6 +198,27 @@ mod tests {
             semantic_cache_key(&first.cache_identity()).unwrap(),
             semantic_cache_key(&changed.cache_identity()).unwrap()
         );
+    }
+
+    #[test]
+    fn unique_sibling_preserves_checkpoint_extension() {
+        let checkpoint = Path::new("checkpoints/latest.safetensors");
+        let temporary = unique_sibling(checkpoint);
+
+        assert_eq!(temporary.parent(), checkpoint.parent());
+        assert_eq!(temporary.extension(), checkpoint.extension());
+        assert!(temporary
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".latest.tmp-"));
+
+        let extensionless = Path::new("compiled");
+        assert!(unique_sibling(extensionless)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".compiled.tmp-"));
     }
 
     #[test]
