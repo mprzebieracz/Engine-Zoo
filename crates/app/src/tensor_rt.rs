@@ -208,7 +208,8 @@ fn remove_intermediates(directory: &Path) -> Result<()> {
         if !keep {
             if path.is_dir() {
                 fs::remove_dir_all(path)?;
-            } else {
+            }
+            else {
                 fs::remove_file(path)?;
             }
         }
@@ -242,7 +243,8 @@ fn install_content_addressed(
             "content-addressed TensorRT target has conflicting metadata"
         );
         fs::remove_dir_all(temporary_root)?;
-    } else {
+    }
+    else {
         fs::rename(temporary_root, &installed_directory)?;
         File::open(&store)?.sync_all()?;
     }
@@ -547,7 +549,8 @@ fn expected_io(model: &ModelSpec, precision: TensorRtBuildPrecision) -> Artifact
     let [channels, height, width] = model.state_shape();
     let dtype = if precision == TensorRtBuildPrecision::Fp16 {
         ArtifactDType::Fp16
-    } else {
+    }
+    else {
         ArtifactDType::Fp32
     };
 
@@ -573,7 +576,8 @@ fn parse_dtype(value: &str) -> Result<ArtifactDType> {
 fn expected_dtype(precision: TensorRtBuildPrecision) -> &'static str {
     if precision == TensorRtBuildPrecision::Fp16 {
         "fp16"
-    } else {
+    }
+    else {
         "fp32"
     }
 }
@@ -694,7 +698,8 @@ fn export_torchscript_for_model(
     let [channels, height, width] = model.state_shape();
     let input_kind = if precision == TensorRtBuildPrecision::Fp16 {
         Kind::Half
-    } else {
+    }
+    else {
         Kind::Float
     };
     let input = Tensor::zeros([1, channels, height, width], (input_kind, device));
