@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use engine_core::game::GameState;
 use engine_core::notation::GameNotation;
 use games::ChessGame;
-use search::{SearchBudget, SearchRequest};
+use search::{PuctConfig, SearchBudget, SearchConfig, SearchRequest};
 use std::path::{Path, PathBuf};
 use tch::Device;
 
@@ -98,7 +98,7 @@ impl ChessUciEngine {
         if self.engine.is_some() {
             return Ok(());
         }
-        let (weights, mut cfg) =
+        let (weights, mut cfg, state) =
             load_config_and_model(&self.settings.run_dir, &self.settings.model)?;
         let engine = match &self.settings.tensor_rt_module {
             Some(module) => {
@@ -107,12 +107,15 @@ impl ChessUciEngine {
                     "TensorRtModule path is not a file: {}",
                     module.display()
                 );
+                validate_compiled_checkpoint(module, &state)?;
+
                 cfg.inference.engine = InferenceEngine::TensorRtTorchScript;
                 ChessAlphaZeroEngine::open(
                     cfg.model,
-                    InferenceSource::TensorRtModule(module),
+                    InferenceSource::TensorRtTorchScript(module),
                     self.settings.device,
                     &cfg.inference,
+                    application_search(),
                 )?
             }
             None => {
@@ -121,12 +124,13 @@ impl ChessUciEngine {
                 // checkpoints from a plain safetensors file without the
                 // compiled module.
                 cfg.inference.engine = InferenceEngine::Native;
-                cfg.inference.tensor_rt_module = None;
+                cfg.inference.compiled_artifact = None;
                 ChessAlphaZeroEngine::open(
                     cfg.model,
                     InferenceSource::Checkpoint(&weights),
                     self.settings.device,
                     &cfg.inference,
+                    application_search(),
                 )?
             }
         };
@@ -160,10 +164,16 @@ impl ChessUciEngine {
     }
 }
 
-fn load_config_and_model(run_dir: &Path, model: &str) -> Result<(PathBuf, ExperimentConfig)> {
-    let (run, config, state) = RunDir::open_or_create(run_dir, || {
-        panic!("no experiment found at {}", run_dir.display())
-    })?;
+fn application_search() -> SearchConfig {
+    SearchConfig::Puct(PuctConfig::analysis_default(1))
+}
+
+fn load_config_and_model(
+    run_dir: &Path,
+    model: &str,
+) -> Result<(PathBuf, ExperimentConfig, alphazero::RunState)> {
+    let (run, config, state) = RunDir::open(run_dir)
+        .with_context(|| format!("no experiment found at {}", run_dir.display()))?;
     anyhow::ensure!(
         config.model.game() == GameKind::Chess,
         "run is not a chess model"
@@ -189,7 +199,32 @@ fn load_config_and_model(run_dir: &Path, model: &str) -> Result<(PathBuf, Experi
         "checkpoint not found: {}",
         weights.display()
     );
-    Ok((weights, config))
+    Ok((weights, config, state))
+}
+
+fn validate_compiled_checkpoint(artifact: &Path, state: &alphazero::RunState) -> Result<()> {
+    let checkpoint = state
+        .checkpoint_identity
+        .as_ref()
+        .context("run has no current checkpoint identity")?;
+    let manifest = alphazero::artifact::read_manifest(artifact)?;
+
+    validate_checkpoint_digest(&manifest.checkpoint_sha256, &checkpoint.sha256)?;
+
+    Ok(())
+}
+
+fn validate_checkpoint_digest(
+    compiled: &str,
+    current: &str,
+) -> std::result::Result<(), alphazero::RecompileRequired> {
+    if compiled != current {
+        return Err(alphazero::RecompileRequired {
+            reason: alphazero::RecompileReason::StaleIdentity("checkpoint_sha256"),
+        });
+    }
+
+    Ok(())
 }
 
 fn checkpoint_path(run: &RunDir, name: &str) -> PathBuf {
@@ -253,5 +288,16 @@ mod tests {
         let before = engine.game.to_string();
         assert!(engine.set_position(Some("not a fen"), &[]).is_err());
         assert_eq!(engine.game.to_string(), before);
+    }
+
+    #[test]
+    fn compiled_checkpoint_mismatch_requires_recompilation() {
+        let error = validate_checkpoint_digest("compiled", "current").unwrap_err();
+
+        assert_eq!(
+            error.reason,
+            alphazero::RecompileReason::StaleIdentity("checkpoint_sha256")
+        );
+        assert!(validate_checkpoint_digest("current", "current").is_ok());
     }
 }

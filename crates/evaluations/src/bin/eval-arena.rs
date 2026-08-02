@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use checkpoint_eval::fastchess::{FastchessCommand, Openings};
 use checkpoint_eval::match_suite::run_match;
 use checkpoint_eval::model_engine::{infer_run_dir, ModelEngine};
@@ -58,9 +58,8 @@ struct Args {
 }
 
 fn validate_chess_run(run_dir: &Path) -> Result<()> {
-    let (_, config, _) = alphazero::RunDir::open_or_create(run_dir, || {
-        panic!("no experiment found at {}", run_dir.display())
-    })?;
+    let (_, config, _) = alphazero::RunDir::open(run_dir)
+        .with_context(|| format!("no experiment found at {}", run_dir.display()))?;
     anyhow::ensure!(
         config.model.game() == alphazero::GameKind::Chess,
         "{} is not a chess run",

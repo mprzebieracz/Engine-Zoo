@@ -2,14 +2,26 @@ use super::*;
 use crate::representation::Action;
 use search::PositionValue;
 use std::path::Path;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
 
-#[derive(Clone)]
+enum FakeBehavior {
+    Success,
+    Error,
+    WrongCardinality,
+    BlockUntilShutdown {
+        entered: SyncSender<()>,
+        release: Receiver<()>,
+    },
+    WorkerStop,
+    FailOnCall(usize),
+}
+
 struct MockBackend {
     calls: Arc<Mutex<Vec<usize>>>,
-    fail: bool,
+    behavior: FakeBehavior,
     reloads: Arc<Mutex<usize>>,
     events: Arc<Mutex<Vec<&'static str>>>,
 }
@@ -20,7 +32,7 @@ impl MockBackend {
         (
             Self {
                 calls: Arc::clone(&calls),
-                fail: false,
+                behavior: FakeBehavior::Success,
                 reloads: Arc::new(Mutex::new(0)),
                 events: Arc::new(Mutex::new(Vec::new())),
             },
@@ -31,22 +43,29 @@ impl MockBackend {
 
 impl InferenceBackend for MockBackend {
     fn evaluate(&mut self, batch: &CombinedEncodedBatch) -> Result<Vec<Evaluation>> {
-        self.calls.lock().unwrap().push(batch.len());
+        let call = {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(batch.len());
+            calls.len()
+        };
         self.events.lock().unwrap().push("evaluate");
-        anyhow::ensure!(!self.fail, "mock backend failure");
-        Ok((0..batch.len())
-            .map(|row| {
-                let begin = batch.offsets[row] as usize;
-                let end = batch.offsets[row + 1] as usize;
-                Evaluation {
-                    logits: batch.legal_actions[begin..end]
-                        .iter()
-                        .map(|action| action.as_u32() as f32)
-                        .collect(),
-                    value: PositionValue::new(batch.states[row]).unwrap(),
-                }
-            })
-            .collect())
+
+        match &self.behavior {
+            FakeBehavior::Success => {}
+            FakeBehavior::Error => anyhow::bail!("mock backend failure"),
+            FakeBehavior::WrongCardinality => return Ok(Vec::new()),
+            FakeBehavior::BlockUntilShutdown { entered, release } => {
+                entered.send(()).unwrap();
+                release.recv().unwrap();
+            }
+            FakeBehavior::WorkerStop => panic!("simulated worker stop"),
+            FakeBehavior::FailOnCall(failing_call) if call == *failing_call => {
+                anyhow::bail!("mock backend failure on call {call}")
+            }
+            FakeBehavior::FailOnCall(_) => {}
+        }
+
+        Ok(evaluations(batch))
     }
 
     fn reload_weights(&mut self, _path: &Path) -> Result<()> {
@@ -54,6 +73,22 @@ impl InferenceBackend for MockBackend {
         self.events.lock().unwrap().push("reload");
         Ok(())
     }
+}
+
+fn evaluations(batch: &CombinedEncodedBatch) -> Vec<Evaluation> {
+    (0..batch.len())
+        .map(|row| {
+            let begin = batch.offsets[row] as usize;
+            let end = batch.offsets[row + 1] as usize;
+            Evaluation {
+                logits: batch.legal_actions[begin..end]
+                    .iter()
+                    .map(|action| action.as_u32() as f32)
+                    .collect(),
+                value: PositionValue::new(batch.states[row]).unwrap(),
+            }
+        })
+        .collect()
 }
 
 fn config(preferred: usize, max: usize) -> BatcherConfig {
@@ -79,6 +114,49 @@ fn batch(states: &[f32], legal: &[&[u32]]) -> EncodedEvalBatch {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BatchStorage {
+    pointers: [usize; 3],
+    capacities: [usize; 3],
+}
+
+impl BatchStorage {
+    fn of(batch: &EncodedEvalBatch) -> Self {
+        Self {
+            pointers: [
+                batch.states.as_ptr() as usize,
+                batch.legal_actions.as_ptr() as usize,
+                batch.offsets.as_ptr() as usize,
+            ],
+            capacities: [
+                batch.states.capacity(),
+                batch.legal_actions.capacity(),
+                batch.offsets.capacity(),
+            ],
+        }
+    }
+}
+
+fn reusable_batch(states: &[f32], legal: &[&[u32]]) -> EncodedEvalBatch {
+    let mut batch = batch(states, legal);
+    batch.states.reserve(31);
+    batch.legal_actions.reserve(29);
+    batch.offsets.reserve(23);
+
+    batch
+}
+
+fn assert_batch_restored(
+    actual: &EncodedEvalBatch,
+    expected: &EncodedEvalBatch,
+    storage: BatchStorage,
+) {
+    assert_eq!(actual.states, expected.states);
+    assert_eq!(actual.legal_actions, expected.legal_actions);
+    assert_eq!(actual.offsets, expected.offsets);
+    assert_eq!(BatchStorage::of(actual), storage);
+}
+
 #[test]
 fn config_rejects_invalid_limits() {
     assert!(config(0, 1).validate().is_err());
@@ -89,14 +167,16 @@ fn config_rejects_invalid_limits() {
 }
 
 #[test]
-fn one_request_round_trips_and_returns_allocations() {
+fn evaluate_restores_batch_after_success() {
     let (backend, _) = MockBackend::new();
     let batcher = Batcher::with_backend(backend, config(1, 4)).unwrap();
     let mut client = batcher.client();
-    let mut request = batch(&[0.25, -0.5], &[&[3, 1], &[4]]);
-    request.states.reserve(16);
-    let pointer = request.states.as_ptr();
+    let mut request = reusable_batch(&[0.25, -0.5], &[&[3, 1], &[4]]);
+    let expected = batch(&[0.25, -0.5], &[&[3, 1], &[4]]);
+    let storage = BatchStorage::of(&request);
+
     let result = client.evaluate(&mut request).unwrap();
+
     assert_eq!(
         result
             .iter()
@@ -104,7 +184,7 @@ fn one_request_round_trips_and_returns_allocations() {
             .collect::<Vec<_>>(),
         vec![vec![3.0, 1.0], vec![4.0]]
     );
-    assert_eq!(request.states.as_ptr(), pointer);
+    assert_batch_restored(&request, &expected, storage);
 }
 
 #[test]
@@ -163,15 +243,20 @@ fn max_batch_splits_and_reassembles_one_large_request_in_order() {
 }
 
 #[test]
-fn backend_failure_reaches_current_and_future_clients() {
+fn evaluate_restores_batch_after_backend_error() {
     let (mut backend, _) = MockBackend::new();
-    backend.fail = true;
+    backend.behavior = FakeBehavior::Error;
     let batcher = Batcher::with_backend(backend, config(1, 2)).unwrap();
-    let mut first = batch(&[0.0], &[&[0]]);
+    let mut first = reusable_batch(&[0.0], &[&[0]]);
+    let expected = batch(&[0.0], &[&[0]]);
+    let storage = BatchStorage::of(&first);
+
     assert!(matches!(
         batcher.client().evaluate(&mut first),
         Err(BatcherError::Backend(_))
     ));
+    assert_batch_restored(&first, &expected, storage);
+
     let mut next = batch(&[1.0], &[&[0]]);
     assert!(matches!(
         batcher.client().evaluate(&mut next),
@@ -180,37 +265,121 @@ fn backend_failure_reaches_current_and_future_clients() {
 }
 
 #[test]
+fn evaluate_restores_batch_after_wrong_cardinality() {
+    let (mut backend, _) = MockBackend::new();
+    backend.behavior = FakeBehavior::WrongCardinality;
+    let batcher = Batcher::with_backend(backend, config(1, 2)).unwrap();
+    let mut request = reusable_batch(&[0.0], &[&[0]]);
+    let expected = batch(&[0.0], &[&[0]]);
+    let storage = BatchStorage::of(&request);
+
+    assert!(matches!(
+        batcher.client().evaluate(&mut request),
+        Err(BatcherError::Backend(_))
+    ));
+    assert_batch_restored(&request, &expected, storage);
+}
+
+#[test]
 fn reload_is_a_barrier_before_the_next_inference_pass() {
-    let (backend, _) = MockBackend::new();
+    let (mut backend, _) = MockBackend::new();
     let events = Arc::clone(&backend.events);
-    let mut cfg = config(2, 2);
-    cfg.max_wait = Duration::from_millis(50);
-    let batcher = Arc::new(Batcher::with_backend(backend, cfg).unwrap());
+    let (entered_tx, entered_rx) = sync_channel(1);
+    let (release_tx, release_rx) = sync_channel(1);
+    backend.behavior = FakeBehavior::BlockUntilShutdown {
+        entered: entered_tx,
+        release: release_rx,
+    };
+    let batcher = Arc::new(Batcher::with_backend(backend, config(1, 2)).unwrap());
     let evaluation_batcher = Arc::clone(&batcher);
     let evaluation = thread::spawn(move || {
         let mut request = batch(&[0.0], &[&[0]]);
         evaluation_batcher.client().evaluate(&mut request)
     });
-    thread::sleep(Duration::from_millis(5));
-    batcher.reload_weights(Path::new("unused")).unwrap();
+    entered_rx.recv().unwrap();
+
+    let reload_batcher = Arc::clone(&batcher);
+    let reload = thread::spawn(move || reload_batcher.reload_weights(Path::new("unused")));
+    let pending = batcher.shared.pending.lock().unwrap();
+    let pending = batcher
+        .shared
+        .cv
+        .wait_while(pending, |state| {
+            !state
+                .commands
+                .iter()
+                .any(|command| matches!(command, Command::Reload(_)))
+        })
+        .unwrap();
+    drop(pending);
+    release_tx.send(()).unwrap();
+
+    reload.join().unwrap().unwrap();
     assert_eq!(batcher.client().cache_namespace(), 1);
     evaluation.join().unwrap().unwrap();
     assert_eq!(*events.lock().unwrap(), vec!["evaluate", "reload"]);
 }
 
 #[test]
-fn dropping_batcher_unblocks_waiting_client() {
-    let (backend, _) = MockBackend::new();
-    let batcher = Arc::new(Batcher::with_backend(backend, config(2, 2)).unwrap());
+fn evaluate_restores_batch_after_shutdown() {
+    let (mut backend, _) = MockBackend::new();
+    let (entered_tx, entered_rx) = sync_channel(1);
+    let (release_tx, release_rx) = sync_channel(1);
+    backend.behavior = FakeBehavior::BlockUntilShutdown {
+        entered: entered_tx,
+        release: release_rx,
+    };
+    let batcher = Batcher::with_backend(backend, config(1, 2)).unwrap();
+    let shared = Arc::clone(&batcher.shared);
     let mut client = batcher.client();
     let waiter = thread::spawn(move || {
-        let mut request = batch(&[0.0], &[&[0]]);
-        client.evaluate(&mut request)
+        let mut request = reusable_batch(&[0.0], &[&[0]]);
+        let storage = BatchStorage::of(&request);
+        let result = client.evaluate(&mut request);
+
+        (result, request, storage)
     });
-    thread::sleep(Duration::from_millis(5));
-    drop(batcher);
-    assert!(matches!(
-        waiter.join().unwrap(),
-        Err(BatcherError::Shutdown)
-    ));
+    entered_rx.recv().unwrap();
+
+    let dropper = thread::spawn(move || drop(batcher));
+    let pending = shared.pending.lock().unwrap();
+    let pending = shared.cv.wait_while(pending, |state| !state.stop).unwrap();
+    drop(pending);
+    release_tx.send(()).unwrap();
+
+    let (result, request, storage) = waiter.join().unwrap();
+    dropper.join().unwrap();
+
+    assert!(matches!(result, Err(BatcherError::Shutdown)));
+    assert_batch_restored(&request, &batch(&[0.0], &[&[0]]), storage);
+}
+
+#[test]
+fn evaluate_restores_batch_after_worker_stop() {
+    let (mut backend, _) = MockBackend::new();
+    backend.behavior = FakeBehavior::WorkerStop;
+    let batcher = Batcher::with_backend(backend, config(1, 2)).unwrap();
+    let mut request = reusable_batch(&[0.0], &[&[0]]);
+    let storage = BatchStorage::of(&request);
+
+    let result = batcher.client().evaluate(&mut request);
+
+    assert!(matches!(result, Err(BatcherError::WorkerStopped)));
+    assert_batch_restored(&request, &batch(&[0.0], &[&[0]]), storage);
+}
+
+#[test]
+fn split_task_restores_batch_after_later_pass_failure() {
+    let (mut backend, calls) = MockBackend::new();
+    backend.behavior = FakeBehavior::FailOnCall(2);
+    let batcher = Batcher::with_backend(backend, config(1, 2)).unwrap();
+    let mut request = reusable_batch(&[0.0, 0.25, 0.5], &[&[0], &[1], &[2]]);
+    let expected = batch(&[0.0, 0.25, 0.5], &[&[0], &[1], &[2]]);
+    let storage = BatchStorage::of(&request);
+
+    let result = batcher.client().evaluate(&mut request);
+
+    assert!(matches!(result, Err(BatcherError::Backend(_))));
+    assert_eq!(*calls.lock().unwrap(), vec![2, 1]);
+    assert_batch_restored(&request, &expected, storage);
 }

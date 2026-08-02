@@ -10,7 +10,7 @@ pub use config::{
     EXPERIMENT_FORMAT_VERSION,
 };
 pub use run_dir::RunDir;
-pub use state::{ResumeKind, RunState, STATE_FORMAT_VERSION};
+pub use state::{CheckpointIdentity, ResumeKind, RunState, STATE_FORMAT_VERSION};
 
 #[cfg(test)]
 mod tests;

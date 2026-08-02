@@ -30,6 +30,7 @@ pub(super) fn create_session_inner(
                 simulations: req.simulations,
                 wait_for_count: req.wait_for_count,
                 chess_history: cfg.model.chess_history(),
+                chess_engine: None,
             }))
         }
         GameKind::Connect4 => {
@@ -49,6 +50,7 @@ pub(super) fn create_session_inner(
                 simulations: req.simulations,
                 wait_for_count: req.wait_for_count,
                 chess_history: None,
+                chess_engine: None,
             })
         }
     };
@@ -145,24 +147,34 @@ pub(super) fn play_chess_engine_turn(
         );
     }
 
-    let checkpoint = resolve_model(&state.run_dir, &session.model);
-    let config = server_inference_config(
-        &cfg.inference,
-        session.wait_for_count,
-        Duration::from_millis(1),
-        state.device,
-    );
-    let loaded = state
-        .models
-        .load(&cfg.model, &checkpoint, state.device, &config)?;
-    let mut engine = alphazero::ChessAlphaZeroEngine::from_client(
-        loaded.model.clone(),
-        loaded.inference.client(),
-    )?;
-    let native = engine.select_move(
-        &session.game,
-        SearchRequest::deterministic_puct(session.simulations.max(1)),
-    )?;
+    if session.chess_engine.is_none() {
+        let checkpoint = resolve_model(&state.run_dir, &session.model);
+        let config = server_inference_config(
+            &cfg.inference,
+            session.wait_for_count,
+            Duration::from_millis(1),
+            state.device,
+        );
+        let loaded = state
+            .models
+            .load(&cfg.model, &checkpoint, state.device, &config)?;
+        let engine = alphazero::ChessAlphaZeroEngine::from_client(
+            loaded.model.clone(),
+            loaded.inference.client(),
+            puct_search(),
+        )?;
+
+        session.chess_engine = Some(Box::new(engine));
+    }
+
+    let native = session
+        .chess_engine
+        .as_deref_mut()
+        .expect("chess engine was initialized")
+        .select_move(
+            &session.game,
+            SearchRequest::deterministic_puct(session.simulations.max(1)),
+        )?;
     let uci = games::chess::ChessUciNotation.format_move(&session.game.position(), native);
     let san = games::chess::notation::san(session.game.board(), native);
     session.game.play(native);
@@ -196,7 +208,7 @@ pub(super) fn play_engine_turn_for(
         .load(&cfg.model, &checkpoint, state.device, &config)?;
     let mut mcts = Mcts::new(
         alphazero::RepresentedEvaluator::new(Connect4AzRepresentation, loaded.inference.client()),
-        puct_search(session.simulations),
+        puct_search(),
         NoExtraRules,
     );
     let native = mcts

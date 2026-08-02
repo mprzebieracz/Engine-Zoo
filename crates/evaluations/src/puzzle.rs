@@ -231,9 +231,8 @@ pub fn evaluate_checkpoint(
     mcts_config: SearchConfig,
     mcts_budget: SearchBudget,
 ) -> Result<(Vec<PuzzleResult>, PuzzleSummary)> {
-    let (_, config, _) = alphazero::RunDir::open_or_create(run_dir, || {
-        panic!("no experiment found at {}", run_dir.display())
-    })?;
+    let (_, config, _) = alphazero::RunDir::open(run_dir)
+        .with_context(|| format!("no experiment found at {}", run_dir.display()))?;
     anyhow::ensure!(
         config.model.game() == GameKind::Chess,
         "{} is not a chess run",

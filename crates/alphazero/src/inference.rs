@@ -18,7 +18,8 @@ pub use crate::experiment::{InferenceConfig, InferenceEngine};
 #[derive(Clone, Copy, Debug)]
 pub enum InferenceSource<'a> {
     Checkpoint(&'a Path),
-    TensorRtModule(&'a Path),
+    TensorRtTorchScript(&'a Path),
+    TensorRtEngine(&'a Path),
 }
 
 impl Batcher {
@@ -43,7 +44,17 @@ impl Batcher {
                     config.fp16_host_staging,
                 )
             }
-            (InferenceEngine::TensorRtTorchScript, InferenceSource::TensorRtModule(module)) => {
+            (
+                InferenceEngine::TensorRtTorchScript,
+                InferenceSource::TensorRtTorchScript(module),
+            ) => {
+                validate_compiled_source(
+                    model,
+                    module,
+                    crate::artifact::CompiledBackendKind::TensorRtTorchScript,
+                    config,
+                )?;
+
                 Self::new_with_tensor_rt_torchscript(
                     model.clone(),
                     module,
@@ -51,7 +62,14 @@ impl Batcher {
                     config.batcher_config(),
                 )
             }
-            (InferenceEngine::TensorRtRaw, InferenceSource::TensorRtModule(module)) => {
+            (InferenceEngine::TensorRtRaw, InferenceSource::TensorRtEngine(module)) => {
+                validate_compiled_source(
+                    model,
+                    module,
+                    crate::artifact::CompiledBackendKind::TensorRtRaw,
+                    config,
+                )?;
+
                 #[cfg(feature = "raw-tensorrt")]
                 {
                     Self::new_with_raw_tensor_rt(
@@ -69,7 +87,10 @@ impl Batcher {
                     )
                 }
             }
-            (InferenceEngine::Native, InferenceSource::TensorRtModule(_)) => {
+            (
+                InferenceEngine::Native,
+                InferenceSource::TensorRtTorchScript(_) | InferenceSource::TensorRtEngine(_),
+            ) => {
                 anyhow::bail!("native inference requires a checkpoint source")
             }
             (
@@ -78,8 +99,54 @@ impl Batcher {
             ) => {
                 anyhow::bail!("TensorRT inference requires a compiled module/engine source")
             }
+            (InferenceEngine::TensorRtTorchScript, InferenceSource::TensorRtEngine(_)) => {
+                anyhow::bail!("Torch-TensorRT inference requires a TorchScript artifact")
+            }
+            (InferenceEngine::TensorRtRaw, InferenceSource::TensorRtTorchScript(_)) => {
+                anyhow::bail!("raw TensorRT inference requires an engine-plan artifact")
+            }
         }
     }
+}
+
+fn validate_compiled_source(
+    model: &ModelSpec,
+    path: &Path,
+    backend: crate::artifact::CompiledBackendKind,
+    config: &InferenceConfig,
+) -> Result<()> {
+    let manifest = crate::artifact::validate_artifact(path)?;
+    if manifest.backend != backend {
+        return Err(crate::artifact::RecompileRequired {
+            reason: crate::artifact::RecompileReason::StaleIdentity("backend"),
+        }
+        .into());
+    }
+
+    manifest.validate_model(model)?;
+    validate_build_config(&manifest.build, config)?;
+    Ok(())
+}
+
+fn validate_build_config(
+    build: &crate::artifact::ArtifactBuildConfig,
+    config: &InferenceConfig,
+) -> Result<()> {
+    let precision = match config.precision {
+        InferencePrecision::Fp32 => crate::artifact::TensorRtBuildPrecision::Fp32,
+        InferencePrecision::Fp16 => crate::artifact::TensorRtBuildPrecision::Fp16,
+    };
+    let matches = build.requested_precision == precision
+        && build.opt_batch == config.preferred_batch_size
+        && build.max_batch == config.max_batch_size;
+    if !matches {
+        return Err(crate::artifact::RecompileRequired {
+            reason: crate::artifact::RecompileReason::StaleIdentity("build"),
+        }
+        .into());
+    }
+
+    Ok(())
 }
 
 /// Low-level backends are intentionally separate from the normal loader.

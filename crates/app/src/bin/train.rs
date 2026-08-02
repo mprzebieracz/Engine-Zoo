@@ -3,8 +3,9 @@ use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use engine_app::tensor_rt::{
     compile_latest_tensor_rt, ensure_latest_checkpoint, TensorRtBatchShapes, TensorRtCompiler,
+    TimingCachePolicy,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tch::Device;
 
@@ -50,14 +51,8 @@ struct RunArgs {
     forever: bool,
     #[arg(long, value_enum, default_value_t = DeviceKind::Cuda)]
     device: DeviceKind,
-    /// Use the raw TensorRT engine path with a persistent builder timing cache.
-    ///
-    /// Overrides a `tensor-rt-torch-script` experiment at runtime (does not
-    /// rewrite `experiment.toml`): compiles via `compile_tensorrt_raw.py` into
-    /// `model.raw.engine` and stores timings in `<run-dir>/tensorrt-timing.cache`
-    /// unless `--tensor-rt-timing-cache` is set. Requires building with
-    /// `--features raw-tensorrt` (see `scripts/train --cache`).
-    #[arg(long)]
+    /// Removed: backend selection belongs to experiment.toml.
+    #[arg(long, hide = true)]
     cache: bool,
     #[command(flatten)]
     tensor_rt: TensorRtRunArgs,
@@ -68,6 +63,9 @@ struct TensorRtRunArgs {
     /// Python executable in the matching Torch-TensorRT / TensorRT environment.
     #[arg(long)]
     tensor_rt_python: Option<PathBuf>,
+    /// Optional separate Python executable used for raw ONNX export.
+    #[arg(long)]
+    tensor_rt_export_python: Option<PathBuf>,
     /// Existing TensorRT compiler script. Defaults to this checkout's script.
     #[arg(long)]
     tensor_rt_compiler: Option<PathBuf>,
@@ -77,9 +75,15 @@ struct TensorRtRunArgs {
     tensor_rt_opt_batch_size: Option<usize>,
     #[arg(long)]
     tensor_rt_max_batch_size: Option<usize>,
-    /// Builder timing-cache path. Set automatically under `--cache`.
+    /// Explicit raw TensorRT timing-cache path instead of the automatic cache.
     #[arg(long)]
     tensor_rt_timing_cache: Option<PathBuf>,
+    /// Disable TensorRT tactic timing-cache use without changing the backend.
+    #[arg(long)]
+    disable_tensor_rt_timing_cache: bool,
+    /// Preserve unique compiler intermediates for diagnosis.
+    #[arg(long)]
+    keep_tensor_rt_intermediates: bool,
 }
 
 fn main() -> Result<()> {
@@ -103,83 +107,32 @@ fn initialize(experiment_path: PathBuf, run_dir: PathBuf) -> Result<()> {
 
 fn run(args: RunArgs) -> Result<()> {
     let device = select_device(args.device)?;
-    let (_, mut experiment, state) = RunDir::open(&args.run_dir)?;
+    let (_, experiment, state) = RunDir::open(&args.run_dir)?;
     let limit = if args.forever {
         RunLimit::Forever
-    } else {
+    }
+    else {
         RunLimit::Iterations(args.iterations)
     };
-    let mut tensor_rt = args.tensor_rt;
-
-    if args.cache {
-        apply_cache_backend(&args.run_dir, &mut experiment, &mut tensor_rt)?;
-    }
+    anyhow::ensure!(
+        !args.cache,
+        "--cache was removed because it changed both backend and cache policy; select engine = \"tensor-rt-raw\" in experiment.toml and use --disable-tensor-rt-timing-cache only for cold-build diagnostics"
+    );
 
     if matches!(
         experiment.inference.engine,
         InferenceEngine::TensorRtTorchScript | InferenceEngine::TensorRtRaw
     ) {
-        return run_tensor_rt(args.run_dir, device, limit, experiment, tensor_rt);
+        return run_tensor_rt(args.run_dir, device, limit, experiment, args.tensor_rt);
     }
-
-    anyhow::ensure!(
-        !args.cache,
-        "--cache requires a TensorRT experiment (engine = tensor-rt-torch-script or tensor-rt-raw)"
-    );
 
     print_startup_summary(&args.run_dir, device, &experiment, &state);
     let mut run = TrainingRun::open(&args.run_dir, device)?;
     run.run(limit)
 }
 
-fn apply_cache_backend(
-    run_dir: &PathBuf,
-    experiment: &mut ExperimentConfig,
-    args: &mut TensorRtRunArgs,
-) -> Result<()> {
-    #[cfg(not(feature = "raw-tensorrt"))]
-    {
-        let _ = (run_dir, experiment, args);
-        anyhow::bail!(
-            "--cache requires building train with `--features raw-tensorrt` \
-             (e.g. cargo build -p engine_app --bin train --features raw-tensorrt)"
-        );
-    }
-
-    #[cfg(feature = "raw-tensorrt")]
-    {
-        anyhow::ensure!(
-            matches!(
-                experiment.inference.engine,
-                InferenceEngine::TensorRtTorchScript | InferenceEngine::TensorRtRaw
-            ),
-            "--cache requires a TensorRT experiment (engine = tensor-rt-torch-script or tensor-rt-raw)"
-        );
-
-        experiment.inference.engine = InferenceEngine::TensorRtRaw;
-        experiment.inference.tensor_rt_module = Some(PathBuf::from("model.raw.engine"));
-        experiment.validate()?;
-
-        if args.tensor_rt_compiler.is_none() {
-            args.tensor_rt_compiler = Some(default_raw_tensor_rt_compiler_script());
-        }
-        if args.tensor_rt_timing_cache.is_none() {
-            args.tensor_rt_timing_cache = Some(run_dir.join("tensorrt-timing.cache"));
-        }
-
-        println!(
-            "cache backend: raw TensorRT + timing cache ({})",
-            args.tensor_rt_timing_cache
-                .as_ref()
-                .expect("set above")
-                .display()
-        );
-        Ok(())
-    }
-}
-
 fn print_startup_summary(
-    run_dir: &PathBuf,
+    run_dir: &Path,
     device: Device,
     experiment: &ExperimentConfig,
     state: &alphazero::RunState,
@@ -191,7 +144,11 @@ fn print_startup_summary(
         "starting model: generation {} | iteration {} | checkpoint {} | resume {:?}",
         state.model_generation,
         state.iteration,
-        state.latest_checkpoint.as_deref().unwrap_or("new model"),
+        state
+            .checkpoint_identity
+            .as_ref()
+            .map(|identity| identity.relative_path.as_str())
+            .unwrap_or("new model"),
         state.resume_kind,
     );
     println!("model: {:?}", experiment.model);
@@ -240,12 +197,13 @@ fn run_tensor_rt(
     args: TensorRtRunArgs,
 ) -> Result<()> {
     let compiler = tensor_rt_compiler(&experiment, args)?;
-    let (run, _, mut state) = RunDir::open(&run_dir)?;
+    let (writer, _, mut state) = RunDir::open_writer(&run_dir)?;
 
-    ensure_latest_checkpoint(&run, &experiment, &mut state, device)?;
+    ensure_latest_checkpoint(&writer, &experiment, &mut state, device)?;
+    drop(writer);
     print_startup_summary(&run_dir, device, &experiment, &state);
     println!("COMPILATION");
-    compile_tensor_rt_generation(&run, &experiment, device, &compiler)?;
+    compile_tensor_rt_generation(&run_dir, &experiment, device, &compiler)?;
     let mut training_run = TrainingRun::open_with_experiment(&run_dir, experiment.clone(), device)?;
     let total_started = Instant::now();
 
@@ -257,7 +215,7 @@ fn run_tensor_rt(
                 let report = training_run.step()?;
                 ensure_tensor_rt_recompile_required(&report.next_inference)?;
                 println!("COMPILATION");
-                compile_tensor_rt_generation(&run, &experiment, device, &compiler)?;
+                compile_tensor_rt_generation(&run_dir, &experiment, device, &compiler)?;
                 training_run.reload_tensor_rt_inference()?;
                 // Wall clock for self-play + train + compile + reload.
                 print_iteration_report(&report, iteration_started.elapsed());
@@ -276,7 +234,7 @@ fn run_tensor_rt(
                 let report = training_run.step()?;
                 ensure_tensor_rt_recompile_required(&report.next_inference)?;
                 println!("COMPILATION");
-                compile_tensor_rt_generation(&run, &experiment, device, &compiler)?;
+                compile_tensor_rt_generation(&run_dir, &experiment, device, &compiler)?;
                 training_run.reload_tensor_rt_inference()?;
                 // Wall clock for self-play + train + compile + reload.
                 print_iteration_report(&report, iteration_started.elapsed());
@@ -316,7 +274,8 @@ fn print_iteration_report(report: &alphazero::IterationReport, elapsed: std::tim
             training.forward_backward_seconds,
             training.optimizer_seconds,
         );
-    } else {
+    }
+    else {
         println!("no training steps configured");
     }
 
@@ -337,7 +296,8 @@ fn tensor_rt_compiler(
     let script = args.tensor_rt_compiler.unwrap_or_else(|| {
         if experiment.inference.engine == InferenceEngine::TensorRtRaw {
             default_raw_tensor_rt_compiler_script()
-        } else {
+        }
+        else {
             default_tensor_rt_compiler_script()
         }
     });
@@ -354,26 +314,59 @@ fn tensor_rt_compiler(
     };
     batch_shapes.validate()?;
 
+    anyhow::ensure!(
+        !(args.disable_tensor_rt_timing_cache && args.tensor_rt_timing_cache.is_some()),
+        "--disable-tensor-rt-timing-cache conflicts with --tensor-rt-timing-cache"
+    );
+    let timing_cache = if args.disable_tensor_rt_timing_cache {
+        TimingCachePolicy::Disabled
+    }
+    else if let Some(path) = args.tensor_rt_timing_cache {
+        TimingCachePolicy::Explicit(path)
+    }
+    else if experiment.inference.engine == InferenceEngine::TensorRtRaw {
+        TimingCachePolicy::Auto
+    }
+    else {
+        TimingCachePolicy::Disabled
+    };
+
     Ok(TensorRtCompiler {
         python,
+        export_python: args.tensor_rt_export_python,
         script,
         batch_shapes,
-        precision: experiment.inference.precision,
-        timing_cache: args.tensor_rt_timing_cache,
+        precision: match experiment.inference.precision {
+            alphazero::InferencePrecision::Fp16 => {
+                alphazero::artifact::TensorRtBuildPrecision::Fp16
+            }
+            alphazero::InferencePrecision::Fp32 => {
+                alphazero::artifact::TensorRtBuildPrecision::Fp32
+            }
+        },
+        timing_cache,
+        keep_intermediates: args.keep_tensor_rt_intermediates,
     })
 }
 
 fn compile_tensor_rt_generation(
-    run_dir: &RunDir,
+    run_dir: &Path,
     experiment: &ExperimentConfig,
     device: Device,
     compiler: &TensorRtCompiler,
 ) -> Result<()> {
     let started = Instant::now();
-    compile_latest_tensor_rt(run_dir, experiment, device, compiler)?;
+    let (run, _, state) = RunDir::open(run_dir)?;
+    let artifact = compile_latest_tensor_rt(&run, &state, experiment, device, compiler)?;
     println!(
-        "compiled TensorRT module in {:.3}s",
-        started.elapsed().as_secs_f64()
+        "{} TensorRT artifact in {:.3}s",
+        if artifact.reused {
+            "reused"
+        }
+        else {
+            "compiled"
+        },
+        started.elapsed().as_secs_f64(),
     );
 
     Ok(())

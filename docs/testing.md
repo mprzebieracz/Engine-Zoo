@@ -1,8 +1,9 @@
 # Testing strategy
 
-Pure rules and search tests run without LibTorch. ML tests add representations, replay, batching, checkpointing, and training calculations. Tests target invariants rather than wall-clock timing: terminal handling, cache identity, evaluator validation, policy normalization, deterministic seeds/order, sparse-loss equivalence, reload barriers, and safe checkpoint writes.
+The portable CI path uses CPU PyTorch and runs formatting, `cargo clippy --workspace --all-targets`, and `cargo test --workspace` with default features. It deliberately does not use `--all-features`: `raw-tensorrt` is a system feature requiring CUDA and a matching TensorRT SDK.
 
-CI separates pure Rust, CPU-LibTorch workspace, release/no-run benchmark compilation, frontend, and Python helper checks. The frontend is checked with `npm ci`, `npm run check`, and `npm run build`.
+Python syntax and compiler-protocol unit tests run in an independent job, without CUDA or TensorRT. This keeps export/build argument, JSON protocol, and precision-policy checks portable.
 
-External strength claims require deterministic puzzle suites plus paired arenas/Fastchess, sufficient game counts, and retained artifacts. Unit tests prove mechanics; they do not prove a trained network is strong.
+The raw TensorRT job is gated by the `RAW_TENSORRT_CI` repository variable and targets a self-hosted runner labelled `cuda` and `tensorrt`. It checks and tests `alphazero` with `--features raw-tensorrt`. GPU integration and stress tests remain ignored or explicitly gated on ordinary hosts; run them only on a provisioned machine with matching CUDA, TensorRT headers, and runtime libraries.
 
+Tests target invariants rather than timing: artifact identity, batch restoration on errors, tensor contracts, deterministic seeds, persistent variant-aware MCTS, sparse-loss equivalence, and durable checkpoint writes. Performance and strength claims require retained benchmark or arena artifacts, not unit-test thresholds.

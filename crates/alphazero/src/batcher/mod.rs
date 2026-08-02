@@ -16,13 +16,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tch::Device;
 
-mod tch_backend;
 #[cfg(feature = "raw-tensorrt")]
 mod raw_trt_backend;
+mod tch_backend;
 
-pub use tch_backend::{InferencePrecision, TchInferenceBackend};
 #[cfg(feature = "raw-tensorrt")]
 pub use raw_trt_backend::RawTensorRtBackend;
+pub use tch_backend::{InferencePrecision, TchInferenceBackend};
 
 /// One contiguous input passed to an inference implementation.
 #[derive(Default)]
@@ -211,16 +211,42 @@ impl BatcherStats {
 }
 
 struct Task {
-    batch: EncodedEvalBatch,
+    batch: Option<EncodedEvalBatch>,
     next_row: usize,
     evaluations: Vec<Evaluation>,
-    tx: SyncSender<BatcherResult<EvalResponse>>,
+    tx: Option<SyncSender<EvalResponse>>,
     submitted_at: Instant,
 }
 
 struct EvalResponse {
     batch: EncodedEvalBatch,
-    evaluations: Vec<Evaluation>,
+    result: BatcherResult<Vec<Evaluation>>,
+}
+
+impl Task {
+    fn batch(&self) -> &EncodedEvalBatch {
+        self.batch
+            .as_ref()
+            .expect("an incomplete task owns its batch")
+    }
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        let Some(tx) = self.tx.take()
+        else {
+            return;
+        };
+        let Some(batch) = self.batch.take()
+        else {
+            return;
+        };
+
+        let _ = tx.send(EvalResponse {
+            batch,
+            result: Err(BatcherError::WorkerStopped),
+        });
+    }
 }
 
 struct Reload {
@@ -307,17 +333,9 @@ impl Batcher {
         }
 
         let assembler_shared = Arc::clone(&shared);
-        let assembler_recycled_tx = recycled_tx.clone();
         let assembler = std::thread::Builder::new()
             .name("inference-batch-assembler".into())
-            .spawn(move || {
-                run_assembler(
-                    assembler_shared,
-                    prepared_tx,
-                    recycled_rx,
-                    assembler_recycled_tx,
-                )
-            })
+            .spawn(move || run_assembler(assembler_shared, prepared_tx, recycled_rx))
             .context("spawning batch assembler")?;
 
         let executor_shared = Arc::clone(&shared);
@@ -404,7 +422,10 @@ impl Batcher {
         device: Device,
         config: BatcherConfig,
     ) -> Result<Self> {
-        Self::with_backend(RawTensorRtBackend::new(spec, engine, device)?, config)
+        let backend =
+            RawTensorRtBackend::new_with_max_batch(spec, engine, device, config.max_batch_size)?;
+
+        Self::with_backend(backend, config)
     }
 
     pub fn client(&self) -> BatcherClient {
@@ -485,21 +506,21 @@ impl BatcherClient {
             pending.stats.lifetime_max_submitted_batch.max(rows as u64);
         pending.count += rows;
         pending.commands.push_back(Command::Evaluate(Task {
-            batch: owned,
+            batch: Some(owned),
             next_row: 0,
             evaluations: Vec::with_capacity(rows),
-            tx,
+            tx: Some(tx),
             submitted_at: Instant::now(),
         }));
         drop(pending);
         self.shared.cv.notify_all();
-        match rx.recv().unwrap_or(Err(BatcherError::WorkerStopped)) {
-            Ok(response) => {
-                *batch = response.batch;
-                Ok(response.evaluations)
-            }
-            Err(error) => Err(error),
-        }
+
+        let response = rx
+            .recv()
+            .expect("every accepted task must return its owned batch");
+        *batch = response.batch;
+
+        response.result
     }
 }
 
@@ -521,42 +542,47 @@ fn run_assembler(
     shared: Arc<Shared>,
     prepared_tx: SyncSender<PreparedWork>,
     recycled_rx: Receiver<CombinedEncodedBatch>,
-    recycled_tx: SyncSender<CombinedEncodedBatch>,
 ) {
     loop {
         let combined = match recycled_rx.recv() {
             Ok(combined) => combined,
-            Err(_) => return,
+            Err(_) => {
+                stop_worker(&shared);
+                return;
+            }
         };
         let mut items = Vec::new();
         let mut combined = combined;
-        match next_work(&shared, &mut items, &mut combined) {
-            Work::Stop => return,
-            Work::Reload(reload) => {
-                if prepared_tx.send(PreparedWork::Reload(reload)).is_err() {
-                    return;
-                }
-                if recycled_tx.send(combined).is_err() {
-                    return;
-                }
-            }
-            Work::Evaluate => {
-                let needs_completion = items
-                    .iter()
-                    .any(|item| item.rows.end < item.task.batch.len());
-                let (completion, done_rx) = needs_completion.then(|| sync_channel(1)).unzip();
-                let prepared = PreparedEvaluation {
-                    items,
-                    combined,
-                    completion,
-                };
-                if prepared_tx.send(PreparedWork::Evaluate(prepared)).is_err() {
-                    return;
-                }
-                if let Some(done_rx) = done_rx {
-                    if done_rx.recv().is_err() {
+        loop {
+            match next_work(&shared, &mut items, &mut combined) {
+                Work::Stop => return,
+                Work::Reload(reload) => {
+                    if prepared_tx.send(PreparedWork::Reload(reload)).is_err() {
+                        stop_worker(&shared);
                         return;
                     }
+                }
+                Work::Evaluate => {
+                    let needs_completion = items
+                        .iter()
+                        .any(|item| item.rows.end < item.task.batch().len());
+                    let (completion, done_rx) = needs_completion.then(|| sync_channel(1)).unzip();
+                    let prepared = PreparedEvaluation {
+                        items,
+                        combined,
+                        completion,
+                    };
+                    if prepared_tx.send(PreparedWork::Evaluate(prepared)).is_err() {
+                        stop_worker(&shared);
+                        return;
+                    }
+                    if let Some(done_rx) = done_rx {
+                        if done_rx.recv().is_err() {
+                            stop_worker(&shared);
+                            return;
+                        }
+                    }
+                    break;
                 }
             }
         }
@@ -577,6 +603,8 @@ fn run_executor(
             }
         }
     }
+
+    stop_worker(&shared);
 }
 
 fn run_reload(backend: &mut dyn InferenceBackend, shared: &Shared, reload: Reload) {
@@ -702,11 +730,11 @@ fn next_work(
                 break;
             };
             let available = shared.config.max_batch_size - combined.len();
-            let end = (task.next_row + available).min(task.batch.len());
+            let end = (task.next_row + available).min(task.batch().len());
             let rows = task.next_row..end;
-            if combined.append_rows(&task.batch, rows.clone()).is_err() {
+            if combined.append_rows(task.batch(), rows.clone()).is_err() {
                 let error = BatcherError::Backend("invalid encoded evaluation batch".into());
-                let _ = task.tx.send(Err(error.clone()));
+                complete_task(task, Err(error.clone()));
                 fail_pending(&mut pending, error);
                 drop(pending);
                 shared.cv.notify_all();
@@ -722,7 +750,7 @@ fn next_work(
         pending.stats.coalesced_extra_requests += items.len().saturating_sub(1) as u64;
         if items
             .iter()
-            .any(|item| item.rows.end < item.task.batch.len())
+            .any(|item| item.rows.end < item.task.batch().len())
         {
             pending.stats.split_batches += 1;
         }
@@ -747,7 +775,7 @@ fn finish_pass(shared: &Shared, items: &mut Vec<WorkItem>, evaluations: Vec<Eval
             .clone()
             .unwrap_or(BatcherError::Shutdown);
         for item in items.drain(..) {
-            let _ = item.task.tx.send(Err(error.clone()));
+            complete_task(item.task, Err(error.clone()));
         }
         return;
     }
@@ -759,11 +787,10 @@ fn finish_pass(shared: &Shared, items: &mut Vec<WorkItem>, evaluations: Vec<Eval
             .extend_from_slice(&evaluations[offset..offset + count]);
         offset += count;
         item.task.next_row = item.rows.end;
-        if item.task.next_row == item.task.batch.len() {
-            let _ = item.task.tx.send(Ok(EvalResponse {
-                batch: item.task.batch,
-                evaluations: item.task.evaluations,
-            }));
+        if item.task.next_row == item.task.batch().len() {
+            let evaluations = std::mem::take(&mut item.task.evaluations);
+
+            complete_task(item.task, Ok(evaluations));
         }
         else {
             // The rows left in this task stayed in `pending.count` while the
@@ -783,11 +810,32 @@ fn terminal_failure(shared: &Shared, error: BatcherError) {
     shared.cv.notify_all();
 }
 
+fn stop_worker(shared: &Shared) {
+    let mut pending = shared.pending.lock().unwrap();
+    if pending.stop || pending.terminal_error.is_some() {
+        return;
+    }
+
+    fail_pending(&mut pending, BatcherError::WorkerStopped);
+    drop(pending);
+    shared.cv.notify_all();
+}
+
 fn fail_work(shared: &Shared, items: &mut Vec<WorkItem>, error: BatcherError) {
     for item in items.drain(..) {
-        let _ = item.task.tx.send(Err(error.clone()));
+        complete_task(item.task, Err(error.clone()));
     }
     terminal_failure(shared, error);
+}
+
+fn complete_task(mut task: Task, result: BatcherResult<Vec<Evaluation>>) {
+    let tx = task.tx.take().expect("an incomplete task owns its sender");
+    let batch = task
+        .batch
+        .take()
+        .expect("an incomplete task owns its batch");
+
+    let _ = tx.send(EvalResponse { batch, result });
 }
 
 fn fail_pending(pending: &mut Pending, error: BatcherError) {
@@ -797,7 +845,7 @@ fn fail_pending(pending: &mut Pending, error: BatcherError) {
     while let Some(command) = pending.commands.pop_front() {
         match command {
             Command::Evaluate(task) => {
-                let _ = task.tx.send(Err(error.clone()));
+                complete_task(task, Err(error.clone()));
             }
             Command::Reload(reload) => {
                 let _ = reload.tx.send(Err(error.clone()));
