@@ -21,9 +21,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EXPERIMENT = ROOT / "experiments/chess-puct-wdl-tensorrt-raw.toml"
-DEFAULT_SEED = Path(
-    "/home/mati/engine-zoo/runs/chess-puct-wdl-tensorrt-v5/checkpoints/generation-000800.safetensors"
-)
 DEFAULT_OPT = 128
 DEFAULT_MAX = 256
 DEFAULT_MIN = 1
@@ -45,12 +42,6 @@ def _libtorch_root() -> Path | None:
     configured = os.environ.get("LIBTORCH")
     if configured:
         return Path(configured).expanduser()
-    for candidate in (
-        Path("/home/mati/libs/libtorch-2.11.0-cu130/libtorch"),
-        Path("/home/mati/libs/libtorch"),
-    ):
-        if candidate.is_dir():
-            return candidate
     return None
 
 
@@ -60,7 +51,14 @@ def _find_torch_python(hint: Path | None) -> Path | None:
         candidates.append(hint)
     if configured := os.environ.get("TRT_PYTHON"):
         candidates.append(Path(configured).expanduser())
-    candidates.append(Path.home() / "venvs/engine-zoo-trt-py313/bin/python")
+    candidates.extend(
+        ROOT / relative
+        for relative in (
+            ".venv/bin/python",
+            ".venv/engine-zoo-trt/bin/python",
+            ".venv/engine-zoo-trt-py313/bin/python",
+        )
+    )
     candidates.append(Path(sys.executable))
     seen: set[Path] = set()
     for candidate in candidates:
@@ -82,16 +80,7 @@ def _find_torch_python(hint: Path | None) -> Path | None:
 
 def _runtime_environment(torch_python: Path) -> dict[str, str]:
     environment = os.environ.copy()
-    trt10_libs = (
-        Path.home()
-        / "venvs/engine-zoo-trt-py313/lib/python3.13/site-packages/tensorrt_libs"
-    )
-    library_paths: list[str] = [
-        str(trt10_libs),
-        "/opt/cuda/targets/x86_64-linux/lib",
-        "/opt/cuda/lib64",
-        "/usr/lib",
-    ]
+    library_paths: list[str] = []
     if (libtorch := _libtorch_root()) is not None:
         libtorch_lib = libtorch / "lib"
         if libtorch_lib.is_dir():
@@ -190,7 +179,7 @@ def main() -> int:
         type=Path,
         default=ROOT / "runs/chess-puct-wdl-tensorrt-raw-bench-3iter",
     )
-    parser.add_argument("--seed-checkpoint", type=Path, default=DEFAULT_SEED)
+    parser.add_argument("--seed-checkpoint", type=Path, required=True)
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="cuda")
     parser.add_argument("--tensor-rt-python", type=Path)
@@ -237,9 +226,7 @@ def main() -> int:
     )
     binary = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "release" / "train"
     if not binary.is_file():
-        # cargo may use a shared target dir outside the worktree
-        candidates = list(Path("/tmp").glob("cursor-sandbox-cache/*/cargo-target/release/train"))
-        candidates.append(ROOT / "target/release/train")
+        candidates = [ROOT / "target/release/train"]
         for candidate in candidates:
             if candidate.is_file():
                 binary = candidate
