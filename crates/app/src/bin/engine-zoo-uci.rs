@@ -1,5 +1,6 @@
 use clap::Parser;
 use engine_app::uci::{parse_command, ChessUciEngine, Settings, UciCommand};
+use engine_model_runtime::BackendPreference;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use tch::Device;
@@ -14,12 +15,40 @@ struct Args {
     run_dir: Option<PathBuf>,
     #[arg(long)]
     checkpoint: Option<String>,
+    /// Experiment metadata for a standalone --checkpoint path.
+    #[arg(long, requires = "checkpoint")]
+    experiment: Option<PathBuf>,
     #[arg(long, default_value_t = 800)]
     simulations: usize,
     #[arg(long, default_value = "auto")]
     device: String,
+    /// Application inference backend: auto, tensorrt, raw-tensorrt,
+    /// torch-tensorrt, or native.
+    #[arg(long, value_enum, default_value_t = BackendArg::Auto)]
+    backend: BackendArg,
     #[arg(long, default_value_t = 1)]
     threads: usize,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum BackendArg {
+    Auto,
+    Tensorrt,
+    RawTensorrt,
+    TorchTensorrt,
+    Native,
+}
+
+impl From<BackendArg> for BackendPreference {
+    fn from(value: BackendArg) -> Self {
+        match value {
+            BackendArg::Auto => Self::Auto,
+            BackendArg::Tensorrt => Self::Tensorrt,
+            BackendArg::RawTensorrt => Self::RawTensorrt,
+            BackendArg::TorchTensorrt => Self::TorchTensorrt,
+            BackendArg::Native => Self::Native,
+        }
+    }
 }
 
 fn device(s: &str) -> anyhow::Result<Device> {
@@ -68,6 +97,8 @@ fn write_uci_options(out: &mut impl Write, settings: &Settings) -> anyhow::Resul
         settings.threads
     )?;
     writeln!(out, "option name TensorRtModule type string default")?;
+    writeln!(out, "option name Experiment type string default")?;
+    writeln!(out, "option name Backend type combo default auto var auto var tensorrt var raw-tensorrt var torch-tensorrt var native")?;
     writeln!(out, "uciok")?;
     Ok(())
 }
@@ -76,14 +107,18 @@ fn set_option(engine: &mut ChessUciEngine, name: &str, value: String) -> anyhow:
     let name = name.to_ascii_lowercase();
     let invalidates_model = matches!(
         name.as_str(),
-        "model" | "rundir" | "device" | "tensorrtmodule"
+        "model" | "rundir" | "device" | "backend" | "experiment" | "tensorrtmodule"
     );
 
     match name.as_str() {
         "model" => engine.settings.model = value,
+        "experiment" => {
+            engine.settings.experiment = (!value.trim().is_empty()).then(|| PathBuf::from(value));
+        }
         "rundir" => engine.settings.run_dir = PathBuf::from(value),
         "simulations" => engine.settings.simulations = value.parse::<usize>()?.max(1),
         "device" => engine.settings.device = device(&value)?,
+        "backend" => engine.settings.backend = parse_backend(&value)?,
         "temperature" => engine.settings.temperature = value.parse::<f32>()?,
         "openingplies" => engine.settings.opening_plies = value.parse::<usize>()?,
         "threads" => engine.settings.threads = value.parse::<usize>()?.max(1),
@@ -103,6 +138,19 @@ fn set_option(engine: &mut ChessUciEngine, name: &str, value: String) -> anyhow:
     }
 
     Ok(())
+}
+
+fn parse_backend(value: &str) -> anyhow::Result<BackendPreference> {
+    Ok(match value.to_ascii_lowercase().as_str() {
+        "auto" => BackendPreference::Auto,
+        "tensorrt" => BackendPreference::Tensorrt,
+        "raw-tensorrt" => BackendPreference::RawTensorrt,
+        "torch-tensorrt" => BackendPreference::TorchTensorrt,
+        "native" => BackendPreference::Native,
+        _ => anyhow::bail!(
+            "unknown backend {value}; use auto, tensorrt, raw-tensorrt, torch-tensorrt, or native"
+        ),
+    })
 }
 
 fn go_simulations(
@@ -130,9 +178,11 @@ fn main() -> anyhow::Result<()> {
     if let Some(checkpoint) = args.checkpoint {
         settings.model = checkpoint;
     }
+    settings.experiment = args.experiment;
     settings.simulations = args.simulations;
     settings.threads = args.threads.max(1);
     settings.device = device(&args.device)?;
+    settings.backend = args.backend.into();
     let mut engine = ChessUciEngine::new(settings);
     let stdin = io::stdin();
     let mut out = io::BufWriter::new(io::stdout().lock());
@@ -167,4 +217,31 @@ fn main() -> anyhow::Result<()> {
         out.flush()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_flag_accepts_all_runtime_preferences() {
+        for value in [
+            "auto",
+            "tensorrt",
+            "raw-tensorrt",
+            "torch-tensorrt",
+            "native",
+        ] {
+            Args::try_parse_from(["engine-zoo-uci", "--backend", value]).unwrap();
+        }
+    }
+
+    #[test]
+    fn backend_option_uses_the_shared_names() {
+        assert_eq!(
+            parse_backend("raw-tensorrt").unwrap(),
+            BackendPreference::RawTensorrt
+        );
+        assert!(parse_backend("cuda").is_err());
+    }
 }

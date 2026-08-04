@@ -8,6 +8,9 @@ use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use clap::ValueEnum;
 use engine_core::game::GameState;
+use engine_model_runtime::{
+    BackendPreference, ModelSelector, ModelStore, RepositoryConfig, ResolvedModel,
+};
 use games::chess::notation;
 use games::setup::{ChessSetup, Connect4Setup, GameSetup};
 use games::{ChessGame, Connect4};
@@ -61,6 +64,8 @@ pub struct ServeConfig {
     pub game: GameKind,
     pub run_dir: PathBuf,
     pub bind: SocketAddr,
+    pub model: String,
+    pub backend: BackendPreference,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -100,6 +105,8 @@ struct AppState {
     game: GameKind,
     run_dir: PathBuf,
     device: Device,
+    repository: RepositoryConfig,
+    default_model: String,
     sessions: Arc<Mutex<Vec<LiveSession>>>,
     next_session: Arc<AtomicU64>,
     models: Arc<ModelRegistry>,
@@ -200,6 +207,66 @@ fn server_inference_config(
     config
 }
 
+fn resolve_server_model(state: &AppState, input: &str) -> Result<ResolvedModel> {
+    resolve_server_model_at(
+        &state.repository,
+        &state.run_dir,
+        &state.default_model,
+        input,
+    )
+}
+
+pub(super) fn resolve_server_model_at(
+    repository: &RepositoryConfig,
+    run_dir: &Path,
+    default_model: &str,
+    input: &str,
+) -> Result<ResolvedModel> {
+    let input = selected_server_model(default_model, input);
+    let store = ModelStore::new(repository.clone());
+    let path = PathBuf::from(input);
+    if path.is_file() || store.model_dir(input).is_ok_and(|path| path.is_dir()) {
+        return store.resolve(&ModelSelector::from_input(input, None));
+    }
+
+    let checkpoint = resolve_model(run_dir, input);
+    store.resolve(&ModelSelector::Checkpoint {
+        checkpoint,
+        experiment: Some(run_dir.join("experiment.toml")),
+    })
+}
+
+fn selected_server_model<'a>(default_model: &'a str, input: &'a str) -> &'a str {
+    if input == "latest" {
+        default_model
+    }
+    else {
+        input
+    }
+}
+
+fn inference_for_model(
+    model: &ResolvedModel,
+    wait_for_count: usize,
+    timeout: Duration,
+    device: Device,
+) -> Result<alphazero::InferenceConfig> {
+    let config = model
+        .experiment
+        .as_deref()
+        .map(ExperimentConfig::read_toml)
+        .transpose()?
+        .map_or_else(alphazero::InferenceConfig::default, |config| {
+            config.inference
+        });
+    Ok(server_inference_config(
+        &config,
+        wait_for_count,
+        timeout,
+        device,
+    ))
+}
+
 enum LiveSession {
     Chess(Box<SessionState<ChessGame>>),
     Connect4(SessionState<Connect4>),
@@ -219,11 +286,22 @@ struct SessionState<G: GameState> {
 }
 
 pub async fn serve(cfg: ServeConfig) -> Result<()> {
+    anyhow::ensure!(
+        matches!(
+            cfg.backend,
+            BackendPreference::Auto | BackendPreference::Native
+        ),
+        "serve currently supports native inference only; requested {:?}",
+        cfg.backend
+    );
+    let repository = RepositoryConfig::discover(std::env::current_dir()?)?;
     let evaluations = EvaluationService::new(cfg.run_dir.clone())?;
     let state = AppState {
         game: cfg.game,
         run_dir: cfg.run_dir,
         device: Device::cuda_if_available(),
+        repository,
+        default_model: cfg.model,
         sessions: Arc::new(Mutex::new(Vec::new())),
         next_session: Arc::new(AtomicU64::new(1)),
         models: Arc::new(ModelRegistry::new()),
@@ -236,6 +314,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         .route("/api/games", get(games_http))
         .route("/api/runs", get(runs_http))
         .route("/api/checkpoints", get(checkpoints))
+        .route("/api/models", get(models))
         .route("/api/evaluations/catalog", get(evaluations_catalog))
         .route(
             "/api/evaluations/jobs",
@@ -318,6 +397,12 @@ mod tests {
             alphazero::representation::ChessAzState::<4>::from_game(&game).board(),
             game.board()
         );
+    }
+
+    #[test]
+    fn latest_request_uses_the_serve_default_model() {
+        assert_eq!(selected_server_model("promoted", "latest"), "promoted");
+        assert_eq!(selected_server_model("promoted", "candidate"), "candidate");
     }
 
     fn assert_chess_session<const HISTORY: usize>() {

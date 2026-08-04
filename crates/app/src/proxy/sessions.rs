@@ -15,10 +15,10 @@ pub(super) fn create_session_inner(
                 Some(_) => anyhow::bail!("session position does not match chess"),
                 None => ChessSetup::default(),
             };
-            let (_, cfg) = open_existing_run(&state.run_dir, "chess")?;
+            let model = resolve_server_model(state, &req.model)?;
             anyhow::ensure!(
-                cfg.model.chess_history().is_some() || cfg.model.is_chess_classic(),
-                "run config is not a chess model"
+                model.model.chess_history().is_some() || model.model.is_chess_classic(),
+                "model is not a chess model"
             );
             LiveSession::Chess(Box::new(SessionState {
                 id,
@@ -29,7 +29,7 @@ pub(super) fn create_session_inner(
                 human_turn: !req.engine_first,
                 simulations: req.simulations,
                 wait_for_count: req.wait_for_count,
-                chess_history: cfg.model.chess_history(),
+                chess_history: model.model.chess_history(),
                 chess_engine: None,
             }))
         }
@@ -133,31 +133,30 @@ pub(super) fn play_chess_engine_turn(
     if session.game.is_terminal() {
         return Ok(());
     }
-    let (_, cfg) = open_existing_run(&state.run_dir, "chess")?;
+    let model = resolve_server_model(state, &session.model)?;
     if let Some(history) = session.chess_history {
         anyhow::ensure!(
-            cfg.model.chess_history() == Some(history),
-            "session model no longer matches its run"
+            model.model.chess_history() == Some(history),
+            "session model no longer matches its selected model"
         );
     }
     else {
         anyhow::ensure!(
-            cfg.model.is_chess_classic(),
-            "chess session model no longer matches its run"
+            model.model.is_chess_classic(),
+            "chess session model no longer matches its selected model"
         );
     }
 
     if session.chess_engine.is_none() {
-        let checkpoint = resolve_model(&state.run_dir, &session.model);
-        let config = server_inference_config(
-            &cfg.inference,
+        let config = inference_for_model(
+            &model,
             session.wait_for_count,
             Duration::from_millis(1),
             state.device,
-        );
+        )?;
         let loaded = state
             .models
-            .load(&cfg.model, &checkpoint, state.device, &config)?;
+            .load(&model.model, &model.checkpoint, state.device, &config)?;
         let engine = alphazero::ChessAlphaZeroEngine::from_client(
             loaded.model.clone(),
             loaded.inference.client(),
@@ -191,21 +190,20 @@ pub(super) fn play_engine_turn_for(
     if session.game.is_terminal() {
         return Ok(());
     }
-    let (_, cfg) = open_existing_run(&state.run_dir, "connect4")?;
+    let model = resolve_server_model(state, &session.model)?;
     anyhow::ensure!(
-        cfg.model.game() == alphazero::GameKind::Connect4,
-        "run model is not Connect4"
+        model.model.game() == alphazero::GameKind::Connect4,
+        "model is not Connect4"
     );
-    let checkpoint = resolve_model(&state.run_dir, &session.model);
-    let config = server_inference_config(
-        &cfg.inference,
+    let config = inference_for_model(
+        &model,
         session.wait_for_count,
         Duration::from_millis(1),
         state.device,
-    );
+    )?;
     let loaded = state
         .models
-        .load(&cfg.model, &checkpoint, state.device, &config)?;
+        .load(&model.model, &model.checkpoint, state.device, &config)?;
     let mut mcts = Mcts::new(
         alphazero::RepresentedEvaluator::new(Connect4AzRepresentation, loaded.inference.client()),
         puct_search(),
