@@ -1,9 +1,11 @@
 use crate::players::{AgentSpec, AlphaZeroAgent, HumanAgent, PlayerAgent};
-use crate::proxy::{open_existing_run, resolve_model, run_dir, serve, GameKind, ServeConfig};
-use alphazero::GameKind as ModelGameKind;
+use crate::proxy::{resolve_model, run_dir, serve, GameKind, ServeConfig};
+use alphazero::{GameKind as ModelGameKind, RunDir};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use engine_core::agent::{Agent, PolicyMode};
+use engine_model_runtime::BackendPreference;
+use engine_model_runtime::{ModelSelector, ModelStore, RepositoryConfig, ResolvedModel};
 use games::{ChessGame, Connect4};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -46,6 +48,9 @@ struct PlayArgs {
     /// Opening plies sampled from engine policies instead of argmax.
     #[arg(long, default_value_t = 0)]
     opening_moves: usize,
+    /// Application inference backend. TensorRT preparation is not yet available for play.
+    #[arg(long, default_value = "auto", value_parser = parse_backend)]
+    backend: BackendPreference,
 }
 
 #[derive(Parser)]
@@ -56,6 +61,12 @@ struct ServeArgs {
     run_dir: Option<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:8080")]
     bind: SocketAddr,
+    /// Model name from the permanent CUDA/Torch model store, or a checkpoint/run alias.
+    #[arg(long, default_value = "latest")]
+    model: String,
+    /// Application inference backend. TensorRT preparation is not yet available for serve.
+    #[arg(long, default_value = "auto", value_parser = parse_backend)]
+    backend: BackendPreference,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -86,6 +97,8 @@ async fn serve_cmd(args: ServeArgs) -> Result<()> {
         game: args.game,
         run_dir: run_dir(args.game, args.run_dir),
         bind: args.bind,
+        model: args.model,
+        backend: args.backend,
     })
     .await
 }
@@ -99,6 +112,7 @@ fn run_game<G: crate::players::InteractiveGame>(args: PlayArgs) -> Result<()> {
         device,
         args.simulations,
         args.wait_for_count,
+        args.backend,
     )?;
     let mut second = build_agent::<G>(
         &args.second,
@@ -106,6 +120,7 @@ fn run_game<G: crate::players::InteractiveGame>(args: PlayArgs) -> Result<()> {
         device,
         args.simulations,
         args.wait_for_count,
+        args.backend,
     )?;
     let mut game = G::default();
     let cfg = PlayConfig {
@@ -148,14 +163,15 @@ fn build_agent<G: crate::players::InteractiveGame>(
     device: Device,
     simulations: usize,
     wait_for_count: usize,
+    backend: BackendPreference,
 ) -> Result<PlayerAgent<G>> {
     match spec {
         AgentSpec::User => Ok(PlayerAgent::Human(HumanAgent)),
         AgentSpec::AlphaZero { model } => {
-            let (_, cfg) = open_existing_run(run_dir, interactive_game_name::<G>())?;
-            let weights = resolve_model(run_dir, model);
+            ensure_native_backend(backend)?;
+            let resolved = resolve_play_model(run_dir, model)?;
             let compatible = matches!(
-                (cfg.model.game(), interactive_game_name::<G>()),
+                (resolved.model.game(), interactive_game_name::<G>()),
                 (ModelGameKind::Connect4, "connect4")
             );
             anyhow::ensure!(
@@ -163,8 +179,8 @@ fn build_agent<G: crate::players::InteractiveGame>(
                 "interactive play only supports Connect4; use UCI or the session API for Chess"
             );
             Ok(PlayerAgent::AlphaZero(Box::new(AlphaZeroAgent::<G>::new(
-                &cfg.model,
-                &weights,
+                &resolved.model,
+                &resolved.checkpoint,
                 device,
                 simulations,
                 wait_for_count,
@@ -172,6 +188,34 @@ fn build_agent<G: crate::players::InteractiveGame>(
             )?)))
         }
     }
+}
+
+fn resolve_play_model(run_dir: &std::path::Path, input: &str) -> Result<ResolvedModel> {
+    let store = ModelStore::new(RepositoryConfig::discover(std::env::current_dir()?)?);
+    let path = PathBuf::from(input);
+    if path.is_file() || store.model_dir(input).is_ok_and(|path| path.is_dir()) {
+        return store.resolve(&ModelSelector::from_input(input, None));
+    }
+
+    let (run, _, state) = RunDir::open(run_dir)?;
+    let checkpoint = if input.starts_with("ckpt_") || input.starts_with("generation-") {
+        return store.resolve(&ModelSelector::RunAlias {
+            run_dir: run_dir.to_path_buf(),
+            alias: input.into(),
+        });
+    }
+    else if input == "latest" {
+        run.latest_checkpoint(&state)
+            .or_else(|| run.best_path().is_file().then(|| run.best_path()))
+            .ok_or_else(|| anyhow::anyhow!("no latest checkpoint found"))?
+    }
+    else {
+        resolve_model(run_dir, input)
+    };
+    store.resolve(&ModelSelector::Checkpoint {
+        checkpoint,
+        experiment: Some(run.experiment_path()),
+    })
 }
 
 fn interactive_game_name<G: crate::players::InteractiveGame>() -> &'static str {
@@ -185,6 +229,27 @@ fn interactive_game_name<G: crate::players::InteractiveGame>() -> &'static str {
 
 fn parse_agent(s: &str) -> Result<AgentSpec> {
     AgentSpec::parse(s)
+}
+
+fn parse_backend(value: &str) -> Result<BackendPreference> {
+    match value {
+        "auto" => Ok(BackendPreference::Auto),
+        "tensorrt" => Ok(BackendPreference::Tensorrt),
+        "raw-tensorrt" => Ok(BackendPreference::RawTensorrt),
+        "torch-tensorrt" => Ok(BackendPreference::TorchTensorrt),
+        "native" => Ok(BackendPreference::Native),
+        _ => anyhow::bail!(
+            "unknown backend {value}; expected auto, tensorrt, raw-tensorrt, torch-tensorrt, or native"
+        ),
+    }
+}
+
+fn ensure_native_backend(backend: BackendPreference) -> Result<()> {
+    anyhow::ensure!(
+        matches!(backend, BackendPreference::Auto | BackendPreference::Native),
+        "interactive play currently supports native inference only; requested {backend:?}"
+    );
+    Ok(())
 }
 
 fn side_name<G: crate::players::InteractiveGame>(side: usize) -> &'static str {

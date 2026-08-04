@@ -14,15 +14,20 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Inference backend used by an [`ArenaModel`] when it is loaded through the
-/// UCI adapter. The default is [`ArenaBackend::Native`] so that existing
-/// arenas—and their tests—do not silently start requiring TensorRT tooling.
+/// Inference backend requested from the UCI adapter.
+///
+/// `Auto` is the application default: the adapter selects the fastest usable
+/// backend and retains native inference as a portable fallback.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ArenaBackend {
     #[default]
+    Auto,
+    #[serde(alias = "tensor-rt")]
+    Tensorrt,
+    RawTensorrt,
+    TorchTensorrt,
     Native,
-    TensorRt,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -36,11 +41,8 @@ pub struct ArenaModel {
     pub device: Option<String>,
     #[serde(default)]
     pub backend: ArenaBackend,
-    /// Precompiled Torch-TensorRT TorchScript module for this checkpoint. When
-    /// `backend` is `tensor-rt` and this is `None`, the caller (typically the
-    /// Python arena wrapper) is expected to compile the module into the
-    /// configured cache directory and populate this field before Rust runs
-    /// matches. Providing it directly for a `native` model is not allowed.
+    /// Legacy precompiled Torch-TensorRT TorchScript module. New configurations
+    /// should leave this unset and let the UCI adapter prepare artifacts.
     #[serde(default)]
     pub tensor_rt_module: Option<PathBuf>,
 }
@@ -69,23 +71,6 @@ pub struct ArenaSettings {
     pub opening_file: Option<PathBuf>,
     #[serde(default)]
     pub opening_plies: u32,
-    /// Python interpreter used by the Torch-TensorRT compiler. Only consumed
-    /// by the Python arena wrapper; the Rust binary carries it forward so
-    /// that `arena.toml` is the single source of truth.
-    #[serde(default)]
-    pub tensor_rt_python: Option<PathBuf>,
-    #[serde(default = "default_trt_cache")]
-    pub trt_cache_dir: PathBuf,
-    #[serde(default = "default_trt_opt")]
-    pub trt_opt_batch_size: usize,
-    #[serde(default = "default_trt_max")]
-    pub trt_max_batch_size: usize,
-    #[serde(default = "default_trt_min")]
-    pub trt_min_batch_size: usize,
-    #[serde(default = "default_trt_compiler")]
-    pub tensor_rt_compiler: PathBuf,
-    #[serde(default = "default_model_cli")]
-    pub model_cli: PathBuf,
 }
 
 impl Default for ArenaSettings {
@@ -102,13 +87,6 @@ impl Default for ArenaSettings {
             max_moves: default_max_moves(),
             opening_file: None,
             opening_plies: 0,
-            tensor_rt_python: None,
-            trt_cache_dir: default_trt_cache(),
-            trt_opt_batch_size: default_trt_opt(),
-            trt_max_batch_size: default_trt_max(),
-            trt_min_batch_size: default_trt_min(),
-            tensor_rt_compiler: default_trt_compiler(),
-            model_cli: default_model_cli(),
         }
     }
 }
@@ -222,8 +200,8 @@ pub fn run(config: &ArenaConfig) -> Result<ArenaSummary> {
 
 pub(crate) fn model_engine(model: &ArenaModel, config: &ArenaConfig) -> Engine {
     let mut engine = Engine::new(&config.settings.uci, &model.name)
-        .option("RunDir", infer_run_dir(&model.path).display().to_string())
         .option("Model", model.path.display().to_string())
+        .option("Backend", backend_label(model.backend))
         .option(
             "Simulations",
             model
@@ -237,6 +215,12 @@ pub(crate) fn model_engine(model: &ArenaModel, config: &ArenaConfig) -> Engine {
         )
         .option("Temperature", "0")
         .option("OpeningPlies", config.settings.opening_plies.to_string());
+
+    // A direct checkpoint keeps the legacy RunDir hint, while a bare model
+    // name stays a repository selector for the shared runtime.
+    if !is_bare_model_selector(&model.path) {
+        engine = engine.option("RunDir", infer_run_dir(&model.path).display().to_string());
+    }
 
     // Set TensorRtModule when we have a compiled module. UCI treats an empty
     // value as "force native", so we only advertise the option when it has a
@@ -311,7 +295,7 @@ fn engine_spec(engine: Engine, model: &ArenaModel) -> crate::report::EngineSpec 
 
 fn resolve_paths(config: &mut ArenaConfig, root: &Path) {
     for model in std::iter::once(&mut config.candidate).chain(config.opponents.iter_mut()) {
-        if model.path.is_relative() {
+        if model.path.is_relative() && !is_bare_model_selector(&model.path) {
             model.path = root.join(&model.path);
         }
         if let Some(module) = &mut model.tensor_rt_module {
@@ -329,20 +313,18 @@ fn resolve_paths(config: &mut ArenaConfig, root: &Path) {
     if config.settings.output_dir.is_relative() {
         config.settings.output_dir = root.join(&config.settings.output_dir);
     }
-    if config.settings.trt_cache_dir.is_relative() {
-        config.settings.trt_cache_dir = root.join(&config.settings.trt_cache_dir);
-    }
     if let Some(path) = &mut config.settings.opening_file {
         if path.is_relative() {
             *path = root.join(&*path);
         }
     }
-    if should_resolve(&config.settings.tensor_rt_compiler) {
-        config.settings.tensor_rt_compiler = root.join(&config.settings.tensor_rt_compiler);
-    }
-    if should_resolve(&config.settings.model_cli) {
-        config.settings.model_cli = root.join(&config.settings.model_cli);
-    }
+}
+
+fn is_bare_model_selector(path: &Path) -> bool {
+    path.components().count() == 1
+        && !path
+            .extension()
+            .is_some_and(|extension| extension == "safetensors")
 }
 
 /// Bare executable names are resolved through `PATH`; paths containing a
@@ -461,8 +443,11 @@ fn render_report(summary: &ArenaSummary, config: &ArenaConfig) -> String {
 
 fn backend_label(backend: ArenaBackend) -> &'static str {
     match backend {
+        ArenaBackend::Auto => "auto",
+        ArenaBackend::Tensorrt => "tensorrt",
+        ArenaBackend::RawTensorrt => "raw-tensorrt",
+        ArenaBackend::TorchTensorrt => "torch-tensorrt",
         ArenaBackend::Native => "native",
-        ArenaBackend::TensorRt => "tensor-rt",
     }
 }
 
@@ -493,24 +478,6 @@ fn default_tc() -> String {
 fn default_max_moves() -> u32 {
     512
 }
-fn default_trt_cache() -> PathBuf {
-    PathBuf::from("data/evaluations/trt-cache")
-}
-fn default_trt_min() -> usize {
-    1
-}
-fn default_trt_opt() -> usize {
-    32
-}
-fn default_trt_max() -> usize {
-    256
-}
-fn default_trt_compiler() -> PathBuf {
-    PathBuf::from("scripts/compile_tensorrt.py")
-}
-fn default_model_cli() -> PathBuf {
-    PathBuf::from("target/release/engine-zoo-model")
-}
 
 #[cfg(test)]
 mod tests {
@@ -539,25 +506,26 @@ mod tests {
         validate(&config).unwrap();
         assert_eq!(config.settings.games, 4);
         assert_eq!(config.opponents[0].name, "old");
-        assert_eq!(config.candidate.backend, ArenaBackend::Native);
+        assert_eq!(config.candidate.backend, ArenaBackend::Auto);
         assert!(config.candidate.tensor_rt_module.is_none());
     }
 
     #[test]
-    fn parses_tensor_rt_backend_and_optional_module() {
+    fn parses_runtime_backends_and_legacy_tensor_rt_module() {
         let config: ArenaConfig = toml::from_str(
             r#"
             [candidate]
             name = "trt"
             path = "models/trt.safetensors"
             architecture = "chess-se-h4"
-            backend = "tensor-rt"
+            backend = "raw-tensorrt"
             tensor_rt_module = "cache/trt.ts"
 
             [[opponents]]
             name = "native"
             path = "models/native.safetensors"
             architecture = "chess-se"
+            backend = "tensor-rt"
 
             [settings]
             games = 2
@@ -565,12 +533,12 @@ mod tests {
         "#,
         )
         .unwrap();
-        assert_eq!(config.candidate.backend, ArenaBackend::TensorRt);
+        assert_eq!(config.candidate.backend, ArenaBackend::RawTensorrt);
         assert_eq!(
             config.candidate.tensor_rt_module.as_deref(),
             Some(Path::new("cache/trt.ts"))
         );
-        assert_eq!(config.opponents[0].backend, ArenaBackend::Native);
+        assert_eq!(config.opponents[0].backend, ArenaBackend::Tensorrt);
     }
 
     #[test]
@@ -635,7 +603,7 @@ mod tests {
                 architecture: "chess-se".into(),
                 simulations: None,
                 device: None,
-                backend: ArenaBackend::TensorRt,
+                backend: ArenaBackend::Tensorrt,
                 tensor_rt_module: Some(PathBuf::from("cache/candidate.trt.ts")),
             },
             opponents: vec![ArenaModel {
@@ -658,11 +626,88 @@ mod tests {
             .options
             .iter()
             .any(|(key, value)| key == "TensorRtModule" && value == "cache/candidate.trt.ts"));
+        assert!(candidate
+            .options
+            .iter()
+            .any(|(key, value)| key == "Backend" && value == "tensorrt"));
 
         let opponent = model_engine(&config.opponents[0], &config);
         assert!(!opponent
             .options
             .iter()
             .any(|(key, _)| key == "TensorRtModule"));
+    }
+
+    #[test]
+    fn bare_model_name_is_passed_as_a_runtime_selector() {
+        let config = ArenaConfig {
+            candidate: ArenaModel {
+                name: "candidate".into(),
+                path: PathBuf::from("candidate-v6"),
+                architecture: "chess-se".into(),
+                simulations: None,
+                device: None,
+                backend: ArenaBackend::Auto,
+                tensor_rt_module: None,
+            },
+            opponents: vec![ArenaModel {
+                name: "baseline".into(),
+                path: PathBuf::from("runs/baseline/checkpoints/latest.safetensors"),
+                architecture: "chess-se".into(),
+                simulations: None,
+                device: None,
+                backend: ArenaBackend::Native,
+                tensor_rt_module: None,
+            }],
+            settings: ArenaSettings {
+                games: 2,
+                ..Default::default()
+            },
+        };
+
+        let candidate = model_engine(&config.candidate, &config);
+        assert!(candidate
+            .options
+            .iter()
+            .any(|(key, value)| key == "Model" && value == "candidate-v6"));
+        assert!(candidate
+            .options
+            .iter()
+            .any(|(key, value)| key == "Backend" && value == "auto"));
+        assert!(!candidate.options.iter().any(|(key, _)| key == "RunDir"));
+    }
+
+    #[test]
+    fn path_resolution_preserves_bare_model_selectors() {
+        let mut config: ArenaConfig = toml::from_str(
+            r#"
+            [candidate]
+            name = "candidate"
+            path = "candidate-v6"
+            architecture = "chess-se"
+
+            [[opponents]]
+            name = "baseline"
+            path = "runs/baseline/checkpoints/latest.safetensors"
+            architecture = "chess-se"
+
+            [settings]
+            games = 2
+        "#,
+        )
+        .unwrap();
+
+        resolve_paths(&mut config, Path::new("configs"));
+        assert_eq!(config.candidate.path, Path::new("candidate-v6"));
+        assert_eq!(
+            config.opponents[0].path,
+            Path::new("configs/runs/baseline/checkpoints/latest.safetensors")
+        );
+    }
+
+    #[test]
+    fn dotted_permanent_model_name_stays_a_selector() {
+        assert!(is_bare_model_selector(Path::new("candidate.v6")));
+        assert!(!is_bare_model_selector(Path::new("candidate.safetensors")));
     }
 }

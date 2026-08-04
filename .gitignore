@@ -10,9 +10,12 @@ __pycache__/
 .cargo
 .agents
 .codex
+engine-zoo.local.toml
 crates/evaluations/bin/
 web/node_modules
 web/.svelte-kit
 web/build
 data
 /runs/
+/models/
+/artifacts/cuda-tensorrt/

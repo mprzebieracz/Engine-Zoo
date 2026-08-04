@@ -37,6 +37,7 @@ axum.workspace = true
 clap.workspace = true
 checkpoint-eval = { path = "../evaluations" }
 engine_core = { path = "../core" }
+engine-model-runtime = { path = "../model-runtime" }
 games = { path = "../games" }
 libc.workspace = true
 rand.workspace = true

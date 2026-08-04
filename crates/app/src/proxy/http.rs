@@ -193,6 +193,19 @@ pub(super) async fn checkpoints(State(state): State<AppState>) -> Json<serde_jso
     Json(json!({ "checkpoints": paths }))
 }
 
+pub(super) async fn models(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let store = ModelStore::new(state.repository.clone());
+    let mut models = fs::read_dir(store.root())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter_map(|name| store.metadata(&name).ok())
+        .collect::<Vec<_>>();
+    models.sort_by(|left, right| left.name.cmp(&right.name));
+    Json(json!({ "models": models }))
+}
+
 pub(super) async fn games_http() -> Json<serde_json::Value> {
     Json(json!({
         "games": [
@@ -222,7 +235,15 @@ pub(super) async fn analyze_http(
         );
     }
     let result = tokio::task::spawn_blocking(move || {
-        analyze_request_with_registry(state.game, state.run_dir, req, state.device, &state.models)
+        analyze_request_with_registry(
+            state.game,
+            state.run_dir,
+            req,
+            state.device,
+            &state.models,
+            &state.repository,
+            &state.default_model,
+        )
     })
     .await;
     match result {

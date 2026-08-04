@@ -8,6 +8,7 @@ members = [
     "crates/evaluations",
     "crates/benchmarks",
     "crates/profiling",
+    "crates/model-runtime",
 ]
 resolver = "2"
 
