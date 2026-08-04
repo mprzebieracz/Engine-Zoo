@@ -1,0 +1,28 @@
+# CUDA/Torch/TensorRT application-model runtime configuration.
+# Copy this to engine-zoo.local.toml and replace the relative placeholders for
+# this machine. The generated local file is ignored and contains absolute paths.
+
+[paths]
+training_runs = "runs"
+permanent_models = "models"
+cuda_tensorrt_artifact_cache = "artifacts/cuda-tensorrt"
+
+[toolchain]
+# CUDA-enabled LibTorch root (contains lib/).
+cuda_torch_libtorch = "third_party/libtorch"
+# CUDA toolkit root (contains bin/ and lib64/ or lib/).
+cuda_root = "third_party/cuda"
+# TensorRT root (contains include/ and lib/ or lib64/).
+tensorrt_root = "third_party/tensorrt"
+# Python with CUDA-enabled torch, used for TorchScript/ONNX export.
+cuda_torch_python = ".venv/cuda-torch/bin/python"
+# Python with the TensorRT package, used to build raw TensorRT engines.
+tensorrt_python = ".venv/tensorrt/bin/python"
+
+[runtime]
+default_backend = "auto"
+device = "auto"
+fp16 = true
+cuda_tensorrt_batch_min = 1
+cuda_tensorrt_batch_optimal = 64
+cuda_tensorrt_batch_max = 256

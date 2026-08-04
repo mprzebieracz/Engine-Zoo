@@ -4,9 +4,10 @@
 # comes from the checkpoint's run directory (`experiment.toml`, or a migrated
 # legacy `config.json`).
 #
-# `backend = "native"` loads safetensors via tch/LibTorch (simple, portable).
-# `backend = "tensor-rt"` compiles once into `settings.trt_cache_dir` via
-# `scripts/arena_big.py` (faster, but TensorRT engines are GPU-specific).
+# `backend = "auto"` asks the shared runtime for the fastest usable backend:
+# raw TensorRT, Torch-TensorRT, then native LibTorch. Explicit values are
+# `raw-tensorrt`, `torch-tensorrt`, `tensorrt`, and `native`.
+# A `path` may also be a permanent model name managed by `engine-zoo-model`.
 
 [candidate]
 name = "v6-latest"
@@ -14,7 +15,7 @@ path = "../runs/chess-puct-wdl-tensorrt-v6/checkpoints/latest.safetensors"
 architecture = "chess-se-h4"
 simulations = 400
 device = "cuda"
-backend = "native"
+backend = "auto"
 
 [[opponents]]
 name = "v5-gen800"
@@ -22,7 +23,7 @@ path = "../runs/chess-puct-wdl-tensorrt-v5/checkpoints/generation-000800.safeten
 architecture = "chess-se-h4"
 simulations = 400
 device = "cuda"
-backend = "native"
+backend = "auto"
 
 [[opponents]]
 name = "v2-latest"
@@ -30,7 +31,7 @@ path = "../runs/chess-puct-wdl-tensorrt-v2/checkpoints/latest.safetensors"
 architecture = "chess-se-h4"
 simulations = 400
 device = "cuda"
-backend = "native"
+backend = "auto"
 
 [settings]
 games = 20
@@ -42,14 +43,3 @@ max_moves = 512
 opening_plies = 8
 output_dir = "../data/evaluations/arena"
 fastchess = "../crates/evaluations/bin/fastchess/fastchess"
-
-# Optional TensorRT settings (used only when a model sets backend = "tensor-rt").
-trt_cache_dir = "../data/evaluations/trt-cache"
-# The wrapper derives the compile profile from each checkpoint's
-# experiment.toml. Set trt_override_batch_sizes = true only for an explicit
-# benchmark profile; a mismatch can make a cached module much slower.
-# trt_override_batch_sizes = true
-# trt_min_batch_size = 1
-# trt_opt_batch_size = 128
-# trt_max_batch_size = 256
-tensor_rt_compiler = "../scripts/compile_tensorrt.py"

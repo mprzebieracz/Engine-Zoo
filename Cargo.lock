@@ -489,6 +489,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-model-runtime"
+version = "0.1.0"
+dependencies = [
+ "alphazero",
+ "anyhow",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tch",
+ "toml",
+]
+
+[[package]]
 name = "engine-profile"
 version = "0.1.0"
 dependencies = [
@@ -510,6 +524,7 @@ dependencies = [
  "axum",
  "checkpoint-eval",
  "clap",
+ "engine-model-runtime",
  "engine_core",
  "games",
  "libc",

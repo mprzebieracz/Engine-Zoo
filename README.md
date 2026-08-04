@@ -48,6 +48,15 @@ Chess training uses LibTorch and, for the fastest self-play path, TensorRT.
 See [docs/tensorrt.md](docs/tensorrt.md) and [docs/training.md](docs/training.md)
 for environment setup and experiment details.
 
+On a CUDA/Torch/TensorRT machine, create its ignored local toolchain
+configuration before building. The generated file contains the machine's
+absolute paths; the tracked example remains portable.
+
+```bash
+python3 scripts/init_cuda_torch_tensorrt.py
+python3 scripts/init_cuda_torch_tensorrt.py --doctor
+```
+
 ## Checks
 
 ```bash

@@ -34,7 +34,8 @@ pub fn analyze_request(
     device: Device,
 ) -> Result<Analysis> {
     let registry = ModelRegistry::new();
-    analyze_request_with_registry(game, run_dir, req, device, &registry)
+    let repository = RepositoryConfig::discover(std::env::current_dir()?)?;
+    analyze_request_with_registry(game, run_dir, req, device, &registry, &repository, "latest")
 }
 
 pub(super) fn analyze_request_with_registry(
@@ -43,6 +44,8 @@ pub(super) fn analyze_request_with_registry(
     req: AnalyzeRequest,
     device: Device,
     registry: &ModelRegistry,
+    repository: &RepositoryConfig,
+    default_model: &str,
 ) -> Result<Analysis> {
     let mode = req.mode.unwrap_or(AnalyzeMode::Net);
     let cfg = AnalyzeConfig {
@@ -53,16 +56,10 @@ pub(super) fn analyze_request_with_registry(
     };
     match (game, req.position) {
         (GameKind::Chess, GameSetup::Chess(position)) => {
-            let (_, run_cfg) = open_existing_run(&run_dir, "chess")?;
-            let checkpoint = resolve_model(&run_dir, &req.model);
-            let inference = server_inference_config(
-                &run_cfg.inference,
-                cfg.wait_for_count,
-                cfg.timeout,
-                device,
-            );
-            let loaded = registry.load(&run_cfg.model, &checkpoint, device, &inference)?;
-            match run_cfg.model.chess_history() {
+            let model = resolve_server_model_at(repository, &run_dir, default_model, &req.model)?;
+            let inference = inference_for_model(&model, cfg.wait_for_count, cfg.timeout, device)?;
+            let loaded = registry.load(&model.model, &model.checkpoint, device, &inference)?;
+            match model.model.chess_history() {
                 Some(alphazero::ChessHistory::One) => {
                     analyze_chess::<1>(loaded.inference.client(), &position, &cfg)
                 }
@@ -72,26 +69,20 @@ pub(super) fn analyze_request_with_registry(
                 Some(alphazero::ChessHistory::Eight) => {
                     analyze_chess::<8>(loaded.inference.client(), &position, &cfg)
                 }
-                None if run_cfg.model.is_chess_classic() => {
+                None if model.model.is_chess_classic() => {
                     analyze_classic_chess(loaded.inference.client(), &position, &cfg)
                 }
-                None => anyhow::bail!("run config is not a chess model"),
+                None => anyhow::bail!("model is not a chess model"),
             }
         }
         (GameKind::Connect4, GameSetup::Connect4(position)) => {
-            let (_, run_cfg) = open_existing_run(&run_dir, "connect4")?;
-            let checkpoint = resolve_model(&run_dir, &req.model);
+            let model = resolve_server_model_at(repository, &run_dir, default_model, &req.model)?;
             anyhow::ensure!(
-                run_cfg.model.game() == alphazero::GameKind::Connect4,
-                "run config is not a Connect4 model"
+                model.model.game() == alphazero::GameKind::Connect4,
+                "model is not Connect4"
             );
-            let inference = server_inference_config(
-                &run_cfg.inference,
-                cfg.wait_for_count,
-                cfg.timeout,
-                device,
-            );
-            let loaded = registry.load(&run_cfg.model, &checkpoint, device, &inference)?;
+            let inference = inference_for_model(&model, cfg.wait_for_count, cfg.timeout, device)?;
+            let loaded = registry.load(&model.model, &model.checkpoint, device, &inference)?;
             analyze_connect4(
                 loaded.inference.client(),
                 &Connect4::from_setup(&position)?,

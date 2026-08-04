@@ -1,0 +1,19 @@
+[package]
+name = "engine-model-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CUDA/Torch application model discovery and permanent model storage"
+
+[dependencies]
+alphazero = { path = "../alphazero" }
+anyhow.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tch.workspace = true
+toml.workspace = true

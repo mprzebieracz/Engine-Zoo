@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -200,10 +201,15 @@ def main() -> int:
         cwd=ROOT,
         check=True,
     )
+    binary = (
+        Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+        / "release"
+        / "engine-zoo"
+    )
     print(f"serving {checkpoint}  on http://{args.host}:{args.port}/")
     return subprocess.run(
         [
-            "target/release/engine-zoo",
+            str(binary),
             "serve",
             "--game",
             args.game,

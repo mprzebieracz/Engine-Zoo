@@ -33,7 +33,7 @@ class Model:
     architecture: str = "chess-se-h4"
     simulations: int = 400
     device: str = "cuda"
-    backend: str = "native"
+    backend: str = "auto"
 
 
 def _load_roster(path: Path) -> tuple[list[Model], dict]:
@@ -46,7 +46,7 @@ def _load_roster(path: Path) -> tuple[list[Model], dict]:
             architecture=entry.get("architecture", "chess-se-h4"),
             simulations=int(entry.get("simulations", settings.get("simulations", 400))),
             device=entry.get("device", settings.get("device", "cuda")),
-            backend=entry.get("backend", "native"),
+            backend=entry.get("backend", "auto"),
         )
         for entry in data["models"]
     ]
@@ -103,10 +103,6 @@ def _write_pair_config(
         f'output_dir = "{pair_output}"',
         f'fastchess = "{settings.get("fastchess", "../crates/evaluations/bin/fastchess/fastchess")}"',
     ]
-    if settings.get("trt_cache_dir"):
-        lines.append(f'trt_cache_dir = "{settings["trt_cache_dir"]}"')
-    if settings.get("tensor_rt_compiler"):
-        lines.append(f'tensor_rt_compiler = "{settings["tensor_rt_compiler"]}"')
     path.write_text("[candidate]\n" + "\n".join(lines) + "\n")
 
 
