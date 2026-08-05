@@ -69,7 +69,7 @@ pub(super) fn analyze_request_with_registry(
     match (game, req.position) {
         (GameKind::Chess, GameSetup::Chess(position)) => {
             let model = resolve_server_model_at(repository, &run_dir, default_model, &req.model)?;
-            let inference = inference_for_model(
+            let inference = registry.prepared_config(
                 &model,
                 repository,
                 cfg.wait_for_count,
@@ -100,7 +100,7 @@ pub(super) fn analyze_request_with_registry(
                 model.model.game() == alphazero::GameKind::Connect4,
                 "model is not Connect4"
             );
-            let inference = inference_for_model(
+            let inference = registry.prepared_config(
                 &model,
                 repository,
                 cfg.wait_for_count,

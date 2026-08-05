@@ -172,7 +172,7 @@ impl RepositoryConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackendPreference {
     #[default]
