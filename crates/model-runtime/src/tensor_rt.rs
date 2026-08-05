@@ -8,6 +8,7 @@ use alphazero::artifact::{
 use alphazero::{ExperimentConfig, InferenceEngine, ModelSpec, Network, RunDir, RunState};
 use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
+use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::fs::OpenOptions;
 use std::fs::{self, File};
@@ -138,7 +139,81 @@ struct CompilerProfile {
     max: usize,
 }
 
+struct CompilationPlan {
+    expected: CompiledArtifactManifest,
+}
+
+struct CompilationWorkspace {
+    root: PathBuf,
+    _cleanup: CleanupDirectory,
+}
+
+impl CompilationWorkspace {
+    fn create(output: &Path, keep_intermediates: bool) -> Result<Self> {
+        let root = artifact::unique_sibling(output);
+        fs::create_dir(&root)?;
+        if keep_intermediates {
+            eprintln!("keeping TensorRT intermediates at {}", root.display());
+        }
+
+        Ok(Self {
+            _cleanup: CleanupDirectory::new(root.clone(), keep_intermediates),
+            root,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ProcessSpec {
+    program: PathBuf,
+    args: Vec<OsString>,
+}
+
+impl ProcessSpec {
+    fn new(program: PathBuf) -> Self {
+        Self {
+            program,
+            args: Vec::new(),
+        }
+    }
+
+    fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
+        self.args.push(arg.as_ref().to_os_string());
+        self
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command.env_remove("LD_PRELOAD");
+        command.args(&self.args);
+        command
+    }
+}
+
 pub fn compile_checkpoint_to_artifact(request: &CompileRequest<'_>) -> Result<CompiledArtifact> {
+    let parent = validate_request(request)?;
+    let _lock = ArtifactLock::acquire(request.output)?;
+
+    let plan = inspect_expected(request, &parent)?;
+    if let Some(existing) = reuse_artifact(request.output, &plan) {
+        return Ok(existing);
+    }
+
+    let workspace =
+        CompilationWorkspace::create(request.output, request.compiler.keep_intermediates)?;
+    let result = execute_compilation(request, &workspace, &plan)?;
+    let manifest = validate_compilation(request, &workspace, &plan, &result)?;
+    install_compilation(request, &workspace, &manifest)?;
+
+    Ok(CompiledArtifact {
+        artifact_path: request.output.to_path_buf(),
+        manifest_path: artifact::manifest_path(request.output),
+        manifest,
+        reused: false,
+    })
+}
+
+fn validate_request(request: &CompileRequest<'_>) -> Result<PathBuf> {
     ensure!(
         request.checkpoint.is_file(),
         "checkpoint does not exist: {}",
@@ -149,10 +224,14 @@ pub fn compile_checkpoint_to_artifact(request: &CompileRequest<'_>) -> Result<Co
     let parent = request
         .output
         .parent()
-        .context("compiled artifact needs a parent directory")?;
-    fs::create_dir_all(parent)?;
-    let _lock = ArtifactLock::acquire(request.output)?;
+        .context("compiled artifact needs a parent directory")?
+        .to_path_buf();
+    fs::create_dir_all(&parent)?;
 
+    Ok(parent)
+}
+
+fn inspect_expected(request: &CompileRequest<'_>, parent: &Path) -> Result<CompilationPlan> {
     let environment_result = inspect_environment(request.compiler, parent)?;
     let environment = artifact_environment(&environment_result);
     let build = build_config(request);
@@ -161,57 +240,66 @@ pub fn compile_checkpoint_to_artifact(request: &CompileRequest<'_>) -> Result<Co
     let model_fingerprint = model_fingerprint(request.model);
     let expected_io = expected_io(request.model, request.compiler.precision);
 
-    let expected = CompiledArtifactManifest {
-        schema_version: ARTIFACT_MANIFEST_VERSION,
-        backend: request.backend,
-        checkpoint_sha256,
-        model_fingerprint,
-        artifact_sha256: String::new(),
-        io: expected_io,
-        build,
-        environment,
-        compiler: compiler_identity,
-    };
+    Ok(CompilationPlan {
+        expected: CompiledArtifactManifest {
+            schema_version: ARTIFACT_MANIFEST_VERSION,
+            backend: request.backend,
+            checkpoint_sha256,
+            model_fingerprint,
+            artifact_sha256: String::new(),
+            io: expected_io,
+            build,
+            environment,
+            compiler: compiler_identity,
+        },
+    })
+}
 
-    if let Ok(existing) = artifact::validate_artifact(request.output) {
-        if existing
-            .validate_identity(&expected.cache_identity())
-            .is_ok()
-        {
-            return Ok(CompiledArtifact {
-                artifact_path: request.output.to_path_buf(),
-                manifest_path: artifact::manifest_path(request.output),
-                manifest: existing,
-                reused: true,
-            });
-        }
+fn reuse_artifact(output: &Path, plan: &CompilationPlan) -> Option<CompiledArtifact> {
+    let existing = artifact::validate_artifact(output).ok()?;
+    if existing
+        .validate_identity(&plan.expected.cache_identity())
+        .is_err()
+    {
+        return None;
     }
 
-    let temporary_root = artifact::unique_sibling(request.output);
-    fs::create_dir(&temporary_root)?;
-    let _cleanup =
-        CleanupDirectory::new(temporary_root.clone(), request.compiler.keep_intermediates);
-    if request.compiler.keep_intermediates {
-        eprintln!(
-            "keeping TensorRT intermediates at {}",
-            temporary_root.display()
-        );
-    }
-    let result = compile_to_temporary(request, &temporary_root, &expected.environment)?;
-    validate_compiler_result(request, &result)?;
+    Some(CompiledArtifact {
+        artifact_path: output.to_path_buf(),
+        manifest_path: artifact::manifest_path(output),
+        manifest: existing,
+        reused: true,
+    })
+}
+
+fn execute_compilation(
+    request: &CompileRequest<'_>,
+    workspace: &CompilationWorkspace,
+    plan: &CompilationPlan,
+) -> Result<CompilerResult> {
+    compile_to_temporary(request, &workspace.root, &plan.expected.environment)
+}
+
+fn validate_compilation(
+    request: &CompileRequest<'_>,
+    workspace: &CompilationWorkspace,
+    plan: &CompilationPlan,
+    result: &CompilerResult,
+) -> Result<CompiledArtifactManifest> {
+    validate_compiler_result(request, result)?;
     ensure!(
-        artifact_environment(&result) == expected.environment,
+        artifact_environment(result) == plan.expected.environment,
         "TensorRT compiler environment changed between inspection and build"
     );
 
-    let temporary_artifact = temporary_root.join("artifact");
+    let temporary_artifact = workspace.root.join("artifact");
     ensure!(
         temporary_artifact.is_file(),
         "compiler succeeded without producing an artifact"
     );
     File::open(&temporary_artifact)?.sync_all()?;
 
-    let mut manifest = expected;
+    let mut manifest = plan.expected.clone();
     manifest.io.input_dtype = parse_dtype(
         result
             .input_dtype
@@ -227,18 +315,19 @@ pub fn compile_checkpoint_to_artifact(request: &CompileRequest<'_>) -> Result<Co
     manifest.artifact_sha256 = artifact::sha256_file(&temporary_artifact)?;
     artifact::write_manifest_last(&temporary_artifact, &manifest)?;
 
+    Ok(manifest)
+}
+
+fn install_compilation(
+    request: &CompileRequest<'_>,
+    workspace: &CompilationWorkspace,
+    manifest: &CompiledArtifactManifest,
+) -> Result<()> {
     if !request.compiler.keep_intermediates {
-        remove_intermediates(&temporary_root)?;
+        remove_intermediates(&workspace.root)?;
     }
 
-    install_content_addressed(request.output, &temporary_root, &manifest)?;
-
-    Ok(CompiledArtifact {
-        artifact_path: request.output.to_path_buf(),
-        manifest_path: artifact::manifest_path(request.output),
-        manifest,
-        reused: false,
-    })
+    install_content_addressed(request.output, &workspace.root, manifest)
 }
 
 fn remove_intermediates(directory: &Path) -> Result<()> {
@@ -330,7 +419,7 @@ fn compile_to_temporary(
     let result_path = temporary_root.join("build-result.json");
     let channels = request.model.state_shape()[0];
 
-    let mut command = compiler_command(request.compiler);
+    let mut command = compiler_process(request.compiler);
     match request.backend {
         CompiledBackendKind::TensorRtTorchScript => {
             command
@@ -347,8 +436,7 @@ fn compile_to_temporary(
                 .export_python
                 .as_ref()
                 .unwrap_or(&request.compiler.python);
-            let mut export = Command::new(export_python);
-            sanitize_python_command(&mut export);
+            let mut export = ProcessSpec::new(export_python.to_path_buf());
             export
                 .arg(&request.compiler.script)
                 .arg("export-onnx")
@@ -362,7 +450,7 @@ fn compile_to_temporary(
                 .arg(precision_name(request.compiler.precision))
                 .arg("--result-json")
                 .arg(export_result);
-            run_command(&mut export, "ONNX exporter")?;
+            run_process(&export, "ONNX exporter")?;
 
             command
                 .arg("build-engine")
@@ -390,7 +478,7 @@ fn compile_to_temporary(
         .arg(precision_name(request.compiler.precision))
         .arg("--result-json")
         .arg(&result_path);
-    run_command(&mut command, "TensorRT compiler")?;
+    run_process(&command, "TensorRT compiler")?;
 
     read_compiler_result(&result_path)
 }
@@ -401,12 +489,12 @@ fn inspect_environment(
 ) -> Result<CompilerResult> {
     let result_path = artifact::unique_sibling(&output_directory.join("environment.json"));
     let mut cleanup = CleanupFile::new(result_path.clone());
-    let mut command = compiler_command(compiler);
+    let mut command = compiler_process(compiler);
     command
         .arg("inspect-environment")
         .arg("--result-json")
         .arg(&result_path);
-    run_command(&mut command, "TensorRT environment inspection")?;
+    run_process(&command, "TensorRT environment inspection")?;
 
     let result = read_compiler_result(&result_path)?;
     cleanup.remove()?;
@@ -420,20 +508,15 @@ fn inspect_environment(
     Ok(result)
 }
 
-fn compiler_command(compiler: &TensorRtCompiler) -> Command {
-    let mut command = Command::new(&compiler.python);
-    sanitize_python_command(&mut command);
-    command.arg(&compiler.script);
-
-    command
+fn compiler_process(compiler: &TensorRtCompiler) -> ProcessSpec {
+    let mut process = ProcessSpec::new(compiler.python.clone());
+    process.arg(&compiler.script);
+    process
 }
 
-fn sanitize_python_command(command: &mut Command) {
-    command.env_remove("LD_PRELOAD");
-}
-
-fn run_command(command: &mut Command, description: &str) -> Result<()> {
-    let output = command
+fn run_process(process: &ProcessSpec, description: &str) -> Result<()> {
+    let output = process
+        .command()
         .output()
         .with_context(|| format!("starting {description}"))?;
 
@@ -863,63 +946,4 @@ impl Drop for CleanupFile {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn batch_shapes_reject_invalid_ranges() {
-        assert!(TensorRtBatchShapes {
-            min: 32,
-            optimal: 16,
-            max: 64
-        }
-        .validate()
-        .is_err());
-    }
-
-    #[test]
-    fn compiler_protocol_rejects_an_unknown_schema() {
-        let path = std::env::temp_dir().join(format!(
-            "engine-zoo-compiler-result-{}.json",
-            std::process::id()
-        ));
-        fs::write(
-            &path,
-            r#"{"schema_version":2,"operation":"inspect-environment","tensorrt_version":"1","cuda_runtime_version":"1","gpu_name":"gpu","compute_capability":"1","python_version":"1"}"#,
-        )
-        .unwrap();
-
-        let error = read_compiler_result(&path).unwrap_err();
-        let _ = fs::remove_file(path);
-
-        assert!(error
-            .to_string()
-            .contains("unsupported TensorRT compiler result schema"));
-    }
-
-    #[test]
-    fn exact_fp16_requires_fp16_io() {
-        assert_eq!(expected_dtype(TensorRtBuildPrecision::Fp16), "fp16");
-        assert_eq!(
-            expected_dtype(TensorRtBuildPrecision::MixedFp32IoFp16Tactics),
-            "fp32"
-        );
-    }
-
-    #[test]
-    fn application_compiler_disables_timing_cache() {
-        let compiler = TensorRtCompiler::application(
-            PathBuf::from("python"),
-            None,
-            PathBuf::from("compile.py"),
-            TensorRtBatchShapes {
-                min: 1,
-                optimal: 1,
-                max: 1,
-            },
-            TensorRtBuildPrecision::Fp16,
-        );
-
-        assert_eq!(compiler.timing_cache, TimingCachePolicy::Disabled);
-    }
-}
+mod tests;
