@@ -1,11 +1,11 @@
 use super::*;
-use engine_model_runtime::BackendPreference;
 use alphazero::representation::{
     ChessAzRepresentation, ChessAzState, ChessClassicRepresentation, Connect4AzRepresentation,
 };
 use alphazero::ChessRepetitionRules;
 use engine_core::game::{GameState, TerminalValue};
 use engine_core::notation::GameNotation;
+use engine_model_runtime::BackendPreference;
 use search::{Mcts, NoExtraRules};
 
 struct ChessHistoryNotation;
