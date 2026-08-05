@@ -48,6 +48,7 @@ pub fn analyze_request(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn analyze_request_with_registry(
     game: GameKind,
     run_dir: PathBuf,
