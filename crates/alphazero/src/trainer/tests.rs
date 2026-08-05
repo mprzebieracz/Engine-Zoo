@@ -170,6 +170,55 @@ fn prefetcher_closes_after_the_last_nonempty_batch() {
 }
 
 #[test]
+fn trainer_reports_effective_steps_without_mutating_its_config() {
+    use crate::representation::Connect4AzRepresentation;
+    use crate::{
+        Action, ModelSpec, Network, Outcome, ReplayBuffer, ReplaySample, ReplaySampler,
+        SampleMetadata, TrainingWeights,
+    };
+    use games::Connect4;
+    use tch::{nn, Device};
+
+    let vs = nn::VarStore::new(Device::Cpu);
+    let network = Network::new(&vs.root(), &ModelSpec::connect4_basic(1, 4)).unwrap();
+    let config = TrainConfig {
+        batch_size: 2,
+        train_steps: 3,
+        max_replay_reuse_per_iteration: Some(1.0),
+        ..Default::default()
+    };
+    let mut trainer = Trainer::new(&vs, config).unwrap();
+    let replay = ReplayBuffer::<Connect4>::new(8, 7);
+    let mut sampler = ReplaySampler::new(Connect4AzRepresentation);
+    replay.add([ReplaySample {
+        state: Connect4::default(),
+        policy: vec![(Action::new(0), 1.0)].into(),
+        outcome: Outcome::Draw,
+        weights: TrainingWeights::default(),
+        metadata: SampleMetadata::default(),
+    }]);
+
+    let metrics = trainer
+        .train(
+            &network,
+            &replay,
+            &mut sampler,
+            Device::Cpu,
+            TrainingSeed {
+                experiment_seed: 7,
+                global_step: 0,
+            },
+            1,
+        )
+        .unwrap();
+
+    assert_eq!(metrics.train_steps, 1);
+    assert_eq!(metrics.configured_train_steps, 3);
+    assert_eq!(metrics.fresh_replay_samples, 1);
+    assert_eq!(metrics.replay_reuse, 2.0);
+}
+
+#[test]
 fn replay_step_seeds_are_stable_and_step_specific() {
     assert_eq!(replay_seed(7, 11), replay_seed(7, 11));
     assert_ne!(replay_seed(7, 11), replay_seed(7, 12));

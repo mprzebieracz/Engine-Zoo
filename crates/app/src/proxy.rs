@@ -181,14 +181,8 @@ impl ModelRegistry {
         if let Some(config) = self.prepared.lock().unwrap().get(&key) {
             return Ok(config.clone());
         }
-        let config = inference_for_model(
-            model,
-            repository,
-            wait_for_count,
-            timeout,
-            device,
-            backend,
-        )?;
+        let config =
+            inference_for_model(model, repository, wait_for_count, timeout, device, backend)?;
         self.prepared.lock().unwrap().insert(key, config.clone());
         Ok(config)
     }

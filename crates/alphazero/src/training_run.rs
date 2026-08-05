@@ -12,7 +12,7 @@ use crate::selfplay::{
 };
 use crate::{
     AlphaZeroRepresentation, BatcherStats, ChessHistory, GameKind, Network, ReplayBuffer,
-    TrainMetrics, Trainer, TrainingSeed,
+    ReplaySampler, TrainMetrics, Trainer, TrainingSeed,
 };
 use anyhow::{Context, Result};
 use engine_core::GameState;
@@ -108,7 +108,7 @@ where
     workers: F,
     make_workers: fn(&InferenceService, crate::SelfPlayConfig) -> Result<F>,
     trainer: Trainer,
-    representation: R,
+    sampler: ReplaySampler<R>,
     pending_tensor_rt_recompile: Option<NextInference>,
 }
 
@@ -271,7 +271,7 @@ where
         self.trainer.train(
             &self.network,
             &self.replay,
-            &self.representation,
+            &mut self.sampler,
             self.device,
             TrainingSeed {
                 experiment_seed: self.experiment.seed,
@@ -672,7 +672,7 @@ where
             workers,
             make_workers,
             trainer,
-            representation,
+            sampler: ReplaySampler::new(representation),
             pending_tensor_rt_recompile: None,
         })
     }

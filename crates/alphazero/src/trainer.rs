@@ -1,5 +1,5 @@
 use super::network::{Network, RawValueOutput};
-use super::replay::ReplayBuffer;
+use super::replay::{ReplayBuffer, ReplaySampler};
 use super::representation::AlphaZeroRepresentation;
 use engine_core::GameState;
 use rand::rngs::SmallRng;
@@ -208,6 +208,35 @@ pub struct TrainingSeed {
     pub global_step: u64,
 }
 
+/// Per-call training settings derived from the immutable experiment configuration.
+#[derive(Clone, Copy, Debug)]
+struct TrainingPlan {
+    train_steps: usize,
+    batch_size: usize,
+    micro_batch_size: usize,
+    prefetch_depth: usize,
+    experiment_seed: u64,
+    first_global_step: u64,
+}
+
+impl TrainingPlan {
+    fn from_config(
+        config: &TrainConfig,
+        train_steps: usize,
+        experiment_seed: u64,
+        first_global_step: u64,
+    ) -> Self {
+        Self {
+            train_steps,
+            batch_size: config.batch_size,
+            micro_batch_size: config.micro_batch_size,
+            prefetch_depth: config.prefetch_depth,
+            experiment_seed,
+            first_global_step,
+        }
+    }
+}
+
 /// Owns the optimizer together with the immutable training configuration.
 pub struct Trainer {
     config: TrainConfig,
@@ -225,7 +254,7 @@ impl Trainer {
         &mut self,
         network: &Network,
         replay: &ReplayBuffer<S>,
-        representation: &R,
+        sampler: &mut ReplaySampler<R>,
         device: Device,
         seed: TrainingSeed,
         fresh_replay_samples: usize,
@@ -237,21 +266,25 @@ impl Trainer {
         let effective_train_steps = self
             .config
             .train_steps_for_fresh_replay_samples(fresh_replay_samples);
-        let mut effective_config = self.config.clone();
-        effective_config.train_steps = effective_train_steps;
+        let plan = TrainingPlan::from_config(
+            &self.config,
+            effective_train_steps,
+            seed.experiment_seed,
+            seed.global_step,
+        );
 
         let mut metrics = train_with_optimizer(
             network,
             &mut self.optimizer,
             replay,
-            representation,
+            sampler,
             device,
-            &effective_config,
-            seed,
+            &self.config,
+            plan,
         )?;
         metrics.configured_train_steps = self.config.train_steps;
         metrics.fresh_replay_samples = fresh_replay_samples;
-        metrics.replay_reuse = metrics.train_steps as f64 * self.config.batch_size as f64
+        metrics.replay_reuse = metrics.train_steps as f64 * plan.batch_size as f64
             / fresh_replay_samples.max(1) as f64;
 
         Some(metrics)
@@ -297,28 +330,19 @@ where
     S: GameState + Clone + Send + Sync,
     R: AlphaZeroRepresentation<S>,
 {
-    train_with_optimizer(
-        network,
-        optimizer,
-        replay,
-        representation,
-        device,
-        cfg,
-        TrainingSeed {
-            experiment_seed,
-            global_step,
-        },
-    )
+    let plan = TrainingPlan::from_config(cfg, cfg.train_steps, experiment_seed, global_step);
+    let mut sampler = ReplaySampler::new((*representation).clone());
+    train_with_optimizer(network, optimizer, replay, &mut sampler, device, cfg, plan)
 }
 
 fn train_with_optimizer<S, R>(
     network: &Network,
     optimizer: &mut Optimizer,
     replay: &ReplayBuffer<S>,
-    representation: &R,
+    sampler: &mut ReplaySampler<R>,
     device: Device,
     cfg: &TrainConfig,
-    seed: TrainingSeed,
+    plan: TrainingPlan,
 ) -> Option<TrainMetrics>
 where
     S: GameState + Clone + Send + Sync,
@@ -327,12 +351,12 @@ where
     cfg.validate()
         .expect("Trainer only accepts validated training configuration");
 
-    if cfg.train_steps == 0 {
+    if plan.train_steps == 0 {
         return None;
     }
 
     let started = Instant::now();
-    let (sender, receiver) = sync_channel(cfg.prefetch_depth.max(1));
+    let (sender, receiver) = sync_channel(plan.prefetch_depth.max(1));
     let mut sampling_time = Duration::ZERO;
     let mut transfer_time = Duration::ZERO;
     let mut forward_backward_time = Duration::ZERO;
@@ -344,13 +368,13 @@ where
 
     std::thread::scope(|scope| {
         scope.spawn(move || {
-            for offset in 0..cfg.train_steps {
+            for offset in 0..plan.train_steps {
                 let sampling_started = Instant::now();
                 let mut rng = SmallRng::seed_from_u64(replay_seed(
-                    seed.experiment_seed,
-                    seed.global_step + offset as u64,
+                    plan.experiment_seed,
+                    plan.first_global_step + offset as u64,
                 ));
-                let batch = replay.sample(cfg.batch_size, representation, &mut rng);
+                let batch = sampler.sample(replay, plan.batch_size, &mut rng);
                 let elapsed = sampling_started.elapsed();
                 let replay_was_empty = batch.is_none();
                 if sender.send((batch, elapsed)).is_err() {
@@ -367,13 +391,13 @@ where
             let transfer_started = Instant::now();
             let batch = DeviceReplayBatch::from_cpu(batch, device);
             transfer_time += transfer_started.elapsed();
-            let learning_rate = cfg.learning_rate_at(seed.global_step + completed as u64);
+            let learning_rate = cfg.learning_rate_at(plan.first_global_step + completed as u64);
             optimizer.set_lr(learning_rate);
             let metrics = train_device_batch(
                 network,
                 optimizer,
                 &batch,
-                cfg.micro_batch_size,
+                plan.micro_batch_size,
                 cfg.value_loss_weight,
                 representation_shape::<S, R>(),
             );
@@ -384,15 +408,15 @@ where
             completed += 1;
 
             if cfg.progress_every > 0
-                && (completed % cfg.progress_every == 0 || completed == cfg.train_steps)
+                && (completed % cfg.progress_every == 0 || completed == plan.train_steps)
             {
                 let elapsed = started.elapsed().as_secs_f64().max(f64::EPSILON);
                 let snapshot = TrainProgress {
                     step: completed,
-                    total_steps: cfg.train_steps,
+                    total_steps: plan.train_steps,
                     policy_loss: policy_total / completed as f64,
                     value_loss: value_total / completed as f64,
-                    samples_per_second: completed as f64 * cfg.batch_size as f64 / elapsed,
+                    samples_per_second: completed as f64 * plan.batch_size as f64 / elapsed,
                     learning_rate,
                 };
                 eprintln!(
@@ -411,16 +435,17 @@ where
         policy_loss: policy_total / completed as f64,
         value_loss: value_total / completed as f64,
         train_steps: completed,
-        configured_train_steps: cfg.train_steps,
+        configured_train_steps: plan.train_steps,
         fresh_replay_samples: 0,
         replay_reuse: 0.0,
         replay_sampling_seconds: sampling_time.as_secs_f64(),
         host_to_device_seconds: transfer_time.as_secs_f64(),
         forward_backward_seconds: forward_backward_time.as_secs_f64(),
         optimizer_seconds: optimizer_time.as_secs_f64(),
-        samples_per_second: completed as f64 * cfg.batch_size as f64
+        samples_per_second: completed as f64 * plan.batch_size as f64
             / started.elapsed().as_secs_f64().max(f64::EPSILON),
-        learning_rate: cfg.learning_rate_at(seed.global_step + completed.saturating_sub(1) as u64),
+        learning_rate: cfg
+            .learning_rate_at(plan.first_global_step + completed.saturating_sub(1) as u64),
         progress,
     })
 }

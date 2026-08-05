@@ -42,8 +42,8 @@ pub use network::{
     ValueHeadSpec,
 };
 pub use replay::{
-    Outcome, ReplayBatch, ReplayBuffer, ReplaySample, SampleMetadata, SearchKind, SparsePolicy,
-    SparsePolicyBatch, TrainingWeights,
+    Outcome, ReplayBatch, ReplayBuffer, ReplaySample, ReplaySampler, SampleMetadata, SearchKind,
+    SparsePolicy, SparsePolicyBatch, TrainingWeights,
 };
 pub use representation::{Action, AlphaZeroRepresentation};
 pub use rules::{ChessNodeMeta, ChessRepetitionRules};
