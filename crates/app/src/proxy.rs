@@ -185,8 +185,7 @@ impl ModelRegistry {
                     .context("TensorRT server config has no compiled artifact")?,
             ),
         };
-        let inference =
-            alphazero::InferenceService::load(model, source, device, config)?;
+        let inference = alphazero::InferenceService::load(model, source, device, config)?;
         let loaded = Arc::new(LoadedModel {
             model: model.clone(),
             inference,
