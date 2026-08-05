@@ -322,9 +322,9 @@ fn resolve_paths(config: &mut ArenaConfig, root: &Path) {
 
 fn is_bare_model_selector(path: &Path) -> bool {
     path.components().count() == 1
-        && !path
+        && path
             .extension()
-            .is_some_and(|extension| extension == "safetensors")
+            .is_none_or(|extension| extension != "safetensors")
 }
 
 /// Bare executable names are resolved through `PATH`; paths containing a
