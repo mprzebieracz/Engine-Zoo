@@ -26,6 +26,38 @@
         "simulations": 128,
         "waitForCount": 16
       }
+    },
+    {
+      "id": "chess-v7-best",
+      "name": "AlphaZero · v7 current best",
+      "kind": "alphazero",
+      "games": [
+        "chess"
+      ],
+      "model": "latest",
+      "server": "http://127.0.0.1:8080",
+      "description": "v7 current best checkpoint",
+      "badge": "Remote",
+      "defaults": {
+        "simulations": 400,
+        "waitForCount": 1
+      }
+    },
+    {
+      "id": "chess-v6-champion",
+      "name": "AlphaZero · v6 arena champion",
+      "kind": "alphazero",
+      "games": [
+        "chess"
+      ],
+      "model": "/mnt/storage/users/z1204620/engine-zoo/runs/chess-puct-wdl-tensorrt-v6/checkpoints/generation-000550.safetensors",
+      "server": "http://127.0.0.1:8080",
+      "description": "v6 generation 550 arena champion",
+      "badge": "Remote",
+      "defaults": {
+        "simulations": 400,
+        "waitForCount": 1
+      }
     }
   ]
 }

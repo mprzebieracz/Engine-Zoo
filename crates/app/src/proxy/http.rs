@@ -243,6 +243,7 @@ pub(super) async fn analyze_http(
             &state.models,
             &state.repository,
             &state.default_model,
+            state.backend,
         )
     })
     .await;

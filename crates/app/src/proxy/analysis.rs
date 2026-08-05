@@ -1,4 +1,5 @@
 use super::*;
+use engine_model_runtime::BackendPreference;
 use alphazero::representation::{
     ChessAzRepresentation, ChessAzState, ChessClassicRepresentation, Connect4AzRepresentation,
 };
@@ -35,7 +36,16 @@ pub fn analyze_request(
 ) -> Result<Analysis> {
     let registry = ModelRegistry::new();
     let repository = RepositoryConfig::discover(std::env::current_dir()?)?;
-    analyze_request_with_registry(game, run_dir, req, device, &registry, &repository, "latest")
+    analyze_request_with_registry(
+        game,
+        run_dir,
+        req,
+        device,
+        &registry,
+        &repository,
+        "latest",
+        BackendPreference::Auto,
+    )
 }
 
 pub(super) fn analyze_request_with_registry(
@@ -46,6 +56,7 @@ pub(super) fn analyze_request_with_registry(
     registry: &ModelRegistry,
     repository: &RepositoryConfig,
     default_model: &str,
+    backend: BackendPreference,
 ) -> Result<Analysis> {
     let mode = req.mode.unwrap_or(AnalyzeMode::Net);
     let cfg = AnalyzeConfig {
@@ -57,7 +68,14 @@ pub(super) fn analyze_request_with_registry(
     match (game, req.position) {
         (GameKind::Chess, GameSetup::Chess(position)) => {
             let model = resolve_server_model_at(repository, &run_dir, default_model, &req.model)?;
-            let inference = inference_for_model(&model, cfg.wait_for_count, cfg.timeout, device)?;
+            let inference = inference_for_model(
+                &model,
+                repository,
+                cfg.wait_for_count,
+                cfg.timeout,
+                device,
+                backend,
+            )?;
             let loaded = registry.load(&model.model, &model.checkpoint, device, &inference)?;
             match model.model.chess_history() {
                 Some(alphazero::ChessHistory::One) => {
@@ -81,7 +99,14 @@ pub(super) fn analyze_request_with_registry(
                 model.model.game() == alphazero::GameKind::Connect4,
                 "model is not Connect4"
             );
-            let inference = inference_for_model(&model, cfg.wait_for_count, cfg.timeout, device)?;
+            let inference = inference_for_model(
+                &model,
+                repository,
+                cfg.wait_for_count,
+                cfg.timeout,
+                device,
+                backend,
+            )?;
             let loaded = registry.load(&model.model, &model.checkpoint, device, &inference)?;
             analyze_connect4(
                 loaded.inference.client(),
