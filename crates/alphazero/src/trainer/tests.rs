@@ -219,6 +219,71 @@ fn trainer_reports_effective_steps_without_mutating_its_config() {
 }
 
 #[test]
+fn trainer_notifies_progress_at_the_configured_cadence() {
+    use crate::representation::Connect4AzRepresentation;
+    use crate::{
+        Action, ModelSpec, Network, Outcome, ReplayBuffer, ReplaySample, ReplaySampler,
+        SampleMetadata, TrainingWeights,
+    };
+    use games::Connect4;
+    use tch::{nn, Device};
+
+    let vs = nn::VarStore::new(Device::Cpu);
+    let network = Network::new(&vs.root(), &ModelSpec::connect4_basic(1, 4)).unwrap();
+    let config = TrainConfig {
+        batch_size: 1,
+        train_steps: 3,
+        progress_every: 2,
+        ..TrainConfig::default()
+    };
+    let mut trainer = Trainer::new(&vs, config).unwrap();
+    let replay = ReplayBuffer::<Connect4>::new(8, 7);
+    let mut sampler = ReplaySampler::new(Connect4AzRepresentation);
+    replay.add([ReplaySample {
+        state: Connect4::default(),
+        policy: vec![(Action::new(0), 1.0)].into(),
+        outcome: Outcome::Draw,
+        weights: TrainingWeights::default(),
+        metadata: SampleMetadata::default(),
+    }]);
+
+    let mut observed = Vec::new();
+    let metrics = trainer
+        .train_with_progress(
+            &network,
+            &replay,
+            &mut sampler,
+            TrainingInvocation {
+                device: Device::Cpu,
+                seed: TrainingSeed {
+                    experiment_seed: 7,
+                    global_step: 0,
+                },
+                fresh_replay_samples: 3,
+            },
+            |progress| observed.push(progress.clone()),
+        )
+        .unwrap();
+
+    assert_eq!(
+        observed
+            .iter()
+            .map(|progress| progress.step)
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
+    for (observed, retained) in observed.iter().zip(&metrics.progress) {
+        assert_eq!(observed.step, retained.step);
+        assert_eq!(observed.total_steps, retained.total_steps);
+        assert_eq!(observed.policy_loss, retained.policy_loss);
+        assert_eq!(observed.value_loss, retained.value_loss);
+        assert_eq!(observed.samples_per_second, retained.samples_per_second);
+        assert_eq!(observed.learning_rate, retained.learning_rate);
+    }
+    assert_eq!(metrics.train_steps, 3);
+}
+
+#[test]
 fn replay_step_seeds_are_stable_and_step_specific() {
     assert_eq!(replay_seed(7, 11), replay_seed(7, 11));
     assert_ne!(replay_seed(7, 11), replay_seed(7, 12));
