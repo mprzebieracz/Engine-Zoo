@@ -1,7 +1,7 @@
 use super::{
     select_temperature_action, CompletedGame, GameRequest, SearchBudget, SearchBudgetSchedule,
-    SelfPlayConfig, SelfPlayCoordinator, SelfPlayEpoch, SelfPlayStats, SelfPlayWorker,
-    SelfPlayWorkerFactory, TemperaturePhase, TemperatureSchedule,
+    SelfPlayConfig, SelfPlayCoordinator, SelfPlayEpoch, SelfPlayProgress, SelfPlayStats,
+    SelfPlayWorker, SelfPlayWorkerFactory, TemperaturePhase, TemperatureSchedule,
 };
 use crate::{Action, Outcome, ReplayBuffer, ReplaySample, SampleMetadata, TrainingWeights};
 use anyhow::Result;
@@ -155,6 +155,56 @@ fn ordered_commit_makes_thread_counts_and_generation_metadata_reproducible() {
     assert_eq!(
         four_threads,
         (40..48).map(|game_id| (game_id, 6)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn progress_reports_ordered_replay_commits_at_the_configured_cadence() {
+    let coordinator = SelfPlayCoordinator::new(
+        SelfPlayConfig {
+            num_games: 5,
+            threads: 4,
+            progress_every: 2,
+            ..SelfPlayConfig::default()
+        },
+        17,
+    )
+    .unwrap();
+    let replay = ReplayBuffer::new(16, 1);
+    let epoch = SelfPlayEpoch {
+        model_generation: 6,
+        first_game_id: 40,
+    };
+    let mut observed: Vec<(SelfPlayProgress, usize)> = Vec::new();
+
+    let stats = coordinator
+        .run_with_progress(&ScriptedFactory, &replay, epoch, |progress| {
+            observed.push((progress, replay.len()))
+        })
+        .unwrap();
+
+    assert_eq!(stats.games, 5);
+    assert_eq!(
+        observed
+            .iter()
+            .map(|(progress, _)| progress.games)
+            .collect::<Vec<_>>(),
+        [2, 4, 5]
+    );
+    assert!(observed.iter().all(|(progress, committed)| {
+        *committed == progress.games
+            && progress.total_games == 5
+            && progress.games_per_second.is_finite()
+            && progress.positions_per_second.is_finite()
+            && progress.average_moves_per_game == 1.0
+    }));
+    assert_eq!(
+        replay
+            .export_filled()
+            .into_iter()
+            .map(|sample| sample.metadata.game_id)
+            .collect::<Vec<_>>(),
+        (40..45).collect::<Vec<_>>(),
     );
 }
 

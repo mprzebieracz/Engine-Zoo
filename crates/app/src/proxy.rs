@@ -119,6 +119,18 @@ struct AppState {
 
 struct ModelRegistry {
     models: Mutex<HashMap<ModelKey, Arc<LoadedModel>>>,
+    prepared: Mutex<HashMap<PreparedKey, alphazero::InferenceConfig>>,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct PreparedKey {
+    checkpoint: PathBuf,
+    checkpoint_modified: Option<std::time::SystemTime>,
+    checkpoint_size: u64,
+    backend: BackendPreference,
+    wait_for_count: usize,
+    wait_milliseconds: u64,
+    cuda: bool,
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -143,7 +155,36 @@ impl ModelRegistry {
     fn new() -> Self {
         Self {
             models: Mutex::new(HashMap::new()),
+            prepared: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn prepared_config(
+        &self,
+        model: &ResolvedModel,
+        repository: &RepositoryConfig,
+        wait_for_count: usize,
+        timeout: Duration,
+        device: Device,
+        backend: BackendPreference,
+    ) -> Result<alphazero::InferenceConfig> {
+        let metadata = fs::metadata(&model.checkpoint)?;
+        let key = PreparedKey {
+            checkpoint: model.checkpoint.clone(),
+            checkpoint_modified: metadata.modified().ok(),
+            checkpoint_size: metadata.len(),
+            backend,
+            wait_for_count,
+            wait_milliseconds: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+            cuda: device.is_cuda(),
+        };
+        if let Some(config) = self.prepared.lock().unwrap().get(&key) {
+            return Ok(config.clone());
+        }
+        let config =
+            inference_for_model(model, repository, wait_for_count, timeout, device, backend)?;
+        self.prepared.lock().unwrap().insert(key, config.clone());
+        Ok(config)
     }
 
     fn load(
@@ -206,7 +247,6 @@ fn server_inference_config(
     backend: BackendPreference,
 ) -> Result<alphazero::InferenceConfig> {
     let mut config = config.clone();
-    config.preferred_batch_size = wait_for_count.max(1);
     config.max_wait = alphazero::DurationConfig {
         milliseconds: timeout.as_millis().try_into().unwrap_or(u64::MAX),
     };
@@ -220,6 +260,8 @@ fn server_inference_config(
     for backend in backend.candidates() {
         match backend {
             RuntimeBackend::Native => {
+                // Native batching can follow the request wait size.
+                config.preferred_batch_size = wait_for_count.max(1);
                 config.engine = InferenceEngine::Native;
                 config.compiled_artifact = None;
                 return Ok(config);
@@ -230,6 +272,10 @@ fn server_inference_config(
                 else {
                     continue;
                 };
+                // TensorRT engines are compiled against the repository batch
+                // profile; keep load validation aligned with that profile.
+                config.preferred_batch_size = repository.runtime.cuda_tensorrt_batch_optimal;
+                config.max_batch_size = repository.runtime.cuda_tensorrt_batch_max;
                 config.engine = match kind {
                     CompiledBackendKind::TensorRtRaw => InferenceEngine::TensorRtRaw,
                     CompiledBackendKind::TensorRtTorchScript => {
@@ -313,6 +359,36 @@ fn inference_for_model(
     )
 }
 
+fn warmup_default_model(state: &AppState) -> Result<()> {
+    let model = resolve_server_model(state, &state.default_model)?;
+    let config = state.models.prepared_config(
+        &model,
+        &state.repository,
+        1,
+        BATCH_TIMEOUT,
+        state.device,
+        state.backend,
+    )?;
+    let _loaded = state
+        .models
+        .load(&model.model, &model.checkpoint, state.device, &config)?;
+    let engine = match config.engine {
+        InferenceEngine::Native => "native",
+        InferenceEngine::TensorRtTorchScript => "torch-tensorrt",
+        InferenceEngine::TensorRtRaw => "raw-tensorrt",
+    };
+    let artifact = config
+        .compiled_artifact
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "(none)".into());
+    eprintln!(
+        "serve warmup ready: backend={engine} model={} artifact={artifact}",
+        model.checkpoint.display(),
+    );
+    Ok(())
+}
+
 enum LiveSession {
     Chess(Box<SessionState<ChessGame>>),
     Connect4(SessionState<Connect4>),
@@ -346,6 +422,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         models: Arc::new(ModelRegistry::new()),
         evaluations,
     };
+    warmup_default_model(&state)?;
     let app = Router::new()
         .route("/", get(index))
         .route("/health", get(health))

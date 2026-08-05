@@ -361,6 +361,42 @@ fn root_gumbel_puct_batched_rounds_keep_the_forced_win() {
 }
 
 #[test]
+fn gumbel_variants_repeat_exactly_after_reseed_with_reused_scratch() {
+    let mut configs = [full_gumbel(), root_gumbel_puct()];
+    for config in &mut configs {
+        match config {
+            SearchConfig::FullGumbel(config) => config.root.gumbel_scale = 1.0,
+            SearchConfig::RootGumbelPuct(config) => config.root.gumbel_scale = 1.0,
+            SearchConfig::Puct(_) => unreachable!(),
+        }
+    }
+
+    for config in configs {
+        let mut search = Mcts::new(Uniform, config, NoExtraRules).with_seed(29);
+        let first = search
+            .search(
+                &OnePly::default(),
+                (),
+                gumbel_request(8, PolicyMode::Deterministic),
+            )
+            .unwrap();
+        search.reseed(29);
+        let second = search
+            .search(
+                &OnePly::default(),
+                (),
+                gumbel_request(8, PolicyMode::Deterministic),
+            )
+            .unwrap();
+
+        assert_eq!(first.selected_move, second.selected_move);
+        assert_eq!(first.policy, second.policy);
+        assert_eq!(first.root_value, second.root_value);
+        assert_eq!(first.diagnostics, second.diagnostics);
+    }
+}
+
+#[test]
 fn evaluation_failure_is_reported_without_fabricating_a_value() {
     let mut search = Mcts::new(Failing, puct(), NoExtraRules);
     let error = search

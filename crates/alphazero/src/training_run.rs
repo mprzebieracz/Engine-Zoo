@@ -12,7 +12,8 @@ use crate::selfplay::{
 };
 use crate::{
     AlphaZeroRepresentation, BatcherStats, ChessHistory, GameKind, Network, ReplayBuffer,
-    TrainMetrics, Trainer, TrainingSeed,
+    ReplaySampler, SelfPlayProgress, TrainMetrics, TrainProgress, Trainer, TrainingInvocation,
+    TrainingSeed,
 };
 use anyhow::{Context, Result};
 use engine_core::GameState;
@@ -54,6 +55,24 @@ pub struct IterationReport {
 pub enum NextInference {
     NativeReloaded,
     TensorRtRecompileRequired {
+        checkpoint: PathBuf,
+        compiled_artifact: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct IterationFacts {
+    games: usize,
+    trained_steps: usize,
+    replay_samples: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InferenceRefreshPlan {
+    ReloadNative {
+        checkpoint: PathBuf,
+    },
+    RequireTensorRtRecompile {
         checkpoint: PathBuf,
         compiled_artifact: PathBuf,
     },
@@ -108,7 +127,7 @@ where
     workers: F,
     make_workers: fn(&InferenceService, crate::SelfPlayConfig) -> Result<F>,
     trainer: Trainer,
-    representation: R,
+    sampler: ReplaySampler<R>,
     pending_tensor_rt_recompile: Option<NextInference>,
 }
 
@@ -172,24 +191,85 @@ impl TrainingRun {
     }
 
     pub fn step(&mut self) -> Result<IterationReport> {
+        self.step_with_progress(|_| {})
+    }
+
+    pub fn step_with_progress<F>(&mut self, progress: F) -> Result<IterationReport>
+    where
+        F: FnMut(&TrainProgress),
+    {
+        self.step_with_callbacks(|_| {}, progress)
+    }
+
+    pub fn step_with_callbacks<SelfPlayProgressCallback, TrainProgressCallback>(
+        &mut self,
+        mut self_play_progress: SelfPlayProgressCallback,
+        mut train_progress: TrainProgressCallback,
+    ) -> Result<IterationReport>
+    where
+        SelfPlayProgressCallback: FnMut(SelfPlayProgress),
+        TrainProgressCallback: FnMut(&TrainProgress),
+    {
+        self.step_with_callback_refs(&mut self_play_progress, &mut train_progress)
+    }
+
+    fn step_with_callback_refs<SelfPlayProgressCallback, TrainProgressCallback>(
+        &mut self,
+        self_play_progress: &mut SelfPlayProgressCallback,
+        train_progress: &mut TrainProgressCallback,
+    ) -> Result<IterationReport>
+    where
+        SelfPlayProgressCallback: FnMut(SelfPlayProgress),
+        TrainProgressCallback: FnMut(&TrainProgress),
+    {
         match &mut self.inner {
-            TrainingRunKind::Connect4(run) => run.step(),
-            TrainingRunKind::ChessClassic(run) => run.step(),
-            TrainingRunKind::ChessH1(run) => run.step(),
-            TrainingRunKind::ChessH4(run) => run.step(),
-            TrainingRunKind::ChessH8(run) => run.step(),
+            TrainingRunKind::Connect4(run) => {
+                run.step_with_callbacks(self_play_progress, train_progress)
+            }
+            TrainingRunKind::ChessClassic(run) => {
+                run.step_with_callbacks(self_play_progress, train_progress)
+            }
+            TrainingRunKind::ChessH1(run) => {
+                run.step_with_callbacks(self_play_progress, train_progress)
+            }
+            TrainingRunKind::ChessH4(run) => {
+                run.step_with_callbacks(self_play_progress, train_progress)
+            }
+            TrainingRunKind::ChessH8(run) => {
+                run.step_with_callbacks(self_play_progress, train_progress)
+            }
         }
     }
 
     pub fn run(&mut self, limit: RunLimit) -> Result<()> {
+        self.run_with_progress(limit, |_| {})
+    }
+
+    pub fn run_with_progress<F>(&mut self, limit: RunLimit, progress: F) -> Result<()>
+    where
+        F: FnMut(&TrainProgress),
+    {
+        self.run_with_callbacks(limit, |_| {}, progress)
+    }
+
+    pub fn run_with_callbacks<SelfPlayProgressCallback, TrainProgressCallback>(
+        &mut self,
+        limit: RunLimit,
+        mut self_play_progress: SelfPlayProgressCallback,
+        mut train_progress: TrainProgressCallback,
+    ) -> Result<()>
+    where
+        SelfPlayProgressCallback: FnMut(SelfPlayProgress),
+        TrainProgressCallback: FnMut(&TrainProgress),
+    {
         match limit {
             RunLimit::Iterations(iterations) => {
                 for _ in 0..iterations {
-                    self.step()?;
+                    self.step_with_callback_refs(&mut self_play_progress, &mut train_progress)?;
                 }
             }
             RunLimit::Forever => loop {
-                self.step()?;
+                self.step_with_callback_refs(&mut self_play_progress, &mut train_progress)?;
             },
         }
         Ok(())
@@ -241,15 +321,24 @@ where
     R: AlphaZeroRepresentation<S>,
     F: SelfPlayWorkerFactory<S>,
 {
-    fn step(&mut self) -> Result<IterationReport> {
+    fn step_with_callbacks<SelfPlayProgressCallback, TrainProgressCallback>(
+        &mut self,
+        self_play_progress: &mut SelfPlayProgressCallback,
+        train_progress: &mut TrainProgressCallback,
+    ) -> Result<IterationReport>
+    where
+        SelfPlayProgressCallback: FnMut(SelfPlayProgress),
+        TrainProgressCallback: FnMut(&TrainProgress),
+    {
         self.ensure_inference_is_current()?;
 
-        let self_play = self.generate_self_play()?;
-        let training = self.train_network(&self_play);
+        let self_play = self.generate_self_play(self_play_progress)?;
+        let training = self.train_network(&self_play, train_progress);
 
         let next_state = self.advance_state(&self_play, training.as_ref());
         let next_state = self.save_checkpoint(next_state)?;
-        let next_inference = self.update_inference_after_checkpoint()?;
+        let refresh_plan = self.plan_inference_refresh()?;
+        let next_inference = self.execute_inference_refresh(refresh_plan)?;
 
         self.state = next_state;
         let report = self.build_report(self_play, training, next_inference);
@@ -258,26 +347,40 @@ where
         Ok(report)
     }
 
-    fn generate_self_play(&self) -> Result<SelfPlayStats> {
+    fn generate_self_play<Progress>(&self, progress: &mut Progress) -> Result<SelfPlayStats>
+    where
+        Progress: FnMut(SelfPlayProgress),
+    {
         let epoch = SelfPlayEpoch {
             model_generation: self.state.model_generation,
             first_game_id: self.state.total_games_generated,
         };
 
-        self.self_play.run(&self.workers, &self.replay, epoch)
+        self.self_play
+            .run_with_progress(&self.workers, &self.replay, epoch, progress)
     }
 
-    fn train_network(&mut self, self_play: &SelfPlayStats) -> Option<TrainMetrics> {
-        self.trainer.train(
+    fn train_network<Progress>(
+        &mut self,
+        self_play: &SelfPlayStats,
+        progress: &mut Progress,
+    ) -> Option<TrainMetrics>
+    where
+        Progress: FnMut(&TrainProgress),
+    {
+        self.trainer.train_with_progress(
             &self.network,
             &self.replay,
-            &self.representation,
-            self.device,
-            TrainingSeed {
-                experiment_seed: self.experiment.seed,
-                global_step: self.state.global_step,
+            &mut self.sampler,
+            TrainingInvocation {
+                device: self.device,
+                seed: TrainingSeed {
+                    experiment_seed: self.experiment.seed,
+                    global_step: self.state.global_step,
+                },
+                fresh_replay_samples: self_play.moves,
             },
-            self_play.moves,
+            progress,
         )
     }
 
@@ -286,15 +389,14 @@ where
         self_play: &SelfPlayStats,
         training: Option<&TrainMetrics>,
     ) -> RunState {
-        let mut state = self.state.clone();
-        state.total_games_generated += self_play.games as u64;
-        state.iteration += 1;
-        state.model_generation += 1;
-        state.global_step += training.map_or(0, |metrics| metrics.train_steps as u64);
-        state.replay_sample_count = self.replay.len();
-        state.optimizer_moments_restored = false;
-
-        state
+        advance_run_state(
+            &self.state,
+            IterationFacts {
+                games: self_play.games,
+                trained_steps: training.map_or(0, |metrics| metrics.train_steps),
+                replay_samples: self.replay.len(),
+            },
+        )
     }
 
     fn save_checkpoint(&self, mut state: RunState) -> Result<RunState> {
@@ -324,22 +426,40 @@ where
         Ok(())
     }
 
-    fn update_inference_after_checkpoint(&mut self) -> Result<NextInference> {
-        if self.experiment.inference.engine == InferenceEngine::Native {
-            self.inference
-                .reload_weights(&self.run_dir.latest_path())
-                .map_err(anyhow::Error::msg)?;
+    fn plan_inference_refresh(&self) -> Result<InferenceRefreshPlan> {
+        let compiled_artifact = (self.experiment.inference.engine != InferenceEngine::Native)
+            .then(|| compiled_artifact_path(&self.run_dir, &self.experiment))
+            .transpose()?;
 
-            return Ok(NextInference::NativeReloaded);
+        Ok(plan_inference_refresh(
+            self.experiment.inference.engine,
+            self.run_dir.latest_path(),
+            compiled_artifact,
+        ))
+    }
+
+    fn execute_inference_refresh(&mut self, plan: InferenceRefreshPlan) -> Result<NextInference> {
+        match plan {
+            InferenceRefreshPlan::ReloadNative { checkpoint } => {
+                self.inference
+                    .reload_weights(&checkpoint)
+                    .map_err(anyhow::Error::msg)?;
+
+                Ok(NextInference::NativeReloaded)
+            }
+            InferenceRefreshPlan::RequireTensorRtRecompile {
+                checkpoint,
+                compiled_artifact,
+            } => {
+                let requirement = NextInference::TensorRtRecompileRequired {
+                    checkpoint,
+                    compiled_artifact,
+                };
+                self.pending_tensor_rt_recompile = Some(requirement.clone());
+
+                Ok(requirement)
+            }
         }
-
-        let requirement = NextInference::TensorRtRecompileRequired {
-            checkpoint: self.run_dir.latest_path(),
-            compiled_artifact: compiled_artifact_path(&self.run_dir, &self.experiment)?,
-        };
-        self.pending_tensor_rt_recompile = Some(requirement.clone());
-
-        Ok(requirement)
     }
 
     fn reload_tensor_rt_inference(&mut self) -> Result<()> {
@@ -400,6 +520,35 @@ where
             "inference": report.inference,
             "next_inference": &report.next_inference,
         }))
+    }
+}
+
+fn advance_run_state(state: &RunState, facts: IterationFacts) -> RunState {
+    let mut next = state.clone();
+    next.total_games_generated += facts.games as u64;
+    next.iteration += 1;
+    next.model_generation += 1;
+    next.global_step += facts.trained_steps as u64;
+    next.replay_sample_count = facts.replay_samples;
+    next.optimizer_moments_restored = false;
+
+    next
+}
+
+fn plan_inference_refresh(
+    engine: InferenceEngine,
+    checkpoint: PathBuf,
+    compiled_artifact: Option<PathBuf>,
+) -> InferenceRefreshPlan {
+    match engine {
+        InferenceEngine::Native => InferenceRefreshPlan::ReloadNative { checkpoint },
+        InferenceEngine::TensorRtTorchScript | InferenceEngine::TensorRtRaw => {
+            InferenceRefreshPlan::RequireTensorRtRecompile {
+                checkpoint,
+                compiled_artifact: compiled_artifact
+                    .expect("TensorRT refresh planning requires a compiled artifact path"),
+            }
+        }
     }
 }
 
@@ -672,7 +821,7 @@ where
             workers,
             make_workers,
             trainer,
-            representation,
+            sampler: ReplaySampler::new(representation),
             pending_tensor_rt_recompile: None,
         })
     }
@@ -681,6 +830,92 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::experiment::{CheckpointIdentity, ResumeKind, STATE_FORMAT_VERSION};
+
+    fn populated_state() -> RunState {
+        RunState {
+            format_version: STATE_FORMAT_VERSION,
+            iteration: 4,
+            model_generation: 7,
+            global_step: 11,
+            total_games_generated: 13,
+            checkpoint_identity: Some(CheckpointIdentity {
+                generation: 7,
+                relative_path: "checkpoints/latest.safetensors".into(),
+                sha256: "abc".into(),
+            }),
+            replay_sample_count: 17,
+            optimizer_moments_restored: true,
+            resume_kind: ResumeKind::Full,
+        }
+    }
+
+    #[test]
+    fn advancing_run_state_updates_iteration_facts_and_preserves_durable_fields() {
+        let state = populated_state();
+        let next = advance_run_state(
+            &state,
+            IterationFacts {
+                games: 3,
+                trained_steps: 5,
+                replay_samples: 19,
+            },
+        );
+
+        assert_eq!(next.iteration, 5);
+        assert_eq!(next.model_generation, 8);
+        assert_eq!(next.global_step, 16);
+        assert_eq!(next.total_games_generated, 16);
+        assert_eq!(next.replay_sample_count, 19);
+        assert!(!next.optimizer_moments_restored);
+        assert_eq!(next.format_version, state.format_version);
+        assert_eq!(next.checkpoint_identity, state.checkpoint_identity);
+        assert_eq!(next.resume_kind, state.resume_kind);
+    }
+
+    #[test]
+    fn advancing_run_state_without_training_keeps_global_step() {
+        let state = populated_state();
+        let next = advance_run_state(
+            &state,
+            IterationFacts {
+                games: 2,
+                trained_steps: 0,
+                replay_samples: 23,
+            },
+        );
+
+        assert_eq!(next.global_step, state.global_step);
+    }
+
+    #[test]
+    fn native_refresh_plan_reloads_the_checkpoint() {
+        assert_eq!(
+            plan_inference_refresh(
+                InferenceEngine::Native,
+                PathBuf::from("checkpoints/latest.safetensors"),
+                None,
+            ),
+            InferenceRefreshPlan::ReloadNative {
+                checkpoint: PathBuf::from("checkpoints/latest.safetensors"),
+            }
+        );
+    }
+
+    #[test]
+    fn tensor_rt_refresh_plan_keeps_exact_paths() {
+        assert_eq!(
+            plan_inference_refresh(
+                InferenceEngine::TensorRtRaw,
+                PathBuf::from("checkpoints/latest.safetensors"),
+                Some(PathBuf::from("artifacts/model.plan")),
+            ),
+            InferenceRefreshPlan::RequireTensorRtRecompile {
+                checkpoint: PathBuf::from("checkpoints/latest.safetensors"),
+                compiled_artifact: PathBuf::from("artifacts/model.plan"),
+            }
+        );
+    }
 
     #[test]
     fn tensor_rt_requirement_identifies_the_checkpoint_and_module() {

@@ -67,7 +67,7 @@ where
     ) -> (u32, G, usize)
     where
         G: 'a,
-        F: FnMut(&Self, u32) -> Option<u32>,
+        F: FnMut(&mut Self, u32) -> Option<u32>,
     {
         let mut current = game.clone();
         let mut depth = 0;

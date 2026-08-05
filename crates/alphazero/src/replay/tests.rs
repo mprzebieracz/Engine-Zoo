@@ -33,10 +33,9 @@ fn ring_retains_compact_states_in_order() {
 fn sampled_states_are_encoded_only_at_load_time() {
     let replay = ReplayBuffer::new(1, 7);
     replay.add([sample(1)]);
+    let mut sampler = ReplaySampler::new(Connect4AzRepresentation);
     let mut rng = SmallRng::seed_from_u64(1);
-    let batch = replay
-        .sample(1, &Connect4AzRepresentation, &mut rng)
-        .unwrap();
+    let batch = sampler.sample(&replay, 1, &mut rng).unwrap();
     assert_eq!(batch.states.size(), [1, 42]);
     assert_eq!(batch.outcomes.int64_value(&[0]), Outcome::Draw.wdl_index());
     assert_eq!(batch.policy_weight_sum, 1.0);
@@ -54,30 +53,26 @@ fn sampled_batch_keeps_cpu_weight_sums_for_loss_activation() {
     value_only.policy = SparsePolicy::new([]).unwrap();
 
     replay.add([policy_only, value_only]);
+    let mut sampler = ReplaySampler::new(Connect4AzRepresentation);
     let mut rng = SmallRng::seed_from_u64(1);
-    let batch = replay
-        .sample(2, &Connect4AzRepresentation, &mut rng)
-        .unwrap();
+    let batch = sampler.sample(&replay, 2, &mut rng).unwrap();
 
     assert_eq!(batch.policy_weight_sum, 1.0);
     assert_eq!(batch.value_weight_sum, 1.0);
 }
 
 #[test]
-fn seeded_sampling_reproduces_the_same_sparse_batch() {
+fn sampler_reuses_cleared_scratch_with_the_same_seed() {
     let replay = ReplayBuffer::new(7, 7);
     replay.add((0..7).map(|id| ReplaySample {
         policy: vec![(Action::new(id), 1.0)].into(),
         ..sample(id as u64)
     }));
-    let mut first_rng = SmallRng::seed_from_u64(42);
-    let mut second_rng = SmallRng::seed_from_u64(42);
-    let first = replay
-        .sample(4, &Connect4AzRepresentation, &mut first_rng)
-        .unwrap();
-    let second = replay
-        .sample(4, &Connect4AzRepresentation, &mut second_rng)
-        .unwrap();
+    let mut sampler = ReplaySampler::new(Connect4AzRepresentation);
+    let mut rng = SmallRng::seed_from_u64(42);
+    let first = sampler.sample(&replay, 4, &mut rng).unwrap();
+    let mut rng = SmallRng::seed_from_u64(42);
+    let second = sampler.sample(&replay, 4, &mut rng).unwrap();
     assert_eq!(
         Vec::<i64>::try_from(&first.policies.actions).unwrap(),
         Vec::<i64>::try_from(&second.policies.actions).unwrap()
@@ -86,6 +81,8 @@ fn seeded_sampling_reproduces_the_same_sparse_batch() {
         Vec::<i64>::try_from(&first.policies.rows).unwrap(),
         Vec::<i64>::try_from(&second.policies.rows).unwrap()
     );
+    assert_eq!(first.policies.offsets, second.policies.offsets);
+    assert_eq!(first.states.size(), second.states.size());
 }
 
 #[test]

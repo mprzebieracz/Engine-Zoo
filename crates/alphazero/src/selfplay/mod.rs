@@ -10,8 +10,8 @@ pub use config::{
     TemperaturePhase, TemperatureSchedule,
 };
 pub use coordinator::{
-    CompletedGame, GameRequest, SelfPlayCoordinator, SelfPlayEpoch, SelfPlayStats, SelfPlayWorker,
-    SelfPlayWorkerFactory,
+    CompletedGame, GameRequest, SelfPlayCoordinator, SelfPlayEpoch, SelfPlayProgress,
+    SelfPlayStats, SelfPlayWorker, SelfPlayWorkerFactory,
 };
 pub use domain::{
     ChessCanonicalSelfPlayDomain, ChessClassicSelfPlayDomain, SelfPlayDomain,

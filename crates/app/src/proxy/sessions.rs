@@ -148,7 +148,7 @@ pub(super) fn play_chess_engine_turn(
     }
 
     if session.chess_engine.is_none() {
-        let config = inference_for_model(
+        let config = state.models.prepared_config(
             &model,
             &state.repository,
             session.wait_for_count,
@@ -197,7 +197,7 @@ pub(super) fn play_engine_turn_for(
         model.model.game() == alphazero::GameKind::Connect4,
         "model is not Connect4"
     );
-    let config = inference_for_model(
+    let config = state.models.prepared_config(
         &model,
         &state.repository,
         session.wait_for_count,
