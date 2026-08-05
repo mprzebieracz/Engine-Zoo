@@ -150,9 +150,11 @@ pub(super) fn play_chess_engine_turn(
     if session.chess_engine.is_none() {
         let config = inference_for_model(
             &model,
+            &state.repository,
             session.wait_for_count,
             Duration::from_millis(1),
             state.device,
+            state.backend,
         )?;
         let loaded = state
             .models
@@ -197,9 +199,11 @@ pub(super) fn play_engine_turn_for(
     );
     let config = inference_for_model(
         &model,
+        &state.repository,
         session.wait_for_count,
         Duration::from_millis(1),
         state.device,
+        state.backend,
     )?;
     let loaded = state
         .models

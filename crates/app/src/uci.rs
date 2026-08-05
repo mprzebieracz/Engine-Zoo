@@ -316,7 +316,7 @@ fn open_preferred_model(
     )
 }
 
-fn prepare_tensorrt(
+pub(crate) fn prepare_tensorrt(
     repository: &RepositoryConfig,
     model: &ResolvedModel,
     backend: RuntimeBackend,
