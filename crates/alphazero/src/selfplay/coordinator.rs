@@ -72,6 +72,16 @@ pub struct SelfPlayStats {
     pub maximum_search_depth: usize,
 }
 
+/// Aggregate facts after an ordered self-play replay commit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SelfPlayProgress {
+    pub games: usize,
+    pub total_games: usize,
+    pub games_per_second: f64,
+    pub positions_per_second: f64,
+    pub average_moves_per_game: f64,
+}
+
 impl SelfPlayStats {
     pub fn avg_moves_per_game(&self) -> f64 {
         self.moves as f64 / self.games.max(1) as f64
@@ -123,6 +133,21 @@ impl SelfPlayCoordinator {
         replay: &ReplayBuffer<S>,
         epoch: SelfPlayEpoch,
     ) -> Result<SelfPlayStats> {
+        self.run_with_progress(factory, replay, epoch, |_| {})
+    }
+
+    pub fn run_with_progress<S, F, Progress>(
+        &self,
+        factory: &F,
+        replay: &ReplayBuffer<S>,
+        epoch: SelfPlayEpoch,
+        mut progress: Progress,
+    ) -> Result<SelfPlayStats>
+    where
+        S: Send + Sync,
+        F: SelfPlayWorkerFactory<S>,
+        Progress: FnMut(SelfPlayProgress),
+    {
         ensure!(
             u64::try_from(self.config.num_games)
                 .ok()
@@ -195,7 +220,9 @@ impl SelfPlayCoordinator {
                 while let Some(completed) = pending.remove(&next_commit) {
                     replay.add(completed.trajectory);
                     stats.add(completed.stats);
-                    print_progress(stats.games, &self.config, &stats, started);
+                    if let Some(snapshot) = self.progress(&stats, started) {
+                        progress(snapshot);
+                    }
                     next_commit += 1;
                 }
             }
@@ -205,23 +232,25 @@ impl SelfPlayCoordinator {
         }
         Ok(stats)
     }
+
+    fn progress(&self, stats: &SelfPlayStats, started: Instant) -> Option<SelfPlayProgress> {
+        let done = stats.games;
+        if self.config.progress_every == 0
+            || (done != self.config.num_games && done % self.config.progress_every != 0)
+        {
+            return None;
+        }
+        let elapsed = started.elapsed().as_secs_f64().max(1e-6);
+        Some(SelfPlayProgress {
+            games: done,
+            total_games: self.config.num_games,
+            games_per_second: done as f64 / elapsed,
+            positions_per_second: stats.moves as f64 / elapsed,
+            average_moves_per_game: stats.avg_moves_per_game(),
+        })
+    }
 }
 
 fn worker_seed(experiment_seed: u64, worker_id: usize) -> u64 {
     splitmix64(experiment_seed ^ worker_id as u64)
-}
-
-fn print_progress(done: usize, config: &SelfPlayConfig, stats: &SelfPlayStats, started: Instant) {
-    if config.progress_every == 0 || (done != config.num_games && done % config.progress_every != 0)
-    {
-        return;
-    }
-    let elapsed = started.elapsed().as_secs_f64().max(1e-6);
-    println!(
-        "self-play progress: {done}/{} games, {:.1} games/s, {:.1} positions/s, {:.1} moves/game",
-        config.num_games,
-        done as f64 / elapsed,
-        stats.moves as f64 / elapsed,
-        stats.avg_moves_per_game(),
-    );
 }

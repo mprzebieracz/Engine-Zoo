@@ -103,21 +103,14 @@ where
         };
 
         while !D::is_terminal(&game) && trajectory.len() < self.config.max_moves {
-            let (budget, policy_weight, full) = self.config.budget_schedule.choose(&mut budget_rng);
-            record_search_kind(&mut stats, full);
+            let turn = TurnPlan::choose(&self.config.budget_schedule, &mut budget_rng);
+            turn.record_search_kind(&mut stats);
 
-            let (state, result) = self.search_turn(&game, budget)?;
+            let (state, result) = self.search_turn(&game, turn.budget)?;
             stats.add_search_diagnostics(result.diagnostics);
 
             let action = self.select_action(&result, trajectory.len(), &mut move_rng);
-            let sample = SampleDetails {
-                policy_weight,
-                full,
-                budget,
-                request,
-                ply: trajectory.len(),
-            };
-            trajectory.push(self.replay_sample(&state, &result, sample));
+            trajectory.push(self.replay_sample(&state, &result, turn, request, trajectory.len()));
 
             if D::supports_resignation()
                 && resignation.should_resign(
@@ -176,7 +169,9 @@ where
         &self,
         state: &D::State,
         result: &SearchResult<DomainMove<D>>,
-        details: SampleDetails,
+        turn: TurnPlan,
+        request: GameRequest,
+        ply: usize,
     ) -> ReplaySample<D::State> {
         ReplaySample {
             state: state.clone(),
@@ -188,33 +183,59 @@ where
                 })
                 .collect(),
             outcome: Outcome::Draw,
-            weights: TrainingWeights {
-                policy: details.policy_weight,
-                value: 1.0,
-            },
-            metadata: SampleMetadata {
-                search_kind: if details.full {
-                    SearchKind::Full
-                }
-                else {
-                    SearchKind::Fast
-                },
-                simulations: details.budget.simulations() as u32,
-                model_generation: details.request.model_generation,
-                game_id: details.request.game_id,
-                ply: details.ply as u16,
-            },
+            weights: turn.weights(),
+            metadata: turn.metadata(request, ply),
         }
     }
 }
 
 #[derive(Clone, Copy)]
-struct SampleDetails {
+struct TurnPlan {
     policy_weight: f32,
     full: bool,
     budget: SearchBudget,
-    request: GameRequest,
-    ply: usize,
+}
+
+impl TurnPlan {
+    fn choose(schedule: &super::SearchBudgetSchedule, rng: &mut SmallRng) -> Self {
+        let (budget, policy_weight, full) = schedule.choose(rng);
+        Self {
+            policy_weight,
+            full,
+            budget,
+        }
+    }
+
+    fn record_search_kind(self, stats: &mut SelfPlayStats) {
+        if self.full {
+            stats.full_searches += 1;
+        }
+        else {
+            stats.fast_searches += 1;
+        }
+    }
+
+    fn weights(self) -> TrainingWeights {
+        TrainingWeights {
+            policy: self.policy_weight,
+            value: 1.0,
+        }
+    }
+
+    fn metadata(self, request: GameRequest, ply: usize) -> SampleMetadata {
+        SampleMetadata {
+            search_kind: if self.full {
+                SearchKind::Full
+            }
+            else {
+                SearchKind::Fast
+            },
+            simulations: self.budget.simulations() as u32,
+            model_generation: request.model_generation,
+            game_id: request.game_id,
+            ply: ply as u16,
+        }
+    }
 }
 
 struct ResignationState {
@@ -241,15 +262,6 @@ impl ResignationState {
 
         self.streak = if is_losing { self.streak + 1 } else { 0 };
         self.streak >= config.resignation.consecutive_moves
-    }
-}
-
-fn record_search_kind(stats: &mut SelfPlayStats, full: bool) {
-    if full {
-        stats.full_searches += 1;
-    }
-    else {
-        stats.fast_searches += 1;
     }
 }
 
@@ -293,5 +305,47 @@ fn last_mover_outcome(value: Option<engine_core::game::TerminalValue>, terminal:
         engine_core::game::TerminalValue::Win => Outcome::Loss,
         engine_core::game::TerminalValue::Draw => Outcome::Draw,
         engine_core::game::TerminalValue::Loss => Outcome::Win,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{SearchKind, TrainingWeights};
+
+    #[test]
+    fn turn_plan_keeps_fast_search_weight_and_metadata() {
+        let schedule = super::super::SearchBudgetSchedule::PlayoutCapRandomization {
+            full: SearchBudget::Puct { simulations: 32 },
+            fast: SearchBudget::Puct { simulations: 8 },
+            full_probability: 0.0,
+            fast_policy_weight: 0.25,
+        };
+        let request = GameRequest {
+            game_id: 4,
+            model_generation: 3,
+            worker_id: 0,
+            experiment_seed: 7,
+        };
+        let mut rng = SmallRng::seed_from_u64(9);
+        let turn = TurnPlan::choose(&schedule, &mut rng);
+
+        assert_eq!(
+            turn.weights(),
+            TrainingWeights {
+                policy: 0.25,
+                value: 1.0,
+            }
+        );
+        assert_eq!(
+            turn.metadata(request, 2),
+            SampleMetadata {
+                search_kind: SearchKind::Fast,
+                simulations: 8,
+                model_generation: 3,
+                game_id: 4,
+                ply: 2,
+            }
+        );
     }
 }
