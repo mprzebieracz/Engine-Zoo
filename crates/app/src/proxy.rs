@@ -1,6 +1,9 @@
 use alphazero::{analyze_game_mcts, analyze_game_net, Analysis, AnalyzeConfig, AnalyzeMode};
-use alphazero::{ExperimentConfig, InferencePrecision, RunDir};
-use anyhow::Result;
+use alphazero::{
+    artifact::CompiledBackendKind, ExperimentConfig, InferenceEngine, InferencePrecision,
+    InferenceSource, RunDir,
+};
+use anyhow::{Context, Result};
 use axum::extract::State;
 use axum::http::{header, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -9,7 +12,7 @@ use axum::{Json, Router};
 use clap::ValueEnum;
 use engine_core::game::GameState;
 use engine_model_runtime::{
-    BackendPreference, ModelSelector, ModelStore, RepositoryConfig, ResolvedModel,
+    BackendPreference, ModelSelector, ModelStore, RepositoryConfig, ResolvedModel, RuntimeBackend,
 };
 use games::chess::notation;
 use games::setup::{ChessSetup, Connect4Setup, GameSetup};
@@ -107,6 +110,7 @@ struct AppState {
     device: Device,
     repository: RepositoryConfig,
     default_model: String,
+    backend: BackendPreference,
     sessions: Arc<Mutex<Vec<LiveSession>>>,
     next_session: Arc<AtomicU64>,
     models: Arc<ModelRegistry>,
@@ -166,12 +170,23 @@ impl ModelRegistry {
             return Ok(Arc::clone(loaded));
         }
 
-        let inference = alphazero::InferenceService::load(
-            model,
-            alphazero::InferenceSource::Checkpoint(checkpoint),
-            device,
-            config,
-        )?;
+        let source = match config.engine {
+            InferenceEngine::Native => InferenceSource::Checkpoint(checkpoint),
+            InferenceEngine::TensorRtTorchScript => InferenceSource::TensorRtTorchScript(
+                config
+                    .compiled_artifact
+                    .as_deref()
+                    .context("TensorRT server config has no compiled artifact")?,
+            ),
+            InferenceEngine::TensorRtRaw => InferenceSource::TensorRtEngine(
+                config
+                    .compiled_artifact
+                    .as_deref()
+                    .context("TensorRT server config has no compiled artifact")?,
+            ),
+        };
+        let inference =
+            alphazero::InferenceService::load(model, source, device, config)?;
         let loaded = Arc::new(LoadedModel {
             model: model.clone(),
             inference,
@@ -183,16 +198,15 @@ impl ModelRegistry {
 }
 
 fn server_inference_config(
+    model: &ResolvedModel,
+    repository: &RepositoryConfig,
     config: &alphazero::InferenceConfig,
     wait_for_count: usize,
     timeout: Duration,
     device: Device,
-) -> alphazero::InferenceConfig {
+    backend: BackendPreference,
+) -> Result<alphazero::InferenceConfig> {
     let mut config = config.clone();
-    // Server model aliases resolve to checkpoint files. Preserve the previous
-    // HTTP behavior by using reloadable native inference for those aliases.
-    config.engine = alphazero::InferenceEngine::Native;
-    config.compiled_artifact = None;
     config.preferred_batch_size = wait_for_count.max(1);
     config.max_wait = alphazero::DurationConfig {
         milliseconds: timeout.as_millis().try_into().unwrap_or(u64::MAX),
@@ -204,7 +218,35 @@ fn server_inference_config(
         InferencePrecision::Fp32
     };
 
-    config
+    for backend in backend.candidates() {
+        match backend {
+            RuntimeBackend::Native => {
+                config.engine = InferenceEngine::Native;
+                config.compiled_artifact = None;
+                return Ok(config);
+            }
+            RuntimeBackend::RawTensorrt | RuntimeBackend::TorchTensorrt => {
+                let Some((kind, artifact)) =
+                    crate::uci::prepare_tensorrt(repository, model, *backend, device)?
+                else {
+                    continue;
+                };
+                config.engine = match kind {
+                    CompiledBackendKind::TensorRtRaw => InferenceEngine::TensorRtRaw,
+                    CompiledBackendKind::TensorRtTorchScript => {
+                        InferenceEngine::TensorRtTorchScript
+                    }
+                };
+                config.compiled_artifact = Some(artifact);
+                return Ok(config);
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "no usable inference backend for server model {}",
+        model.checkpoint.display()
+    )
 }
 
 fn resolve_server_model(state: &AppState, input: &str) -> Result<ResolvedModel> {
@@ -247,9 +289,11 @@ fn selected_server_model<'a>(default_model: &'a str, input: &'a str) -> &'a str 
 
 fn inference_for_model(
     model: &ResolvedModel,
+    repository: &RepositoryConfig,
     wait_for_count: usize,
     timeout: Duration,
     device: Device,
+    backend: BackendPreference,
 ) -> Result<alphazero::InferenceConfig> {
     let config = model
         .experiment
@@ -259,12 +303,15 @@ fn inference_for_model(
         .map_or_else(alphazero::InferenceConfig::default, |config| {
             config.inference
         });
-    Ok(server_inference_config(
+    server_inference_config(
+        model,
+        repository,
         &config,
         wait_for_count,
         timeout,
         device,
-    ))
+        backend,
+    )
 }
 
 enum LiveSession {
@@ -286,14 +333,6 @@ struct SessionState<G: GameState> {
 }
 
 pub async fn serve(cfg: ServeConfig) -> Result<()> {
-    anyhow::ensure!(
-        matches!(
-            cfg.backend,
-            BackendPreference::Auto | BackendPreference::Native
-        ),
-        "serve currently supports native inference only; requested {:?}",
-        cfg.backend
-    );
     let repository = RepositoryConfig::discover(std::env::current_dir()?)?;
     let evaluations = EvaluationService::new(cfg.run_dir.clone())?;
     let state = AppState {
@@ -302,6 +341,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         device: Device::cuda_if_available(),
         repository,
         default_model: cfg.model,
+        backend: cfg.backend,
         sessions: Arc::new(Mutex::new(Vec::new())),
         next_session: Arc::new(AtomicU64::new(1)),
         models: Arc::new(ModelRegistry::new()),

@@ -64,7 +64,7 @@ struct ServeArgs {
     /// Model name from the permanent CUDA/Torch model store, or a checkpoint/run alias.
     #[arg(long, default_value = "latest")]
     model: String,
-    /// Application inference backend. TensorRT preparation is not yet available for serve.
+    /// Application inference backend. Auto prefers TensorRT and falls back to native.
     #[arg(long, default_value = "auto", value_parser = parse_backend)]
     backend: BackendPreference,
 }
