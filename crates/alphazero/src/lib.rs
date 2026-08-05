@@ -58,6 +58,6 @@ pub use selfplay::{
 };
 pub use trainer::{
     build_optimizer, train, wdl_cross_entropy, LearningRateSchedule, OptimizerSpec, TrainConfig,
-    TrainMetrics, TrainProgress, Trainer, TrainingSeed,
+    TrainMetrics, TrainProgress, Trainer, TrainingInvocation, TrainingSeed,
 };
 pub use training_run::{IterationReport, NextInference, RunLimit, TrainingRun};

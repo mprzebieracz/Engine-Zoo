@@ -5,7 +5,7 @@ use engine_core::GameState;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use serde::Serialize;
-use std::sync::mpsc::sync_channel;
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::time::{Duration, Instant};
 use tch::nn::{Optimizer, OptimizerConfig};
 use tch::{nn, Device, Kind, Tensor};
@@ -208,6 +208,14 @@ pub struct TrainingSeed {
     pub global_step: u64,
 }
 
+/// Inputs that vary for one invocation of an otherwise configured trainer.
+#[derive(Clone, Copy, Debug)]
+pub struct TrainingInvocation {
+    pub device: Device,
+    pub seed: TrainingSeed,
+    pub fresh_replay_samples: usize,
+}
+
 /// Per-call training settings derived from the immutable experiment configuration.
 #[derive(Clone, Copy, Debug)]
 struct TrainingPlan {
@@ -237,6 +245,128 @@ impl TrainingPlan {
     }
 }
 
+#[derive(Clone, Copy)]
+struct TrainingExecution<'a> {
+    config: &'a TrainConfig,
+    plan: TrainingPlan,
+}
+
+struct PrefetchedReplayBatch {
+    batch: Option<super::replay::ReplayBatch>,
+    sampled_for: Duration,
+}
+
+fn prefetch_replay_batches<S, R>(
+    sender: SyncSender<PrefetchedReplayBatch>,
+    replay: &ReplayBuffer<S>,
+    sampler: &mut ReplaySampler<R>,
+    plan: TrainingPlan,
+) where
+    S: GameState + Send + Sync,
+    R: AlphaZeroRepresentation<S>,
+{
+    for offset in 0..plan.train_steps {
+        let sampling_started = Instant::now();
+        let mut rng = SmallRng::seed_from_u64(replay_seed(
+            plan.experiment_seed,
+            plan.first_global_step + offset as u64,
+        ));
+        let batch = sampler.sample(replay, plan.batch_size, &mut rng);
+        let sampled_for = sampling_started.elapsed();
+        let replay_was_empty = batch.is_none();
+        if sender
+            .send(PrefetchedReplayBatch { batch, sampled_for })
+            .is_err()
+        {
+            break;
+        }
+        if replay_was_empty {
+            break;
+        }
+    }
+}
+
+struct TrainingMetricsAccumulator {
+    started: Instant,
+    sampling_time: Duration,
+    transfer_time: Duration,
+    forward_backward_time: Duration,
+    optimizer_time: Duration,
+    policy_total: f64,
+    value_total: f64,
+    completed: usize,
+    progress: Vec<TrainProgress>,
+}
+
+impl TrainingMetricsAccumulator {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            sampling_time: Duration::ZERO,
+            transfer_time: Duration::ZERO,
+            forward_backward_time: Duration::ZERO,
+            optimizer_time: Duration::ZERO,
+            policy_total: 0.0,
+            value_total: 0.0,
+            completed: 0,
+            progress: Vec::new(),
+        }
+    }
+
+    fn record_step(&mut self, sampled_for: Duration, transfer_for: Duration, metrics: StepMetrics) {
+        self.sampling_time += sampled_for;
+        self.transfer_time += transfer_for;
+        self.forward_backward_time += metrics.forward_backward;
+        self.optimizer_time += metrics.optimizer;
+        self.policy_total += metrics.policy_loss;
+        self.value_total += metrics.value_loss;
+        self.completed += 1;
+    }
+
+    fn progress(
+        &mut self,
+        cfg: &TrainConfig,
+        plan: TrainingPlan,
+        learning_rate: f64,
+    ) -> Option<&TrainProgress> {
+        if cfg.progress_every == 0
+            || (self.completed % cfg.progress_every != 0 && self.completed != plan.train_steps)
+        {
+            return None;
+        }
+        let elapsed = self.started.elapsed().as_secs_f64().max(f64::EPSILON);
+        self.progress.push(TrainProgress {
+            step: self.completed,
+            total_steps: plan.train_steps,
+            policy_loss: self.policy_total / self.completed as f64,
+            value_loss: self.value_total / self.completed as f64,
+            samples_per_second: self.completed as f64 * plan.batch_size as f64 / elapsed,
+            learning_rate,
+        });
+        self.progress.last()
+    }
+
+    fn finish(self, cfg: &TrainConfig, plan: TrainingPlan) -> Option<TrainMetrics> {
+        (self.completed > 0).then_some(TrainMetrics {
+            policy_loss: self.policy_total / self.completed as f64,
+            value_loss: self.value_total / self.completed as f64,
+            train_steps: self.completed,
+            configured_train_steps: plan.train_steps,
+            fresh_replay_samples: 0,
+            replay_reuse: 0.0,
+            replay_sampling_seconds: self.sampling_time.as_secs_f64(),
+            host_to_device_seconds: self.transfer_time.as_secs_f64(),
+            forward_backward_seconds: self.forward_backward_time.as_secs_f64(),
+            optimizer_seconds: self.optimizer_time.as_secs_f64(),
+            samples_per_second: self.completed as f64 * plan.batch_size as f64
+                / self.started.elapsed().as_secs_f64().max(f64::EPSILON),
+            learning_rate: cfg
+                .learning_rate_at(plan.first_global_step + self.completed.saturating_sub(1) as u64),
+            progress: self.progress,
+        })
+    }
+}
+
 /// Owns the optimizer together with the immutable training configuration.
 pub struct Trainer {
     config: TrainConfig,
@@ -263,14 +393,40 @@ impl Trainer {
         S: GameState + Clone + Send + Sync,
         R: AlphaZeroRepresentation<S>,
     {
+        self.train_with_progress(
+            network,
+            replay,
+            sampler,
+            TrainingInvocation {
+                device,
+                seed,
+                fresh_replay_samples,
+            },
+            |_| {},
+        )
+    }
+
+    pub fn train_with_progress<S, R, F>(
+        &mut self,
+        network: &Network,
+        replay: &ReplayBuffer<S>,
+        sampler: &mut ReplaySampler<R>,
+        invocation: TrainingInvocation,
+        mut progress: F,
+    ) -> Option<TrainMetrics>
+    where
+        S: GameState + Clone + Send + Sync,
+        R: AlphaZeroRepresentation<S>,
+        F: FnMut(&TrainProgress),
+    {
         let effective_train_steps = self
             .config
-            .train_steps_for_fresh_replay_samples(fresh_replay_samples);
+            .train_steps_for_fresh_replay_samples(invocation.fresh_replay_samples);
         let plan = TrainingPlan::from_config(
             &self.config,
             effective_train_steps,
-            seed.experiment_seed,
-            seed.global_step,
+            invocation.seed.experiment_seed,
+            invocation.seed.global_step,
         );
 
         let mut metrics = train_with_optimizer(
@@ -278,14 +434,17 @@ impl Trainer {
             &mut self.optimizer,
             replay,
             sampler,
-            device,
-            &self.config,
-            plan,
+            invocation.device,
+            TrainingExecution {
+                config: &self.config,
+                plan,
+            },
+            &mut progress,
         )?;
         metrics.configured_train_steps = self.config.train_steps;
-        metrics.fresh_replay_samples = fresh_replay_samples;
+        metrics.fresh_replay_samples = invocation.fresh_replay_samples;
         metrics.replay_reuse = metrics.train_steps as f64 * plan.batch_size as f64
-            / fresh_replay_samples.max(1) as f64;
+            / invocation.fresh_replay_samples.max(1) as f64;
 
         Some(metrics)
     }
@@ -315,7 +474,7 @@ pub fn build_optimizer(vs: &nn::VarStore, cfg: &TrainConfig) -> anyhow::Result<O
 }
 
 /// Trains either scalar or WDL models from one compact replay format.
-#[allow(clippy::too_many_arguments)] // Typed model, optimizer, replay, and reproducibility inputs meet at this boundary.
+#[allow(clippy::too_many_arguments)] // Compatibility API; Trainer::train is the compact stateful path.
 pub fn train<S, R>(
     network: &Network,
     optimizer: &mut Optimizer,
@@ -330,124 +489,83 @@ where
     S: GameState + Clone + Send + Sync,
     R: AlphaZeroRepresentation<S>,
 {
-    let plan = TrainingPlan::from_config(cfg, cfg.train_steps, experiment_seed, global_step);
+    let execution = TrainingExecution {
+        config: cfg,
+        plan: TrainingPlan::from_config(cfg, cfg.train_steps, experiment_seed, global_step),
+    };
     let mut sampler = ReplaySampler::new((*representation).clone());
-    train_with_optimizer(network, optimizer, replay, &mut sampler, device, cfg, plan)
+    let mut no_progress = |_: &TrainProgress| {};
+    train_with_optimizer(
+        network,
+        optimizer,
+        replay,
+        &mut sampler,
+        device,
+        execution,
+        &mut no_progress,
+    )
 }
 
-fn train_with_optimizer<S, R>(
+fn train_with_optimizer<S, R, F>(
     network: &Network,
     optimizer: &mut Optimizer,
     replay: &ReplayBuffer<S>,
     sampler: &mut ReplaySampler<R>,
     device: Device,
-    cfg: &TrainConfig,
-    plan: TrainingPlan,
+    execution: TrainingExecution<'_>,
+    progress: &mut F,
 ) -> Option<TrainMetrics>
 where
     S: GameState + Clone + Send + Sync,
     R: AlphaZeroRepresentation<S>,
+    F: FnMut(&TrainProgress),
 {
-    cfg.validate()
+    execution
+        .config
+        .validate()
         .expect("Trainer only accepts validated training configuration");
 
-    if plan.train_steps == 0 {
+    if execution.plan.train_steps == 0 {
         return None;
     }
 
-    let started = Instant::now();
-    let (sender, receiver) = sync_channel(plan.prefetch_depth.max(1));
-    let mut sampling_time = Duration::ZERO;
-    let mut transfer_time = Duration::ZERO;
-    let mut forward_backward_time = Duration::ZERO;
-    let mut optimizer_time = Duration::ZERO;
-    let mut policy_total = 0.0;
-    let mut value_total = 0.0;
-    let mut completed = 0;
-    let mut progress = Vec::new();
+    let mut metrics = TrainingMetricsAccumulator::new();
+    let (sender, receiver) = sync_channel(execution.plan.prefetch_depth.max(1));
 
     std::thread::scope(|scope| {
         scope.spawn(move || {
-            for offset in 0..plan.train_steps {
-                let sampling_started = Instant::now();
-                let mut rng = SmallRng::seed_from_u64(replay_seed(
-                    plan.experiment_seed,
-                    plan.first_global_step + offset as u64,
-                ));
-                let batch = sampler.sample(replay, plan.batch_size, &mut rng);
-                let elapsed = sampling_started.elapsed();
-                let replay_was_empty = batch.is_none();
-                if sender.send((batch, elapsed)).is_err() {
-                    break;
-                }
-                if replay_was_empty {
-                    break;
-                }
-            }
+            prefetch_replay_batches(sender, replay, sampler, execution.plan);
         });
 
-        while let Ok((Some(batch), sampled_for)) = receiver.recv() {
-            sampling_time += sampled_for;
+        while let Ok(PrefetchedReplayBatch {
+            batch: Some(batch),
+            sampled_for,
+        }) = receiver.recv()
+        {
             let transfer_started = Instant::now();
             let batch = DeviceReplayBatch::from_cpu(batch, device);
-            transfer_time += transfer_started.elapsed();
-            let learning_rate = cfg.learning_rate_at(plan.first_global_step + completed as u64);
+            let transfer_for = transfer_started.elapsed();
+            let learning_rate = execution
+                .config
+                .learning_rate_at(execution.plan.first_global_step + metrics.completed as u64);
             optimizer.set_lr(learning_rate);
-            let metrics = train_device_batch(
+            let step_metrics = train_device_batch(
                 network,
                 optimizer,
                 &batch,
-                plan.micro_batch_size,
-                cfg.value_loss_weight,
+                execution.plan.micro_batch_size,
+                execution.config.value_loss_weight,
                 representation_shape::<S, R>(),
             );
-            forward_backward_time += metrics.forward_backward;
-            optimizer_time += metrics.optimizer;
-            policy_total += metrics.policy_loss;
-            value_total += metrics.value_loss;
-            completed += 1;
-
-            if cfg.progress_every > 0
-                && (completed % cfg.progress_every == 0 || completed == plan.train_steps)
+            metrics.record_step(sampled_for, transfer_for, step_metrics);
+            if let Some(snapshot) =
+                metrics.progress(execution.config, execution.plan, learning_rate)
             {
-                let elapsed = started.elapsed().as_secs_f64().max(f64::EPSILON);
-                let snapshot = TrainProgress {
-                    step: completed,
-                    total_steps: plan.train_steps,
-                    policy_loss: policy_total / completed as f64,
-                    value_loss: value_total / completed as f64,
-                    samples_per_second: completed as f64 * plan.batch_size as f64 / elapsed,
-                    learning_rate,
-                };
-                eprintln!(
-                    "training progress: step {}/{} | policy {:.5} | value {:.5} | {:.1} samples/s",
-                    snapshot.step,
-                    snapshot.total_steps,
-                    snapshot.policy_loss,
-                    snapshot.value_loss,
-                    snapshot.samples_per_second,
-                );
-                progress.push(snapshot);
+                progress(snapshot);
             }
         }
     });
-    (completed > 0).then_some(TrainMetrics {
-        policy_loss: policy_total / completed as f64,
-        value_loss: value_total / completed as f64,
-        train_steps: completed,
-        configured_train_steps: plan.train_steps,
-        fresh_replay_samples: 0,
-        replay_reuse: 0.0,
-        replay_sampling_seconds: sampling_time.as_secs_f64(),
-        host_to_device_seconds: transfer_time.as_secs_f64(),
-        forward_backward_seconds: forward_backward_time.as_secs_f64(),
-        optimizer_seconds: optimizer_time.as_secs_f64(),
-        samples_per_second: completed as f64 * plan.batch_size as f64
-            / started.elapsed().as_secs_f64().max(f64::EPSILON),
-        learning_rate: cfg
-            .learning_rate_at(plan.first_global_step + completed.saturating_sub(1) as u64),
-        progress,
-    })
+    metrics.finish(execution.config, execution.plan)
 }
 
 fn validate_optimizer(optimizer: &OptimizerSpec) -> anyhow::Result<()> {

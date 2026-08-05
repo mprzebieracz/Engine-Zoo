@@ -12,7 +12,7 @@ use crate::selfplay::{
 };
 use crate::{
     AlphaZeroRepresentation, BatcherStats, ChessHistory, GameKind, Network, ReplayBuffer,
-    ReplaySampler, TrainMetrics, Trainer, TrainingSeed,
+    ReplaySampler, TrainMetrics, TrainProgress, Trainer, TrainingInvocation, TrainingSeed,
 };
 use anyhow::{Context, Result};
 use engine_core::GameState;
@@ -172,24 +172,45 @@ impl TrainingRun {
     }
 
     pub fn step(&mut self) -> Result<IterationReport> {
+        self.step_with_progress(|_| {})
+    }
+
+    pub fn step_with_progress<F>(&mut self, mut progress: F) -> Result<IterationReport>
+    where
+        F: FnMut(&TrainProgress),
+    {
+        self.step_with_observer(&mut progress)
+    }
+
+    fn step_with_observer<F>(&mut self, progress: &mut F) -> Result<IterationReport>
+    where
+        F: FnMut(&TrainProgress),
+    {
         match &mut self.inner {
-            TrainingRunKind::Connect4(run) => run.step(),
-            TrainingRunKind::ChessClassic(run) => run.step(),
-            TrainingRunKind::ChessH1(run) => run.step(),
-            TrainingRunKind::ChessH4(run) => run.step(),
-            TrainingRunKind::ChessH8(run) => run.step(),
+            TrainingRunKind::Connect4(run) => run.step_with_progress(progress),
+            TrainingRunKind::ChessClassic(run) => run.step_with_progress(progress),
+            TrainingRunKind::ChessH1(run) => run.step_with_progress(progress),
+            TrainingRunKind::ChessH4(run) => run.step_with_progress(progress),
+            TrainingRunKind::ChessH8(run) => run.step_with_progress(progress),
         }
     }
 
     pub fn run(&mut self, limit: RunLimit) -> Result<()> {
+        self.run_with_progress(limit, |_| {})
+    }
+
+    pub fn run_with_progress<F>(&mut self, limit: RunLimit, mut progress: F) -> Result<()>
+    where
+        F: FnMut(&TrainProgress),
+    {
         match limit {
             RunLimit::Iterations(iterations) => {
                 for _ in 0..iterations {
-                    self.step()?;
+                    self.step_with_observer(&mut progress)?;
                 }
             }
             RunLimit::Forever => loop {
-                self.step()?;
+                self.step_with_observer(&mut progress)?;
             },
         }
         Ok(())
@@ -241,11 +262,14 @@ where
     R: AlphaZeroRepresentation<S>,
     F: SelfPlayWorkerFactory<S>,
 {
-    fn step(&mut self) -> Result<IterationReport> {
+    fn step_with_progress<Progress>(&mut self, progress: &mut Progress) -> Result<IterationReport>
+    where
+        Progress: FnMut(&TrainProgress),
+    {
         self.ensure_inference_is_current()?;
 
         let self_play = self.generate_self_play()?;
-        let training = self.train_network(&self_play);
+        let training = self.train_network(&self_play, progress);
 
         let next_state = self.advance_state(&self_play, training.as_ref());
         let next_state = self.save_checkpoint(next_state)?;
@@ -267,17 +291,27 @@ where
         self.self_play.run(&self.workers, &self.replay, epoch)
     }
 
-    fn train_network(&mut self, self_play: &SelfPlayStats) -> Option<TrainMetrics> {
-        self.trainer.train(
+    fn train_network<Progress>(
+        &mut self,
+        self_play: &SelfPlayStats,
+        progress: &mut Progress,
+    ) -> Option<TrainMetrics>
+    where
+        Progress: FnMut(&TrainProgress),
+    {
+        self.trainer.train_with_progress(
             &self.network,
             &self.replay,
             &mut self.sampler,
-            self.device,
-            TrainingSeed {
-                experiment_seed: self.experiment.seed,
-                global_step: self.state.global_step,
+            TrainingInvocation {
+                device: self.device,
+                seed: TrainingSeed {
+                    experiment_seed: self.experiment.seed,
+                    global_step: self.state.global_step,
+                },
+                fresh_replay_samples: self_play.moves,
             },
-            self_play.moves,
+            progress,
         )
     }
 
