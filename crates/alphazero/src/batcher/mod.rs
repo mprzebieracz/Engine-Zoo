@@ -11,7 +11,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tch::Device;
@@ -673,11 +673,7 @@ fn next_work(
     combined: &mut CombinedEncodedBatch,
 ) -> Work {
     loop {
-        let mut pending = shared.pending.lock().unwrap();
-        pending = shared
-            .cv
-            .wait_while(pending, |p| !p.stop && p.commands.is_empty())
-            .unwrap();
+        let mut pending = wait_for_commands(shared);
         if pending.stop || pending.terminal_error.is_some() {
             return Work::Stop;
         }
@@ -688,83 +684,130 @@ fn next_work(
             };
             return Work::Reload(reload);
         }
-        let reload_waiting = pending
-            .commands
-            .iter()
-            .any(|command| matches!(command, Command::Reload(_)));
-        if pending.count < shared.config.preferred_batch_size && !reload_waiting {
-            let wait_started = Instant::now();
-            let (guard, _) = shared
-                .cv
-                .wait_timeout_while(pending, shared.config.max_wait, |p| {
-                    !p.stop
-                        && p.count < shared.config.preferred_batch_size
-                        && !p
-                            .commands
-                            .iter()
-                            .any(|command| matches!(command, Command::Reload(_)))
-                })
-                .unwrap();
-            pending = guard;
-            pending.stats.coalescing_wait_total += wait_started.elapsed();
-            if pending.stop {
-                return Work::Stop;
-            }
-            if pending.count == 0 {
-                continue;
-            }
+
+        pending = wait_for_batch(shared, pending);
+        if pending.stop {
+            return Work::Stop;
         }
+        if pending.count == 0 {
+            continue;
+        }
+
         items.clear();
         combined.states.clear();
         combined.legal_actions.clear();
         combined.offsets.clear();
         combined.offsets.push(0);
-        while combined.len() < shared.config.max_batch_size {
-            let Some(command) = pending.commands.pop_front()
-            else {
-                break;
-            };
-            let Command::Evaluate(task) = command
-            else {
-                pending.commands.push_front(command);
-                break;
-            };
-            let available = shared.config.max_batch_size - combined.len();
-            let end = (task.next_row + available).min(task.batch().len());
-            let rows = task.next_row..end;
-            if combined.append_rows(task.batch(), rows.clone()).is_err() {
-                let error = BatcherError::Backend("invalid encoded evaluation batch".into());
-                complete_task(task, Err(error.clone()));
-                fail_pending(&mut pending, error);
-                drop(pending);
-                shared.cv.notify_all();
-                return Work::Stop;
-            }
-            pending.count -= rows.len();
-            let queue_wait = task.submitted_at.elapsed();
-            pending.stats.queue_wait_total += queue_wait;
-            pending.stats.queue_wait_max = pending.stats.queue_wait_max.max(queue_wait);
-            items.push(WorkItem { task, rows });
+
+        if !assemble_evaluation(shared.config, &mut pending, items, combined) {
+            drop(pending);
+            shared.cv.notify_all();
+            return Work::Stop;
         }
-        pending.stats.inference_batches += 1;
-        pending.stats.coalesced_extra_requests += items.len().saturating_sub(1) as u64;
-        if items
-            .iter()
-            .any(|item| item.rows.end < item.task.batch().len())
-        {
-            pending.stats.split_batches += 1;
-        }
-        if combined.len() < shared.config.preferred_batch_size {
-            pending.stats.partial_batches += 1;
-        }
-        pending.stats.lifetime_max_inference_batch = pending
-            .stats
-            .lifetime_max_inference_batch
-            .max(combined.len() as u64);
+
+        record_assembly_stats(shared.config, &mut pending, items, combined);
         drop(pending);
         shared.cv.notify_all();
         return Work::Evaluate;
     }
+}
+
+fn wait_for_commands(shared: &Shared) -> MutexGuard<'_, Pending> {
+    let pending = shared.pending.lock().unwrap();
+    shared
+        .cv
+        .wait_while(pending, |pending| {
+            !pending.stop && pending.commands.is_empty()
+        })
+        .unwrap()
+}
+
+fn wait_for_batch<'a>(
+    shared: &'a Shared,
+    pending: MutexGuard<'a, Pending>,
+) -> MutexGuard<'a, Pending> {
+    let reload_waiting = pending
+        .commands
+        .iter()
+        .any(|command| matches!(command, Command::Reload(_)));
+    if pending.count >= shared.config.preferred_batch_size || reload_waiting {
+        return pending;
+    }
+
+    let wait_started = Instant::now();
+    let (mut pending, _) = shared
+        .cv
+        .wait_timeout_while(pending, shared.config.max_wait, |pending| {
+            !pending.stop
+                && pending.count < shared.config.preferred_batch_size
+                && !pending
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, Command::Reload(_)))
+        })
+        .unwrap();
+    pending.stats.coalescing_wait_total += wait_started.elapsed();
+
+    pending
+}
+
+fn assemble_evaluation(
+    config: BatcherConfig,
+    pending: &mut Pending,
+    items: &mut Vec<WorkItem>,
+    combined: &mut CombinedEncodedBatch,
+) -> bool {
+    while combined.len() < config.max_batch_size {
+        let Some(command) = pending.commands.pop_front()
+        else {
+            break;
+        };
+        let Command::Evaluate(task) = command
+        else {
+            pending.commands.push_front(command);
+            break;
+        };
+        let available = config.max_batch_size - combined.len();
+        let end = (task.next_row + available).min(task.batch().len());
+        let rows = task.next_row..end;
+        if combined.append_rows(task.batch(), rows.clone()).is_err() {
+            let error = BatcherError::Backend("invalid encoded evaluation batch".into());
+            complete_task(task, Err(error.clone()));
+            fail_pending(pending, error);
+
+            return false;
+        }
+        pending.count -= rows.len();
+        let queue_wait = task.submitted_at.elapsed();
+        pending.stats.queue_wait_total += queue_wait;
+        pending.stats.queue_wait_max = pending.stats.queue_wait_max.max(queue_wait);
+        items.push(WorkItem { task, rows });
+    }
+
+    true
+}
+
+fn record_assembly_stats(
+    config: BatcherConfig,
+    pending: &mut Pending,
+    items: &[WorkItem],
+    combined: &CombinedEncodedBatch,
+) {
+    pending.stats.inference_batches += 1;
+    pending.stats.coalesced_extra_requests += items.len().saturating_sub(1) as u64;
+    if items
+        .iter()
+        .any(|item| item.rows.end < item.task.batch().len())
+    {
+        pending.stats.split_batches += 1;
+    }
+    if combined.len() < config.preferred_batch_size {
+        pending.stats.partial_batches += 1;
+    }
+    pending.stats.lifetime_max_inference_batch = pending
+        .stats
+        .lifetime_max_inference_batch
+        .max(combined.len() as u64);
 }
 
 fn finish_pass(shared: &Shared, items: &mut Vec<WorkItem>, evaluations: Vec<Evaluation>) {
