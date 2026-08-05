@@ -1,5 +1,7 @@
 use alphazero::representation::Connect4AzRepresentation;
-use alphazero::{Action, Outcome, ReplayBuffer, ReplaySample, SampleMetadata, TrainingWeights};
+use alphazero::{
+    Action, Outcome, ReplayBuffer, ReplaySample, ReplaySampler, SampleMetadata, TrainingWeights,
+};
 use games::Connect4;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -22,10 +24,11 @@ fn main() {
 
     for batch_size in [256, 1_024, 4_096] {
         let representation = Connect4AzRepresentation;
+        let mut sampler = ReplaySampler::new(representation);
         let mut rng = SmallRng::seed_from_u64(1);
         let started = Instant::now();
         for _ in 0..SAMPLES {
-            std::hint::black_box(replay.sample(batch_size, &representation, &mut rng));
+            std::hint::black_box(sampler.sample(&replay, batch_size, &mut rng));
         }
         let elapsed = started.elapsed();
         let positions = SAMPLES * batch_size;

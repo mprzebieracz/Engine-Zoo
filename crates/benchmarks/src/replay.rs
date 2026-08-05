@@ -1,7 +1,9 @@
 use crate::harness;
 use crate::report::BenchmarkSample;
 use alphazero::representation::Connect4AzRepresentation;
-use alphazero::{Action, Outcome, ReplayBuffer, ReplaySample, SampleMetadata, TrainingWeights};
+use alphazero::{
+    Action, Outcome, ReplayBuffer, ReplaySample, ReplaySampler, SampleMetadata, TrainingWeights,
+};
 use games::Connect4;
 use rand::{rngs::SmallRng, SeedableRng};
 use serde_json::{json, Value};
@@ -10,6 +12,7 @@ use std::time::Instant;
 pub fn connect4(warmup: &str, samples: usize, config: Value) -> crate::report::BenchmarkReport {
     let replay = ReplayBuffer::new(4_096, 7);
     replay.add((0..4_096).map(sample));
+    let mut sampler = ReplaySampler::new(Connect4AzRepresentation);
 
     harness::measure(
         "replay.connect4.sample",
@@ -19,8 +22,8 @@ pub fn connect4(warmup: &str, samples: usize, config: Value) -> crate::report::B
         || {
             let mut rng = SmallRng::seed_from_u64(1);
             let started = Instant::now();
-            let batch = replay
-                .sample(256, &Connect4AzRepresentation, &mut rng)
+            let batch = sampler
+                .sample(&replay, 256, &mut rng)
                 .expect("prefilled replay has enough samples");
 
             BenchmarkSample {

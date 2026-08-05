@@ -2,7 +2,7 @@ use super::representation::{Action, AlphaZeroRepresentation};
 use engine_core::GameState;
 use rand::{seq::index, Rng};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::sync::{Mutex, RwLock};
+use std::sync::RwLock;
 use tch::Tensor;
 
 const POLICY_EPSILON: f32 = 1e-12;
@@ -291,14 +291,11 @@ pub struct ReplayBatch {
     pub value_weight_sum: f32,
 }
 
-/// A fixed-capacity, compact ring buffer. It deliberately does not know how a
-/// state is encoded; the representation performs that work only for sampled
-/// entries.
+/// A fixed-capacity, compact ring buffer.
 pub struct ReplayBuffer<S> {
     capacity: usize,
     action_size: usize,
     inner: RwLock<Inner<S>>,
-    sample_scratch: Mutex<SampleScratch>,
 }
 
 impl<S> ReplayBuffer<S> {
@@ -311,15 +308,6 @@ impl<S> ReplayBuffer<S> {
                 entries: (0..capacity).map(|_| None).collect(),
                 ptr: 0,
                 len: 0,
-            }),
-            sample_scratch: Mutex::new(SampleScratch {
-                states: Vec::new(),
-                policy_actions: Vec::new(),
-                policy_probabilities: Vec::new(),
-                policy_rows: Vec::new(),
-                policy_weights: Vec::new(),
-                value_weights: Vec::new(),
-                outcomes: Vec::new(),
             }),
         }
     }
@@ -364,26 +352,50 @@ impl<S: Clone> ReplayBuffer<S> {
     }
 }
 
-impl<S: GameState + Clone> ReplayBuffer<S> {
-    pub fn sample<R, Rep>(
-        &self,
+/// Stateful CPU-side replay encoder. Keep one sampler per sampling thread so
+/// its scratch buffers remain reusable without synchronizing the hot path.
+pub struct ReplaySampler<R> {
+    representation: R,
+    scratch: SampleScratch,
+}
+
+impl<R> ReplaySampler<R> {
+    pub fn new(representation: R) -> Self {
+        Self {
+            representation,
+            scratch: SampleScratch {
+                states: Vec::new(),
+                policy_actions: Vec::new(),
+                policy_probabilities: Vec::new(),
+                policy_rows: Vec::new(),
+                policy_weights: Vec::new(),
+                value_weights: Vec::new(),
+                outcomes: Vec::new(),
+            },
+        }
+    }
+}
+
+impl<Rep> ReplaySampler<Rep> {
+    pub fn sample<S, R>(
+        &mut self,
+        replay: &ReplayBuffer<S>,
         batch_size: usize,
-        representation: &Rep,
         rng: &mut R,
     ) -> Option<ReplayBatch>
     where
-        R: Rng + ?Sized,
+        S: GameState,
         Rep: AlphaZeroRepresentation<S>,
+        R: Rng + ?Sized,
     {
-        let inner = self.inner.read().unwrap();
+        let inner = replay.inner.read().unwrap();
         let batch_size = batch_size.min(inner.len);
         if batch_size == 0 {
             return None;
         }
-        let mut scratch = self.sample_scratch.lock().unwrap();
         let state_size = Rep::state_size();
 
-        scratch.prepare(batch_size, state_size);
+        self.scratch.prepare(batch_size, state_size);
 
         let mut offsets = Vec::with_capacity(batch_size + 1);
         offsets.push(0);
@@ -394,28 +406,29 @@ impl<S: GameState + Clone> ReplayBuffer<S> {
         {
             let sample = inner.entries[index].as_ref().expect("filled replay slot");
 
-            scratch.append_sample(sample, row, state_size, representation);
-            offsets.push(scratch.policy_actions.len() as i64);
+            self.scratch
+                .append_sample(sample, row, state_size, &self.representation);
+            offsets.push(self.scratch.policy_actions.len() as i64);
         }
 
         drop(inner);
 
-        let policy_weight_sum = scratch.policy_weights.iter().sum();
-        let value_weight_sum = scratch.value_weights.iter().sum();
+        let policy_weight_sum = self.scratch.policy_weights.iter().sum();
+        let value_weight_sum = self.scratch.value_weights.iter().sum();
 
         Some(ReplayBatch {
-            states: Tensor::from_slice(&scratch.states)
+            states: Tensor::from_slice(&self.scratch.states)
                 .view([batch_size as i64, state_size as i64]),
             policies: SparsePolicyBatch {
-                actions: Tensor::from_slice(&scratch.policy_actions),
-                probabilities: Tensor::from_slice(&scratch.policy_probabilities),
-                rows: Tensor::from_slice(&scratch.policy_rows),
+                actions: Tensor::from_slice(&self.scratch.policy_actions),
+                probabilities: Tensor::from_slice(&self.scratch.policy_probabilities),
+                rows: Tensor::from_slice(&self.scratch.policy_rows),
                 offsets,
             },
-            outcomes: Tensor::from_slice(&scratch.outcomes),
-            policy_weights: Tensor::from_slice(&scratch.policy_weights),
+            outcomes: Tensor::from_slice(&self.scratch.outcomes),
+            policy_weights: Tensor::from_slice(&self.scratch.policy_weights),
             policy_weight_sum,
-            value_weights: Tensor::from_slice(&scratch.value_weights),
+            value_weights: Tensor::from_slice(&self.scratch.value_weights),
             value_weight_sum,
         })
     }
