@@ -53,8 +53,8 @@ pub use selfplay::{
     select_temperature_action, ChessCanonicalSelfPlayDomain, ChessClassicSelfPlayDomain,
     CompletedGame, DomainSelfPlayWorkerFactory, GameRequest, GumbelMoveSelection,
     ResignationConfig, SearchBudget, SearchBudgetSchedule, SelfPlayConfig, SelfPlayCoordinator,
-    SelfPlayDomain, SelfPlayEpoch, SelfPlayStats, SelfPlayWorker, SelfPlayWorkerFactory,
-    StandardSelfPlayDomain, TemperaturePhase, TemperatureSchedule,
+    SelfPlayDomain, SelfPlayEpoch, SelfPlayProgress, SelfPlayStats, SelfPlayWorker,
+    SelfPlayWorkerFactory, StandardSelfPlayDomain, TemperaturePhase, TemperatureSchedule,
 };
 pub use trainer::{
     build_optimizer, train, wdl_cross_entropy, LearningRateSchedule, OptimizerSpec, TrainConfig,

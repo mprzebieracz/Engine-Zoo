@@ -128,7 +128,7 @@ fn run(args: RunArgs) -> Result<()> {
 
     print_startup_summary(&args.run_dir, device, &experiment, &state);
     let mut run = TrainingRun::open(&args.run_dir, device)?;
-    run.run_with_progress(limit, print_training_progress)
+    run.run_with_callbacks(limit, print_self_play_progress, print_training_progress)
 }
 
 fn print_startup_summary(
@@ -212,7 +212,8 @@ fn run_tensor_rt(
             for iteration in 1..=iterations {
                 print_iteration_header(iteration);
                 let iteration_started = Instant::now();
-                let report = training_run.step_with_progress(print_training_progress)?;
+                let report = training_run
+                    .step_with_callbacks(print_self_play_progress, print_training_progress)?;
                 ensure_tensor_rt_recompile_required(&report.next_inference)?;
                 println!("COMPILATION");
                 compile_tensor_rt_generation(&run_dir, &experiment, device, &compiler)?;
@@ -231,7 +232,8 @@ fn run_tensor_rt(
             loop {
                 print_iteration_header(iteration);
                 let iteration_started = Instant::now();
-                let report = training_run.step_with_progress(print_training_progress)?;
+                let report = training_run
+                    .step_with_callbacks(print_self_play_progress, print_training_progress)?;
                 ensure_tensor_rt_recompile_required(&report.next_inference)?;
                 println!("COMPILATION");
                 compile_tensor_rt_generation(&run_dir, &experiment, device, &compiler)?;
@@ -259,6 +261,17 @@ fn print_training_progress(progress: &alphazero::TrainProgress) {
         progress.policy_loss,
         progress.value_loss,
         progress.samples_per_second,
+    );
+}
+
+fn print_self_play_progress(progress: alphazero::SelfPlayProgress) {
+    println!(
+        "self-play progress: {}/{} games, {:.1} games/s, {:.1} positions/s, {:.1} moves/game",
+        progress.games,
+        progress.total_games,
+        progress.games_per_second,
+        progress.positions_per_second,
+        progress.average_moves_per_game,
     );
 }
 

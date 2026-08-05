@@ -12,7 +12,8 @@ use crate::selfplay::{
 };
 use crate::{
     AlphaZeroRepresentation, BatcherStats, ChessHistory, GameKind, Network, ReplayBuffer,
-    ReplaySampler, TrainMetrics, TrainProgress, Trainer, TrainingInvocation, TrainingSeed,
+    ReplaySampler, SelfPlayProgress, TrainMetrics, TrainProgress, Trainer, TrainingInvocation,
+    TrainingSeed,
 };
 use anyhow::{Context, Result};
 use engine_core::GameState;
@@ -175,23 +176,50 @@ impl TrainingRun {
         self.step_with_progress(|_| {})
     }
 
-    pub fn step_with_progress<F>(&mut self, mut progress: F) -> Result<IterationReport>
+    pub fn step_with_progress<F>(&mut self, progress: F) -> Result<IterationReport>
     where
         F: FnMut(&TrainProgress),
     {
-        self.step_with_observer(&mut progress)
+        self.step_with_callbacks(|_| {}, progress)
     }
 
-    fn step_with_observer<F>(&mut self, progress: &mut F) -> Result<IterationReport>
+    pub fn step_with_callbacks<SelfPlayProgressCallback, TrainProgressCallback>(
+        &mut self,
+        mut self_play_progress: SelfPlayProgressCallback,
+        mut train_progress: TrainProgressCallback,
+    ) -> Result<IterationReport>
     where
-        F: FnMut(&TrainProgress),
+        SelfPlayProgressCallback: FnMut(SelfPlayProgress),
+        TrainProgressCallback: FnMut(&TrainProgress),
+    {
+        self.step_with_callback_refs(&mut self_play_progress, &mut train_progress)
+    }
+
+    fn step_with_callback_refs<SelfPlayProgressCallback, TrainProgressCallback>(
+        &mut self,
+        self_play_progress: &mut SelfPlayProgressCallback,
+        train_progress: &mut TrainProgressCallback,
+    ) -> Result<IterationReport>
+    where
+        SelfPlayProgressCallback: FnMut(SelfPlayProgress),
+        TrainProgressCallback: FnMut(&TrainProgress),
     {
         match &mut self.inner {
-            TrainingRunKind::Connect4(run) => run.step_with_progress(progress),
-            TrainingRunKind::ChessClassic(run) => run.step_with_progress(progress),
-            TrainingRunKind::ChessH1(run) => run.step_with_progress(progress),
-            TrainingRunKind::ChessH4(run) => run.step_with_progress(progress),
-            TrainingRunKind::ChessH8(run) => run.step_with_progress(progress),
+            TrainingRunKind::Connect4(run) => {
+                run.step_with_callbacks(self_play_progress, train_progress)
+            }
+            TrainingRunKind::ChessClassic(run) => {
+                run.step_with_callbacks(self_play_progress, train_progress)
+            }
+            TrainingRunKind::ChessH1(run) => {
+                run.step_with_callbacks(self_play_progress, train_progress)
+            }
+            TrainingRunKind::ChessH4(run) => {
+                run.step_with_callbacks(self_play_progress, train_progress)
+            }
+            TrainingRunKind::ChessH8(run) => {
+                run.step_with_callbacks(self_play_progress, train_progress)
+            }
         }
     }
 
@@ -199,18 +227,31 @@ impl TrainingRun {
         self.run_with_progress(limit, |_| {})
     }
 
-    pub fn run_with_progress<F>(&mut self, limit: RunLimit, mut progress: F) -> Result<()>
+    pub fn run_with_progress<F>(&mut self, limit: RunLimit, progress: F) -> Result<()>
     where
         F: FnMut(&TrainProgress),
+    {
+        self.run_with_callbacks(limit, |_| {}, progress)
+    }
+
+    pub fn run_with_callbacks<SelfPlayProgressCallback, TrainProgressCallback>(
+        &mut self,
+        limit: RunLimit,
+        mut self_play_progress: SelfPlayProgressCallback,
+        mut train_progress: TrainProgressCallback,
+    ) -> Result<()>
+    where
+        SelfPlayProgressCallback: FnMut(SelfPlayProgress),
+        TrainProgressCallback: FnMut(&TrainProgress),
     {
         match limit {
             RunLimit::Iterations(iterations) => {
                 for _ in 0..iterations {
-                    self.step_with_observer(&mut progress)?;
+                    self.step_with_callback_refs(&mut self_play_progress, &mut train_progress)?;
                 }
             }
             RunLimit::Forever => loop {
-                self.step_with_observer(&mut progress)?;
+                self.step_with_callback_refs(&mut self_play_progress, &mut train_progress)?;
             },
         }
         Ok(())
@@ -262,14 +303,19 @@ where
     R: AlphaZeroRepresentation<S>,
     F: SelfPlayWorkerFactory<S>,
 {
-    fn step_with_progress<Progress>(&mut self, progress: &mut Progress) -> Result<IterationReport>
+    fn step_with_callbacks<SelfPlayProgressCallback, TrainProgressCallback>(
+        &mut self,
+        self_play_progress: &mut SelfPlayProgressCallback,
+        train_progress: &mut TrainProgressCallback,
+    ) -> Result<IterationReport>
     where
-        Progress: FnMut(&TrainProgress),
+        SelfPlayProgressCallback: FnMut(SelfPlayProgress),
+        TrainProgressCallback: FnMut(&TrainProgress),
     {
         self.ensure_inference_is_current()?;
 
-        let self_play = self.generate_self_play()?;
-        let training = self.train_network(&self_play, progress);
+        let self_play = self.generate_self_play(self_play_progress)?;
+        let training = self.train_network(&self_play, train_progress);
 
         let next_state = self.advance_state(&self_play, training.as_ref());
         let next_state = self.save_checkpoint(next_state)?;
@@ -282,13 +328,17 @@ where
         Ok(report)
     }
 
-    fn generate_self_play(&self) -> Result<SelfPlayStats> {
+    fn generate_self_play<Progress>(&self, progress: &mut Progress) -> Result<SelfPlayStats>
+    where
+        Progress: FnMut(SelfPlayProgress),
+    {
         let epoch = SelfPlayEpoch {
             model_generation: self.state.model_generation,
             first_game_id: self.state.total_games_generated,
         };
 
-        self.self_play.run(&self.workers, &self.replay, epoch)
+        self.self_play
+            .run_with_progress(&self.workers, &self.replay, epoch, progress)
     }
 
     fn train_network<Progress>(
