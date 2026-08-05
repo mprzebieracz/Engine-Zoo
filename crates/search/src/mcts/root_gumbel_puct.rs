@@ -1,5 +1,5 @@
 use super::core::{LeafBatch, MctsCore, PendingLeaf};
-use super::gumbel::{sample_gumbel, softmax, transform_completed_q};
+use super::gumbel::{prepare_transformed_q, sample_gumbel, softmax_into, GumbelScratch};
 use super::puct::puct_child;
 use super::{
     effective_leaf_batch_size, Node, RootAction, RootGumbelPuctConfig, SearchDiagnostics,
@@ -41,6 +41,9 @@ mod tests {
 pub(super) struct RootGumbelPuct {
     pub(super) config: RootGumbelPuctConfig,
     root_actions: Vec<RootAction>,
+    active: Vec<RootAction>,
+    round_candidates: Vec<RoundCandidate>,
+    scratch: GumbelScratch,
 }
 
 /// A root action and the completed-visit target assigned for the current
@@ -59,6 +62,9 @@ impl From<RootGumbelPuctConfig> for RootGumbelPuct {
         Self {
             config,
             root_actions: Vec::new(),
+            active: Vec::new(),
+            round_candidates: Vec::new(),
+            scratch: GumbelScratch::default(),
         }
     }
 }
@@ -121,7 +127,9 @@ where
             evaluation_cache_misses: root_stats.backend_evaluations,
             ..SearchDiagnostics::default()
         };
-        let mut active = self.variant.root_actions.clone();
+        let mut active = std::mem::take(&mut self.variant.active);
+        active.clear();
+        active.extend_from_slice(&self.variant.root_actions);
         let mut allocated = 0usize;
         let leaf_batch_size =
             effective_leaf_batch_size(self.variant.config.leaf_batch_size, simulations);
@@ -130,20 +138,28 @@ where
         while allocated < simulations {
             let round_visits =
                 sequential_halving_round_visits(simulations - allocated, active.len());
-            let candidates = self.round_candidates(&active, round_visits);
+            self.prepare_round_candidates(&active, round_visits);
 
-            while candidates.iter().any(|candidate| {
+            while self.variant.round_candidates.iter().any(|candidate| {
                 self.nodes[candidate.action.node as usize].completed_visits
                     < candidate.target_visits
             }) {
                 // Completed visits and Q values cannot change until this local batch
                 // is evaluated and backed up. Only selection visits change while
                 // leaves are collected, so reuse the transformed root Q values.
-                let transformed_q = self.child_transformed_q(0);
+                prepare_transformed_q(
+                    &self.nodes,
+                    0,
+                    self.variant.config.root.completed_q,
+                    &mut self.variant.scratch,
+                );
 
                 batch.leaves.clear();
                 while batch.leaves.len() < leaf_batch_size {
-                    let Some(root_child) = self.best_round_action(&candidates, &transformed_q)
+                    let Some(root_child) = self.best_round_action(
+                        &self.variant.round_candidates,
+                        &self.variant.scratch.transformed_q,
+                    )
                     else {
                         break;
                     };
@@ -164,7 +180,7 @@ where
 
             allocated += round_visits;
             if active.len() > 1 && allocated < simulations {
-                active = self.round_survivors(active);
+                self.retain_round_survivors(&mut active);
             }
         }
 
@@ -175,6 +191,7 @@ where
         let policy = self.root_improved_policy();
         let root_value = self.nodes[0].completed_q().unwrap_or(root_value);
         diagnostics.nodes_created = self.nodes.len();
+        self.variant.active = active;
 
         Ok(SearchResult {
             policy,
@@ -185,14 +202,16 @@ where
     }
 
     fn init_root_actions(&mut self, simulations: usize, max_considered_actions: usize) {
-        self.variant.root_actions = self
-            .child_indices(0)
-            .map(|node| RootAction {
+        self.variant.root_actions.clear();
+        let root = &self.nodes[0];
+        let children = root.first_child..root.first_child + u32::from(root.num_children);
+        for node in children {
+            self.variant.root_actions.push(RootAction {
                 node,
                 gumbel_logit: self.nodes[node as usize].logit
                     + self.variant.config.root.gumbel_scale * sample_gumbel(&mut self.rng),
-            })
-            .collect();
+            });
+        }
         self.variant
             .root_actions
             .sort_unstable_by(|left, right| right.gumbel_logit.total_cmp(&left.gumbel_logit));
@@ -221,32 +240,32 @@ where
             .map(|candidate| candidate.action.node)
     }
 
-    fn round_survivors(&self, mut active: Vec<RootAction>) -> Vec<RootAction> {
-        let transformed_q = self.child_transformed_q(0);
+    fn retain_round_survivors(&mut self, active: &mut Vec<RootAction>) {
+        prepare_transformed_q(
+            &self.nodes,
+            0,
+            self.variant.config.root.completed_q,
+            &mut self.variant.scratch,
+        );
         active.sort_unstable_by(|left, right| {
-            self.root_score(*right, &transformed_q)
-                .total_cmp(&self.root_score(*left, &transformed_q))
+            self.root_score(*right, &self.variant.scratch.transformed_q)
+                .total_cmp(&self.root_score(*left, &self.variant.scratch.transformed_q))
         });
         active.truncate((active.len() / 2).max(1));
-        active
     }
 
-    fn round_candidates(&self, active: &[RootAction], round_visits: usize) -> Vec<RoundCandidate> {
+    fn prepare_round_candidates(&mut self, active: &[RootAction], round_visits: usize) {
         let base = round_visits / active.len();
         let remainder = round_visits % active.len();
-        active
-            .iter()
-            .enumerate()
-            .map(|(index, action)| {
-                let target = self.nodes[action.node as usize].completed_visits
-                    + (base + usize::from(index < remainder)) as u32;
-
-                RoundCandidate {
-                    action: *action,
-                    target_visits: target,
-                }
-            })
-            .collect()
+        self.variant.round_candidates.clear();
+        for (index, action) in active.iter().enumerate() {
+            let target = self.nodes[action.node as usize].completed_visits
+                + (base + usize::from(index < remainder)) as u32;
+            self.variant.round_candidates.push(RoundCandidate {
+                action: *action,
+                target_visits: target,
+            });
+        }
     }
 
     fn root_score(&self, action: RootAction, transformed_q: &[f32]) -> f32 {
@@ -254,8 +273,13 @@ where
         action.gumbel_logit + transformed_q[index]
     }
 
-    fn select_root_winner(&self) -> u32 {
-        let transformed_q = self.child_transformed_q(0);
+    fn select_root_winner(&mut self) -> u32 {
+        prepare_transformed_q(
+            &self.nodes,
+            0,
+            self.variant.config.root.completed_q,
+            &mut self.variant.scratch,
+        );
         let visits = self
             .variant
             .root_actions
@@ -268,48 +292,35 @@ where
             .iter()
             .filter(|action| self.nodes[action.node as usize].completed_visits == visits)
             .max_by(|left, right| {
-                self.root_score(**left, &transformed_q)
-                    .total_cmp(&self.root_score(**right, &transformed_q))
+                self.root_score(**left, &self.variant.scratch.transformed_q)
+                    .total_cmp(&self.root_score(**right, &self.variant.scratch.transformed_q))
             })
             .expect("root candidate at maximum visits")
             .node
     }
 
-    fn child_transformed_q(&self, node: u32) -> Vec<f32> {
-        let q_values = self
-            .child_indices(node)
-            .map(|child| {
-                self.nodes[child as usize]
-                    .completed_q()
-                    .map(PositionValue::flipped)
-            })
-            .collect::<Vec<_>>();
-        let visits = self
-            .child_indices(node)
-            .map(|child| self.nodes[child as usize].completed_visits)
-            .collect::<Vec<_>>();
-        let priors = self
-            .child_indices(node)
-            .map(|child| self.nodes[child as usize].prior)
-            .collect::<Vec<_>>();
-        transform_completed_q(
-            self.nodes[node as usize].raw_value,
-            &q_values,
-            &visits,
-            &priors,
+    fn root_improved_policy(&mut self) -> Vec<(G::Move, f32)> {
+        prepare_transformed_q(
+            &self.nodes,
+            0,
             self.variant.config.root.completed_q,
-        )
-    }
-
-    fn root_improved_policy(&self) -> Vec<(G::Move, f32)> {
-        let transformed_q = self.child_transformed_q(0);
-        let logits = self
-            .child_indices(0)
-            .enumerate()
-            .map(|(index, child)| self.nodes[child as usize].logit + transformed_q[index])
-            .collect::<Vec<_>>();
+            &mut self.variant.scratch,
+        );
+        self.variant.scratch.logits.clear();
+        let root = &self.nodes[0];
+        let children = root.first_child..root.first_child + u32::from(root.num_children);
+        for (index, child) in children.enumerate() {
+            self.variant
+                .scratch
+                .logits
+                .push(self.nodes[child as usize].logit + self.variant.scratch.transformed_q[index]);
+        }
+        softmax_into(
+            &self.variant.scratch.logits,
+            &mut self.variant.scratch.probabilities,
+        );
         self.child_indices(0)
-            .zip(softmax(&logits))
+            .zip(self.variant.scratch.probabilities.iter().copied())
             .map(|(child, probability)| {
                 (
                     self.nodes[child as usize]

@@ -60,6 +60,24 @@ pub enum NextInference {
     },
 }
 
+#[derive(Clone, Copy)]
+struct IterationFacts {
+    games: usize,
+    trained_steps: usize,
+    replay_samples: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InferenceRefreshPlan {
+    ReloadNative {
+        checkpoint: PathBuf,
+    },
+    RequireTensorRtRecompile {
+        checkpoint: PathBuf,
+        compiled_artifact: PathBuf,
+    },
+}
+
 /// Runtime-dispatched training run. Its inner variants keep search and replay
 /// code statically dispatched for each representation.
 pub struct TrainingRun {
@@ -319,7 +337,8 @@ where
 
         let next_state = self.advance_state(&self_play, training.as_ref());
         let next_state = self.save_checkpoint(next_state)?;
-        let next_inference = self.update_inference_after_checkpoint()?;
+        let refresh_plan = self.plan_inference_refresh()?;
+        let next_inference = self.execute_inference_refresh(refresh_plan)?;
 
         self.state = next_state;
         let report = self.build_report(self_play, training, next_inference);
@@ -370,15 +389,14 @@ where
         self_play: &SelfPlayStats,
         training: Option<&TrainMetrics>,
     ) -> RunState {
-        let mut state = self.state.clone();
-        state.total_games_generated += self_play.games as u64;
-        state.iteration += 1;
-        state.model_generation += 1;
-        state.global_step += training.map_or(0, |metrics| metrics.train_steps as u64);
-        state.replay_sample_count = self.replay.len();
-        state.optimizer_moments_restored = false;
-
-        state
+        advance_run_state(
+            &self.state,
+            IterationFacts {
+                games: self_play.games,
+                trained_steps: training.map_or(0, |metrics| metrics.train_steps),
+                replay_samples: self.replay.len(),
+            },
+        )
     }
 
     fn save_checkpoint(&self, mut state: RunState) -> Result<RunState> {
@@ -408,22 +426,40 @@ where
         Ok(())
     }
 
-    fn update_inference_after_checkpoint(&mut self) -> Result<NextInference> {
-        if self.experiment.inference.engine == InferenceEngine::Native {
-            self.inference
-                .reload_weights(&self.run_dir.latest_path())
-                .map_err(anyhow::Error::msg)?;
+    fn plan_inference_refresh(&self) -> Result<InferenceRefreshPlan> {
+        let compiled_artifact = (self.experiment.inference.engine != InferenceEngine::Native)
+            .then(|| compiled_artifact_path(&self.run_dir, &self.experiment))
+            .transpose()?;
 
-            return Ok(NextInference::NativeReloaded);
+        Ok(plan_inference_refresh(
+            self.experiment.inference.engine,
+            self.run_dir.latest_path(),
+            compiled_artifact,
+        ))
+    }
+
+    fn execute_inference_refresh(&mut self, plan: InferenceRefreshPlan) -> Result<NextInference> {
+        match plan {
+            InferenceRefreshPlan::ReloadNative { checkpoint } => {
+                self.inference
+                    .reload_weights(&checkpoint)
+                    .map_err(anyhow::Error::msg)?;
+
+                Ok(NextInference::NativeReloaded)
+            }
+            InferenceRefreshPlan::RequireTensorRtRecompile {
+                checkpoint,
+                compiled_artifact,
+            } => {
+                let requirement = NextInference::TensorRtRecompileRequired {
+                    checkpoint,
+                    compiled_artifact,
+                };
+                self.pending_tensor_rt_recompile = Some(requirement.clone());
+
+                Ok(requirement)
+            }
         }
-
-        let requirement = NextInference::TensorRtRecompileRequired {
-            checkpoint: self.run_dir.latest_path(),
-            compiled_artifact: compiled_artifact_path(&self.run_dir, &self.experiment)?,
-        };
-        self.pending_tensor_rt_recompile = Some(requirement.clone());
-
-        Ok(requirement)
     }
 
     fn reload_tensor_rt_inference(&mut self) -> Result<()> {
@@ -484,6 +520,35 @@ where
             "inference": report.inference,
             "next_inference": &report.next_inference,
         }))
+    }
+}
+
+fn advance_run_state(state: &RunState, facts: IterationFacts) -> RunState {
+    let mut next = state.clone();
+    next.total_games_generated += facts.games as u64;
+    next.iteration += 1;
+    next.model_generation += 1;
+    next.global_step += facts.trained_steps as u64;
+    next.replay_sample_count = facts.replay_samples;
+    next.optimizer_moments_restored = false;
+
+    next
+}
+
+fn plan_inference_refresh(
+    engine: InferenceEngine,
+    checkpoint: PathBuf,
+    compiled_artifact: Option<PathBuf>,
+) -> InferenceRefreshPlan {
+    match engine {
+        InferenceEngine::Native => InferenceRefreshPlan::ReloadNative { checkpoint },
+        InferenceEngine::TensorRtTorchScript | InferenceEngine::TensorRtRaw => {
+            InferenceRefreshPlan::RequireTensorRtRecompile {
+                checkpoint,
+                compiled_artifact: compiled_artifact
+                    .expect("TensorRT refresh planning requires a compiled artifact path"),
+            }
+        }
     }
 }
 
@@ -765,6 +830,92 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::experiment::{CheckpointIdentity, ResumeKind, STATE_FORMAT_VERSION};
+
+    fn populated_state() -> RunState {
+        RunState {
+            format_version: STATE_FORMAT_VERSION,
+            iteration: 4,
+            model_generation: 7,
+            global_step: 11,
+            total_games_generated: 13,
+            checkpoint_identity: Some(CheckpointIdentity {
+                generation: 7,
+                relative_path: "checkpoints/latest.safetensors".into(),
+                sha256: "abc".into(),
+            }),
+            replay_sample_count: 17,
+            optimizer_moments_restored: true,
+            resume_kind: ResumeKind::Full,
+        }
+    }
+
+    #[test]
+    fn advancing_run_state_updates_iteration_facts_and_preserves_durable_fields() {
+        let state = populated_state();
+        let next = advance_run_state(
+            &state,
+            IterationFacts {
+                games: 3,
+                trained_steps: 5,
+                replay_samples: 19,
+            },
+        );
+
+        assert_eq!(next.iteration, 5);
+        assert_eq!(next.model_generation, 8);
+        assert_eq!(next.global_step, 16);
+        assert_eq!(next.total_games_generated, 16);
+        assert_eq!(next.replay_sample_count, 19);
+        assert!(!next.optimizer_moments_restored);
+        assert_eq!(next.format_version, state.format_version);
+        assert_eq!(next.checkpoint_identity, state.checkpoint_identity);
+        assert_eq!(next.resume_kind, state.resume_kind);
+    }
+
+    #[test]
+    fn advancing_run_state_without_training_keeps_global_step() {
+        let state = populated_state();
+        let next = advance_run_state(
+            &state,
+            IterationFacts {
+                games: 2,
+                trained_steps: 0,
+                replay_samples: 23,
+            },
+        );
+
+        assert_eq!(next.global_step, state.global_step);
+    }
+
+    #[test]
+    fn native_refresh_plan_reloads_the_checkpoint() {
+        assert_eq!(
+            plan_inference_refresh(
+                InferenceEngine::Native,
+                PathBuf::from("checkpoints/latest.safetensors"),
+                None,
+            ),
+            InferenceRefreshPlan::ReloadNative {
+                checkpoint: PathBuf::from("checkpoints/latest.safetensors"),
+            }
+        );
+    }
+
+    #[test]
+    fn tensor_rt_refresh_plan_keeps_exact_paths() {
+        assert_eq!(
+            plan_inference_refresh(
+                InferenceEngine::TensorRtRaw,
+                PathBuf::from("checkpoints/latest.safetensors"),
+                Some(PathBuf::from("artifacts/model.plan")),
+            ),
+            InferenceRefreshPlan::RequireTensorRtRecompile {
+                checkpoint: PathBuf::from("checkpoints/latest.safetensors"),
+                compiled_artifact: PathBuf::from("artifacts/model.plan"),
+            }
+        );
+    }
 
     #[test]
     fn tensor_rt_requirement_identifies_the_checkpoint_and_module() {
