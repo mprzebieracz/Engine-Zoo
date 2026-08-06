@@ -79,7 +79,72 @@ def _tensor_rt_site_lib(python: Path) -> Path:
     return Path(result.stdout.strip())
 
 
-def _tensor_rt_runtime_environment(python: Path) -> dict[str, str]:
+def _raw_tensor_rt_runtime_environment(python: Path) -> dict[str, str]:
+    """Linker env for the raw TensorRT path (`train run --cache`).
+
+    Needs libnvinfer from the TensorRT 10.x wheel and LibTorch, but must not
+    preload libtorchtrt.so (that is only for Torch-TensorRT TorchScript).
+    """
+
+    environment = os.environ.copy()
+    library_paths: list[str] = []
+
+    libtorch = _libtorch_root()
+    if libtorch is not None:
+        libtorch_lib = libtorch / "lib"
+        if libtorch_lib.is_dir():
+            library_paths.append(str(libtorch_lib))
+
+    # Prefer the pip TensorRT 10.x libs that match the vendored headers / FP16
+    # builder used by scripts/compile_tensorrt_raw.py.
+    query = (
+        "from pathlib import Path; import tensorrt, importlib.util; "
+        "spec = importlib.util.find_spec('tensorrt_libs') or "
+        "importlib.util.find_spec('tensorrt'); "
+        "root = Path(next(iter(spec.submodule_search_locations))); "
+        "libs = root if (root / 'libnvinfer.so.10').exists() else root.parent / 'tensorrt_libs'; "
+        "print(libs)"
+    )
+    probed = subprocess.run(
+        [str(python), "-c", query],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    nvidia_lib = Path(probed.stdout.strip()) if probed.returncode == 0 else Path()
+    if not nvidia_lib.is_dir():
+        nvidia_lib = (
+            Path.home()
+            / "venvs/engine-zoo-trt-py313/lib/python3.13/site-packages/tensorrt_libs"
+        )
+    if nvidia_lib.is_dir():
+        library_paths.append(str(nvidia_lib))
+
+    library_paths.extend(
+        [
+            "/opt/cuda/targets/x86_64-linux/lib",
+            "/opt/cuda/lib64",
+            "/usr/lib",
+        ]
+    )
+    if existing := environment.get("LD_LIBRARY_PATH"):
+        library_paths.append(existing)
+    environment["LD_LIBRARY_PATH"] = ":".join(library_paths)
+    environment.pop("LD_PRELOAD", None)
+    environment["TENSORRT_PREFER_SYSTEM_BUILDER"] = "0"
+    environment.pop("TENSORRT_BUILD_PYTHON", None)
+    environment.setdefault("PYTHONWARNINGS", "ignore::DeprecationWarning")
+    return environment
+
+
+def _tensor_rt_runtime_environment(python: Path, *, cache: bool) -> dict[str, str]:
+    if cache:
+        return _raw_tensor_rt_runtime_environment(python)
+    return _torch_tensor_rt_runtime_environment(python)
+
+
+def _torch_tensor_rt_runtime_environment(python: Path) -> dict[str, str]:
     """Prepare the linker environment for Torch-TensorRT module loads."""
 
     trt_lib = _tensor_rt_site_lib(python)
@@ -244,6 +309,16 @@ def main() -> int:
         help="Checkpoint copied into a newly initialized run before the first compile",
     )
     parser.add_argument(
+        "--cache",
+        action="store_true",
+        help=(
+            "Continue the run with the raw TensorRT backend and a persistent "
+            "builder timing cache (train run --cache). Does not rewrite "
+            "experiment.toml; compiles model.raw.engine and stores timings in "
+            "<run-dir>/tensorrt-timing.cache."
+        ),
+    )
+    parser.add_argument(
         "--tensor-rt-python",
         type=Path,
         help="Python executable in the matching Torch-TensorRT environment",
@@ -251,7 +326,7 @@ def main() -> int:
     parser.add_argument(
         "--tensor-rt-compiler",
         type=Path,
-        help="Optional TensorRT compiler script; defaults to scripts/compile_tensorrt.py",
+        help="Optional TensorRT compiler script; defaults depend on --cache",
     )
     parser.add_argument(
         "--tensor-rt-min-batch-size",
@@ -275,9 +350,9 @@ def main() -> int:
         "--tensor-rt-timing-cache",
         type=Path,
         help=(
-            "Experimental TensorRT builder timing-cache path. "
-            "The current TorchScript frontend rejects it safely because it "
-            "cannot serialize a compatible cached build."
+            "Builder timing-cache path. With --cache, defaults to "
+            "<run-dir>/tensorrt-timing.cache. Without --cache, the TorchScript "
+            "frontend rejects this flag."
         ),
     )
     args = parser.parse_args()
@@ -293,25 +368,27 @@ def main() -> int:
     if not 0 < args.tensor_rt_min_batch_size <= args.tensor_rt_opt_batch_size <= args.tensor_rt_max_batch_size:
         parser.error("TensorRT batch sizes must satisfy 0 < min <= opt <= max")
 
-    environment = _tensor_rt_runtime_environment(args.tensor_rt_python)
+    environment = _tensor_rt_runtime_environment(args.tensor_rt_python, cache=args.cache)
     subprocess.run(
         ["cargo", "build", "--release", "-p", "engine_app", "--bin", "train"],
         cwd=ROOT,
         check=True,
         env=environment,
     )
-    binary = ROOT / "target/release/train"
+    binary = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "release" / "train"
+    if not binary.is_file():
+        binary = ROOT / "target/release/train"
 
     experiment_path = args.run_dir / "experiment.toml"
     if not experiment_path.exists():
         subprocess.run(
             [
-                binary,
+                str(binary),
                 "init",
                 "--experiment",
-                args.experiment,
+                str(args.experiment),
                 "--run-dir",
-                args.run_dir,
+                str(args.run_dir),
             ],
             cwd=ROOT,
             check=True,
@@ -319,10 +396,16 @@ def main() -> int:
         )
         _seed_checkpoint(args.run_dir, args.seed_checkpoint)
 
+    backend = (
+        "raw-tensorrt + timing-cache (--cache)"
+        if args.cache
+        else "tensor-rt-torch-script"
+    )
     print(
         "TensorRT defaults: "
         f"experiment={args.experiment} "
-        f"engine=tensor-rt-torch-script; "
+        f"run_dir={args.run_dir} "
+        f"backend={backend}; "
         f"compile min={args.tensor_rt_min_batch_size} "
         f"opt={args.tensor_rt_opt_batch_size} "
         f"max={args.tensor_rt_max_batch_size}"
@@ -345,6 +428,8 @@ def main() -> int:
         "--tensor-rt-max-batch-size",
         str(args.tensor_rt_max_batch_size),
     ]
+    if args.cache:
+        command.append("--cache")
     if args.tensor_rt_compiler is not None:
         command.extend(["--tensor-rt-compiler", args.tensor_rt_compiler])
     if args.tensor_rt_timing_cache is not None:

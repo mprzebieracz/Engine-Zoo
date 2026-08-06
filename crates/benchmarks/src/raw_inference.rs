@@ -56,8 +56,18 @@ pub fn chess_h4(args: &RawInferenceArgs) -> Result<BenchmarkReport> {
 
     let native = NativeFp16::load(&experiment.model, &args.checkpoint, device)?;
     let tensor_rt = TensorRt::load(&args.tensor_rt_module, device)?;
+    #[cfg(feature = "raw-tensorrt")]
+    let raw_tensor_rt = args
+        .raw_tensor_rt_engine
+        .as_deref()
+        .map(|path| alphazero::RawTensorRtBackend::new(experiment.model.clone(), path, device))
+        .transpose()
+        .context("loading raw TensorRT engine")?;
     let [channels, height, width] = experiment.model.state_shape();
-    let mut reports = Vec::with_capacity(args.batch_sizes.len() * 3);
+    let mut reports = Vec::with_capacity(args.batch_sizes.len() * 4);
+
+    #[cfg(feature = "raw-tensorrt")]
+    let mut raw_tensor_rt = raw_tensor_rt;
 
     for &batch_size in &args.batch_sizes {
         anyhow::ensure!(batch_size > 0, "batch sizes must be positive");
@@ -88,6 +98,17 @@ pub fn chess_h4(args: &RawInferenceArgs) -> Result<BenchmarkReport> {
             args.samples,
             batch_size,
         )?);
+        #[cfg(feature = "raw-tensorrt")]
+        if let Some(backend) = raw_tensor_rt.as_mut() {
+            reports.push(raw_tensor_rt_report(
+                backend,
+                batch_size,
+                &experiment.model,
+                args.warmup,
+                args.samples,
+                device,
+            )?);
+        }
     }
 
     harness::combine("raw-inference.chess-h4", reports)
@@ -233,6 +254,45 @@ fn tensor_rt_report(
             let outputs = tch::no_grad(|| tensor_rt.forward(host_states))
                 .expect("validated TensorRT module remains executable");
             device::synchronize(tensor_rt.device);
+            let _ = std::hint::black_box(outputs);
+            started.elapsed().as_nanos()
+        },
+    )
+}
+
+#[cfg(feature = "raw-tensorrt")]
+#[allow(clippy::too_many_arguments)]
+fn raw_tensor_rt_report(
+    backend: &mut alphazero::RawTensorRtBackend,
+    batch_size: usize,
+    spec: &ModelSpec,
+    warmup: usize,
+    samples: usize,
+    device: Device,
+) -> Result<BenchmarkReport> {
+    let [channels, height, width] = spec.state_shape();
+    let host_states = host_states(batch_size, channels, height, width, device);
+
+    // Baked into a closure so `measure_forward`'s `FnMut` bound is satisfied
+    // without re-borrowing `backend` at the call site each iteration.
+    measure_forward(
+        "raw-inference.chess-h4.raw-tensor-rt-fp32",
+        warmup,
+        samples,
+        batch_size,
+        json!({
+            "backend": "raw-tensor-rt",
+            "precision": "fp32-io",
+            "host_staging": "fp32-host-staging",
+            "cuda_memory": "unsupported-by-tch-public-api",
+        }),
+        || {
+            device::synchronize(device);
+            let started = Instant::now();
+            let outputs = backend
+                .forward(&host_states)
+                .expect("validated raw TensorRT engine remains executable");
+            device::synchronize(device);
             let _ = std::hint::black_box(outputs);
             started.elapsed().as_nanos()
         },
